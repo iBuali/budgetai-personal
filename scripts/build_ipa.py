@@ -75,7 +75,7 @@ def main():
     if info.get('MinimumOSVersion') != '18.0':
         raise RuntimeError('Unexpected minimum iOS version')
     executable = app / info['CFBundleExecutable']
-    run(['xcrun', 'lipo', '-verify_arch', 'arm64', executable], 'architecture.txt')
+    run(['xcrun', 'lipo', executable, '-verify_arch', 'arm64'], 'architecture.txt')
     run(['xcrun', 'vtool', '-show-build', executable], 'macho-platform.txt')
     # A successful archive should already be unsigned. Never ship a provisioning profile.
     if (app / 'embedded.mobileprovision').exists():
