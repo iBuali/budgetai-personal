@@ -1,0 +1,51 @@
+name: Build BudgetAI IPA (unsigned)
+
+on:
+  workflow_dispatch:
+    inputs:
+      bundle_id:
+        description: Stable personal bundle ID (keep unchanged for later updates)
+        required: true
+        default: com.personal.budgetai.h6klv4u0xbpkhe31v9hk0
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: budgetai-personal-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      BUNDLE_ID: ${{ inputs.bundle_id }}
+      PYTHONUNBUFFERED: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check source and build unsigned iPhone archive
+        run: python3 scripts/build_ipa.py
+      - name: Upload verified unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: BudgetAI-unsigned-IPA
+          path: |
+            build/output/BudgetAI-unsigned.ipa
+            build/output/SHA256SUMS.txt
+            build/output/build-info.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Upload build diagnostics (including failures)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: BudgetAI-build-diagnostics
+          path: |
+            build/logs/
+            build/Archive.xcresult/
+          if-no-files-found: warn
+          retention-days: 7
