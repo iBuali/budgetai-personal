@@ -51,12 +51,12 @@ struct BudgetsView: View {
                         Picker("Month", selection: $monthOffset) {
                             ForEach(0..<6, id: \.self) { i in
                                 let d = Calendar.current.date(byAdding: .month, value: -i, to: .now) ?? .now
-                                Text(d.formatted(.dateTime.month(.wide).year())).tag(i)
+                                Text(Cycle.startDay == 1 ? d.formatted(.dateTime.month(.wide).year()) : Cycle.label(Cycle.interval(containing: d))).tag(i)
                             }
                         }
                     } label: {
                         HStack(spacing: 4) {
-                            Text(selectedMonth.formatted(.dateTime.month(.abbreviated).year()))
+                            Text(Cycle.label(Cycle.interval(containing: selectedMonth), short: true))
                             Image(systemName: "chevron.down").font(.caption.weight(.bold))
                         }
                         .font(.subheadline.weight(.medium))
@@ -85,7 +85,7 @@ struct BudgetsView: View {
             }
             .frame(width: 120, height: 120)
             VStack(alignment: .leading, spacing: 4) {
-                Text(selectedMonth.formatted(.dateTime.month(.wide))).font(.subheadline).foregroundStyle(Theme.secondaryInk)
+                Text(Cycle.label(interval)).font(.subheadline).foregroundStyle(Theme.secondaryInk)
                 Text(Money.format(spent, currency))
                     .font(.title.bold().monospacedDigit())
                     .foregroundStyle(Theme.ink)

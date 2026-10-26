@@ -52,7 +52,7 @@ struct Finance {
 
     init(transactions: [MoneyTransaction], accounts: [Account], budgets: [Budget] = [],
          goals: [SavingsGoal] = [], bills: [Bill] = [], now: Date = .now) {
-        self.transactions = transactions
+        self.transactions = transactions.filter { !$0.isPending }
         self.accounts = accounts
         self.budgets = budgets
         self.goals = goals
@@ -69,8 +69,9 @@ struct Finance {
 
     // MARK: Periods
 
+    /// Budget cycle containing `date` (custom start day aware).
     func monthInterval(_ date: Date) -> DateInterval {
-        cal.dateInterval(of: .month, for: date) ?? DateInterval(start: date, duration: 86_400 * 30)
+        Cycle.interval(containing: date)
     }
 
     var thisMonth: DateInterval { monthInterval(now) }
@@ -83,7 +84,7 @@ struct Finance {
     }
 
     func income(in interval: DateInterval) -> Double {
-        transactions(in: interval).filter { $0.isIncome && $0.category != .transfers }.reduce(0) { $0 + $1.amount }
+        transactions(in: interval).filter { $0.isIncome && !$0.isTransfer }.reduce(0) { $0 + $1.amount }
     }
 
     func expenses(in interval: DateInterval) -> Double {
@@ -91,7 +92,7 @@ struct Finance {
     }
 
     func spent(_ category: SpendCategory, in interval: DateInterval) -> Double {
-        transactions(in: interval).filter { $0.isSpending && $0.category == category }.reduce(0) { $0 + $1.amount }
+        transactions(in: interval).filter { $0.isSpending && ($0.category == category || $0.subcategory == category) }.reduce(0) { $0 + $1.amount }
     }
 
     var monthIncome: Double { income(in: thisMonth) }
@@ -160,16 +161,18 @@ struct Finance {
     /// Liquid balance per day this month, plus a dashed projection to month end.
     func balanceSeries() -> (actual: [ChartPoint], projected: [ChartPoint]) {
         let liquidIDs = Set(accounts.filter { $0.kind.isLiquid }.map(\.id))
-        let relevant = transactions.filter { tx in
-            guard let id = tx.accountID else { return true }
-            return liquidIDs.contains(id)
+        func liquidEffect(_ tx: MoneyTransaction) -> Double {
+            var effect = 0.0
+            if let id = tx.accountID { if liquidIDs.contains(id) { effect += tx.signedAmount } } else if !tx.isTransfer { effect += tx.signedAmount }
+            if let to = tx.toAccountID, liquidIDs.contains(to) { effect += tx.amount }
+            return effect
         }
         let today = cal.startOfDay(for: now)
         var actual: [ChartPoint] = []
         var day = thisMonth.start
         while day <= today {
             guard let next = cal.date(byAdding: .day, value: 1, to: day) else { break }
-            let after = relevant.filter { $0.date >= next && $0.date <= now }.reduce(0) { $0 + $1.signedAmount }
+            let after = transactions.filter { $0.date >= next && $0.date <= now }.reduce(0) { $0 + liquidEffect($1) }
             actual.append(ChartPoint(date: day, value: liquidBalance - after))
             day = next
         }

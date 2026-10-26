@@ -48,8 +48,8 @@ enum AIService {
         lines.append("Forecast end-of-month spendable balance: \(m(f.forecastEndOfMonth)). Projected savings this month: \(m(f.projectedSavings)).")
         let recurring = f.recurringCandidates().map { "\($0.name) ~\(m($0.amount))" }.joined(separator: ", ")
         if !recurring.isEmpty { lines.append("Untracked recurring payments detected: \(recurring).") }
-        let recent = transactions.sorted { $0.date > $1.date }.prefix(40).map {
-            "\(df.string(from: $0.date)) \($0.merchant) \($0.isIncome ? "+" : "-")\(Money.number($0.amount, decimals: Money.digits(code))) [\($0.category.title)]"
+        let recent = transactions.filter { !$0.isPending }.sorted { $0.date > $1.date }.prefix(40).map {
+            "\(df.string(from: $0.date)) \($0.merchant) \($0.isIncome ? "+" : "-")\(Money.number($0.amount, decimals: Money.digits(code))) [\($0.displayCategory.title)]"
         }
         lines.append("Recent transactions:\n" + recent.joined(separator: "\n"))
         return lines.joined(separator: "\n")
@@ -60,6 +60,7 @@ enum AIService {
     static func parseSMS(_ text: String) async throws -> ParsedSMS? {
         let client = try GeminiAccount.client()
         let categories = SpendCategory.allCases.map(\.rawValue)
+        let names = SpendCategory.allCases.map { "\($0.rawValue) (\($0.title))" }.joined(separator: ", ")
         let schema: [String: Any] = [
             "type": "OBJECT",
             "properties": [
@@ -71,6 +72,8 @@ enum AIService {
                 "category": ["type": "STRING", "enum": categories],
                 "date": ["type": "STRING", "nullable": true],
                 "bank": ["type": "STRING", "nullable": true],
+                "cardLast4": ["type": "STRING", "nullable": true],
+                "availableBalance": ["type": "NUMBER", "nullable": true],
             ],
             "required": ["isTransaction", "amount", "isIncome", "merchant", "category"],
         ]
@@ -78,15 +81,17 @@ enum AIService {
         You read bank SMS alerts from Bahrain and the GCC (English or Arabic) and extract one transaction.
         isTransaction=false for OTPs, promotions, or balance-only messages. merchant is a short clean brand name \
         (e.g. "Lulu Hypermarket", "Talabat"); for incoming money use the sender or "Salary". \
-        category must be one of: \(categories.joined(separator: ", ")). Income uses "income". \
-        date as yyyy-MM-dd if present. bank is the bank name if present (NBB, BBK, KFH, BisB, ...).
+        category must be one of these keys: \(names). Income uses "income". \
+        date as yyyy-MM-dd if present. bank is the bank name if present (NBB, BBK, KFH, BisB, ...). \
+        cardLast4 is the last digits of the card or account if shown. availableBalance is the remaining/available \
+        account balance stated in the message (not the transaction amount), or null.
         """
         let reply = try await client.generate(system: system, turns: [GeminiTurn(isUser: true, text: text)], schema: schema, temperature: 0.1)
         let obj = try GeminiClient.decodeObject(reply)
         guard (obj["isTransaction"] as? Bool) == true, let amount = (obj["amount"] as? NSNumber)?.doubleValue, amount > 0 else { return nil }
         let isIncome = obj["isIncome"] as? Bool ?? false
         var category = SpendCategory(rawValue: obj["category"] as? String ?? "") ?? .other
-        if isIncome && category != .transfers { category = .income }
+        if isIncome && category != .transfers && !category.isIncomeCategory { category = .income }
         var date: Date?
         if let ds = obj["date"] as? String {
             let df = DateFormatter()
@@ -98,7 +103,9 @@ enum AIService {
         let merchant = (obj["merchant"] as? String)?.trimmingCharacters(in: .whitespaces)
         return ParsedSMS(amount: amount, currency: obj["currency"] as? String, isIncome: isIncome,
                          merchant: (merchant?.isEmpty == false ? merchant! : (isIncome ? "Incoming transfer" : "Card purchase")),
-                         category: category, date: date, accountHint: obj["bank"] as? String)
+                         category: category, date: date, accountHint: obj["bank"] as? String,
+                         cardDigits: (obj["cardLast4"] as? String) ?? SMSParser.cardDigits(in: text),
+                         balance: (obj["availableBalance"] as? NSNumber)?.doubleValue ?? SMSParser.balance(in: text))
     }
 
     // MARK: Categorization
@@ -107,6 +114,7 @@ enum AIService {
         guard !merchants.isEmpty else { return [:] }
         let client = try GeminiAccount.client()
         let categories = SpendCategory.expenseCases.map(\.rawValue)
+        let names = SpendCategory.expenseCases.map { "\($0.rawValue) (\($0.title))" }.joined(separator: ", ")
         let schema: [String: Any] = [
             "type": "OBJECT",
             "properties": ["items": ["type": "ARRAY", "items": [
@@ -116,7 +124,7 @@ enum AIService {
             ]]],
             "required": ["items"],
         ]
-        let prompt = "Categorize these merchants (Bahrain/GCC context). Categories: \(categories.joined(separator: ", ")).\n" + merchants.joined(separator: "\n")
+        let prompt = "Categorize these merchants (Bahrain/GCC context). Category keys: \(names).\n" + merchants.joined(separator: "\n")
         let reply = try await client.generate(system: nil, turns: [GeminiTurn(isUser: true, text: prompt)], schema: schema, temperature: 0.1)
         let obj = try GeminiClient.decodeObject(reply)
         var out: [String: SpendCategory] = [:]
@@ -232,13 +240,17 @@ struct SMSImportOutcome {
     var usedAI = false
     var flaggedDuplicate = false
     var alerts: [String] = []
+    var pending = false
+    var balanceSynced: Double?
     var message: String
 }
 
 enum SMSImporter {
-    static func importText(_ text: String, context: ModelContext) async -> SMSImportOutcome {
+    /// - Parameter forceApprove: manual paste from inside the app is applied immediately.
+    static func importText(_ text: String, context: ModelContext, forceApprove: Bool = false, accountID: UUID? = nil) async -> SMSImportOutcome {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return SMSImportOutcome(message: "The message was empty.") }
+        CategoryRegistry.shared.reload(context: context)
         var parsed: ParsedSMS?
         var usedAI = false
         var aiSaidNotTransaction = false
@@ -255,19 +267,24 @@ enum SMSImporter {
         guard let p = parsed else {
             return SMSImportOutcome(usedAI: usedAI, message: "No transaction found in this message.")
         }
+        let target = accountID ?? Ledger.smsAccountID(context: context, digits: p.cardDigits, hint: p.accountHint)
         let tx = MoneyTransaction(amount: p.amount, isIncome: p.isIncome, merchant: p.merchant, category: p.category,
-                                  date: p.date ?? .now, source: .sms,
-                                  accountID: Ledger.defaultAccountID(context: context, hint: p.accountHint))
+                                  date: p.date ?? .now, source: .sms, accountID: target)
         tx.rawText = trimmed
         tx.aiCategorized = usedAI
+        tx.smsBalance = p.balance
+        tx.isPending = !forceApprove && !AppSettings.smsAutoApprove
         let code = AppSettings.currency
         if let c = p.currency, !c.isEmpty, c.uppercased() != code {
             tx.note = "Original currency: \(c.uppercased())"
+            tx.smsBalance = nil
         }
         let result = Ledger.add(tx, context: context)
-        let summary = "\(tx.isIncome ? "Added income" : "Added") \(Money.format(tx.amount, code)) · \(tx.merchant) · \(tx.category.title)"
+        var summary = "\(tx.isIncome ? "Income" : "Expense") \(Money.format(tx.amount, code)) · \(tx.merchant) · \(tx.category.title)"
+        if tx.isPending { summary = "Waiting for approval: " + summary }
+        if result.flaggedDuplicate { summary += " (possible duplicate)" }
+        if let synced = result.balanceSynced { summary += ". Balance matched to bank: \(Money.format(synced, code))" }
         return SMSImportOutcome(transaction: tx, usedAI: usedAI, flaggedDuplicate: result.flaggedDuplicate,
-                                alerts: result.alerts,
-                                message: result.flaggedDuplicate ? summary + " (possible duplicate)" : summary)
+                                alerts: result.alerts, pending: tx.isPending, balanceSynced: result.balanceSynced, message: summary)
     }
 }

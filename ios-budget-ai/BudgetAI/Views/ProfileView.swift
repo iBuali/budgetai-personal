@@ -12,6 +12,8 @@ struct ProfileView: View {
     @AppStorage(Keys.billReminders) private var billReminders = true
     @AppStorage(Keys.budgetAlerts) private var budgetAlerts = true
     @AppStorage(Keys.onboarded) private var onboarded = true
+    @AppStorage(Keys.cycleStartDay) private var cycleStartDay = 1
+    @Query private var customCategories: [CustomCategory]
     @State private var confirmSample = false
     @State private var confirmErase = false
     @State private var geminiOn = GeminiAccount.isConfigured
@@ -55,6 +57,15 @@ struct ProfileView: View {
                     NavigationLink { BillsView() } label: {
                         row("Bills & subscriptions", "calendar.badge.clock", SpendCategory.bills.color, value: "\(bills.count)")
                     }
+                    NavigationLink { CategoriesView() } label: {
+                        row("Categories", "square.grid.2x2.fill", SpendCategory.shopping.color, value: customCategories.isEmpty ? nil : "\(customCategories.count) custom")
+                    }
+                    Picker(selection: $cycleStartDay) {
+                        ForEach(1...28, id: \.self) { d in Text(ordinal(d)).tag(d) }
+                    } label: {
+                        row("Month starts on", "calendar", Theme.warning)
+                    }
+                    .onChange(of: cycleStartDay) { _, _ in appState.show("Budgets now run \(Cycle.label(Cycle.interval(containing: .now)))") }
                     NavigationLink {
                         CurrencyPickerView(selection: $currency).toolbar(.hidden, for: .tabBar)
                     } label: {
@@ -73,6 +84,8 @@ struct ProfileView: View {
                         row("Bank connections", "link", Theme.secondaryInk, value: "Coming soon")
                     }
                 }
+
+                SMSImportSettingsSection()
 
                 Section {
                     NavigationLink { GeminiSettingsView() } label: {
@@ -132,6 +145,9 @@ struct ProfileView: View {
                     Ledger.eraseAll(context: context)
                     UserDefaults.standard.removeObject(forKey: "aiFindingsCache")
                     UserDefaults.standard.removeObject(forKey: "aiFindingsDate")
+                    for key in [Keys.cycleStartDay, Keys.smsAccountID, Keys.smsAutoApprove, Keys.smsSyncBalance] {
+                        UserDefaults.standard.removeObject(forKey: key)
+                    }
                     appState.tab = .home
                     onboarded = false
                 }
@@ -139,6 +155,12 @@ struct ProfileView: View {
                 Text("This permanently deletes everything on this iPhone and can't be undone.")
             }
         }
+    }
+
+    private func ordinal(_ d: Int) -> String {
+        let f = NumberFormatter()
+        f.numberStyle = .ordinal
+        return f.string(from: NSNumber(value: d)) ?? "\(d)"
     }
 
     private func row(_ title: String, _ symbol: String, _ color: Color, value: String? = nil) -> some View {

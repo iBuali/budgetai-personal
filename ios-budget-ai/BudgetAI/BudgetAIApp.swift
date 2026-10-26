@@ -10,6 +10,10 @@ import SwiftData
 struct BudgetAIApp: App {
     @State private var appState = AppState()
 
+    init() {
+        DataStore.warmUp()
+    }
+
     var body: some Scene {
         WindowGroup {
             RootView()

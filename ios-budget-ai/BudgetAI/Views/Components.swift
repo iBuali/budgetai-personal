@@ -17,7 +17,93 @@ struct IconBadge: View {
 struct CategoryIcon: View {
     let category: SpendCategory
     var size: CGFloat = 44
-    var body: some View { IconBadge(symbol: category.symbol, color: category.color, size: size) }
+    var body: some View {
+        if category.emoji.isEmpty {
+            IconBadge(symbol: category.symbol, color: category.color, size: size)
+        } else {
+            EmojiBadge(emoji: category.emoji, color: category.color, size: size)
+        }
+    }
+}
+
+struct EmojiBadge: View {
+    let emoji: String
+    let color: Color
+    var size: CGFloat = 44
+
+    var body: some View {
+        Text(emoji)
+            .font(.system(size: size * 0.5))
+            .frame(width: size, height: size)
+            .background(color.opacity(0.13), in: RoundedRectangle(cornerRadius: size * 0.3, style: .continuous))
+    }
+}
+
+struct AccountIcon: View {
+    let account: Account
+    var size: CGFloat = 40
+    var body: some View {
+        if account.emoji.isEmpty {
+            IconBadge(symbol: account.kind.symbol, color: account.kind.color, size: size)
+        } else {
+            EmojiBadge(emoji: account.emoji, color: account.kind.color, size: size)
+        }
+    }
+}
+
+/// Text label for menus/pickers, which can't render custom icon views.
+extension SpendCategory {
+    var menuTitle: String { emoji.isEmpty ? title : "\(emoji)  \(title)" }
+}
+
+extension Account {
+    var menuTitle: String { emoji.isEmpty ? name : "\(emoji)  \(name)" }
+}
+
+/// Pick an emoji from a curated grid or type any emoji with the keyboard.
+struct EmojiPicker: View {
+    @Binding var emoji: String
+    var suggestions: [String]
+    @State private var typed = ""
+
+    static let categorySuggestions = ["🛒", "🍔", "☕️", "🚗", "⛽️", "🛍️", "💡", "🏠", "💊", "🎬", "📺", "🎓", "✈️", "🎁", "👶", "🐶",
+                                      "💪", "💇", "🧾", "📱", "🎮", "🕌", "❤️", "💼", "💰", "📈", "🏦", "🧸", "🍕", "🥗", "🚕", "🏖️"]
+    static let accountSuggestions = ["🏦", "💳", "💵", "👛", "💰", "📈", "🏠", "🚗", "🪙", "💎", "🏧", "🧾", "📊", "🛟", "🔐", "🌍"]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                Text(emoji.isEmpty ? "–" : emoji)
+                    .font(.system(size: 30))
+                    .frame(width: 52, height: 52)
+                    .background(Theme.track.opacity(0.6), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+                TextField("Type any emoji", text: $typed)
+                    .onChange(of: typed) { _, value in
+                        if let last = value.last(where: { $0.unicodeScalars.contains { $0.properties.isEmojiPresentation || $0.properties.generalCategory == .otherSymbol } }) {
+                            emoji = String(last)
+                        }
+                        if !value.isEmpty { typed = "" }
+                    }
+                if !emoji.isEmpty {
+                    Button("Clear") { emoji = "" }.font(.subheadline)
+                }
+            }
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 8), spacing: 8) {
+                ForEach(suggestions, id: \.self) { e in
+                    Button { emoji = e } label: {
+                        Text(e)
+                            .font(.system(size: 22))
+                            .frame(width: 36, height: 36)
+                            .background(emoji == e ? Theme.cobaltSoft : .clear, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(emoji == e ? Theme.cobalt : .clear, lineWidth: 1.5))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .padding(.vertical, 4)
+        .sensoryFeedback(.selection, trigger: emoji)
+    }
 }
 
 struct RingView: View {
@@ -97,32 +183,47 @@ struct TransactionRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            CategoryIcon(category: tx.isIncome ? .income : tx.category)
+            if tx.isTransfer && tx.toAccountID != nil {
+                IconBadge(symbol: "arrow.left.arrow.right", color: Theme.cobalt)
+            } else {
+                CategoryIcon(category: tx.isIncome && tx.category == .other ? .income : tx.displayCategory)
+            }
             VStack(alignment: .leading, spacing: 3) {
                 Text(tx.merchant)
                     .font(.body.weight(.medium))
                     .foregroundStyle(Theme.ink)
                     .lineLimit(1)
-                if tx.isPossibleDuplicate {
+                if tx.isPending {
+                    Label("Waiting for approval", systemImage: "clock.fill")
+                        .font(.subheadline)
+                        .foregroundStyle(Theme.warning)
+                } else if tx.isPossibleDuplicate {
                     Label("Possible duplicate", systemImage: "exclamationmark.circle.fill")
                         .font(.subheadline)
                         .foregroundStyle(Theme.negative)
                 } else {
                     HStack(spacing: 4) {
-                        Text(tx.category.title)
+                        Text(subtitle).lineLimit(1)
                         if tx.source == .sms { Image(systemName: "message.fill").font(.caption2) }
+                        if tx.balanceAdjustment != 0 { Image(systemName: "equal.circle.fill").font(.caption2).foregroundStyle(Theme.cobalt) }
                     }
                     .font(.subheadline)
                     .foregroundStyle(Theme.secondaryInk)
                 }
             }
             Spacer(minLength: 8)
-            Text(Money.format(tx.signedAmount, currency, signed: true))
+            Text(tx.isTransfer && tx.toAccountID != nil ? Money.format(tx.amount, currency) : Money.format(tx.signedAmount, currency, signed: true))
                 .font(.body.weight(.semibold).monospacedDigit())
-                .foregroundStyle(tx.isIncome ? Theme.positive : (tx.category == .transfers ? Theme.secondaryInk : Theme.negative))
+                .foregroundStyle(tx.isPending ? Theme.secondaryInk : (tx.isIncome ? Theme.positive : (tx.isTransfer ? Theme.secondaryInk : Theme.negative)))
         }
         .padding(.vertical, 4)
         .accessibilityElement(children: .combine)
+    }
+
+    private var subtitle: String {
+        if tx.isTransfer && tx.toAccountID != nil { return "Transfer" }
+        if let sub = tx.subcategory { return "\(tx.category.title) · \(sub.title)" }
+        return tx.category.title
     }
 }
 

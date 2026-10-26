@@ -75,7 +75,7 @@ struct HomeView: View {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(greeting).font(.title2.bold()).foregroundStyle(Theme.ink)
-                    Text("Total balance").font(.body).foregroundStyle(Theme.secondaryInk)
+                    Text("Net worth").font(.body).foregroundStyle(Theme.secondaryInk)
                 }
                 Spacer()
                 Button { appState.tab = .profile } label: {
@@ -87,14 +87,14 @@ struct HomeView: View {
                 }
                 .accessibilityLabel("Profile")
             }
-            Text(Money.format(f.liquidBalance, currency))
+            Text(Money.format(f.netWorth, currency))
                 .font(.system(size: 42, weight: .bold).monospacedDigit())
-                .foregroundStyle(Theme.ink)
+                .foregroundStyle(f.netWorth < 0 ? Theme.negative : Theme.ink)
                 .minimumScaleFactor(0.6)
                 .lineLimit(1)
-                .contentTransition(.numericText(value: f.liquidBalance))
-                .animation(.snappy, value: f.liquidBalance)
-            Text("\(Money.format(f.monthNet, currency, signed: true)) this month")
+                .contentTransition(.numericText(value: f.netWorth))
+                .animation(.snappy, value: f.netWorth)
+            Text("\(Money.format(f.monthNet, currency, signed: true)) \(Cycle.startDay == 1 ? "this month" : "this cycle")")
                 .font(.subheadline.weight(.medium))
                 .foregroundStyle(f.monthNet >= 0 ? Theme.positive : Theme.negative)
         }
@@ -206,6 +206,21 @@ struct HomeView: View {
 
     @ViewBuilder
     private var duplicatesBanner: some View {
+        let pendingCount = transactions.filter(\.isPending).count
+        if pendingCount > 0 {
+            Button { appState.tab = .transactions } label: {
+                HStack(spacing: 12) {
+                    IconBadge(symbol: "clock.fill", color: Theme.warning, size: 38)
+                    Text("\(pendingCount) SMS transaction\(pendingCount == 1 ? "" : "s") to approve")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Theme.ink)
+                    Spacer()
+                    Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(.tertiary)
+                }
+                .card(padding: 12)
+            }
+            .buttonStyle(PressableStyle())
+        }
         let count = transactions.filter(\.isPossibleDuplicate).count
         if count > 0 {
             Button { appState.tab = .transactions } label: {
@@ -226,10 +241,10 @@ struct HomeView: View {
     private func netWorthCard(_ f: Finance) -> some View {
         NavigationLink(value: HomeRoute.netWorth) {
             HStack(spacing: 12) {
-                IconBadge(symbol: "chart.pie.fill", color: Color(hex: 0x8B5CF6))
+                IconBadge(symbol: "building.columns.fill", color: Theme.cobalt)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Net worth").font(.subheadline).foregroundStyle(Theme.secondaryInk)
-                    Text(Money.format(f.netWorth, currency)).font(.headline.monospacedDigit()).foregroundStyle(Theme.ink)
+                    Text("Cash & bank").font(.subheadline).foregroundStyle(Theme.secondaryInk)
+                    Text(Money.format(f.liquidBalance, currency)).font(.headline.monospacedDigit()).foregroundStyle(Theme.ink)
                 }
                 Spacer()
                 VStack(alignment: .trailing, spacing: 2) {

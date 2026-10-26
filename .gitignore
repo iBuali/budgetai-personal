@@ -2,19 +2,3 @@ node_modules
 .env
 .expo
 .rork
-
-# Local build output and credentials
-build/
-dist/
-local-backups/
-upload-package/
-*.ipa
-*.xcarchive/
-*.xcresult/
-*.p12
-*.p8
-*.mobileprovision
-*.pem
-*.key
-.env.*
-__pycache__/

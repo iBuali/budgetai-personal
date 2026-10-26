@@ -4,87 +4,155 @@ import SwiftUI
 
 // MARK: - Categories
 
-enum SpendCategory: String, CaseIterable, Identifiable {
-    case groceries, dining, transport, shopping, bills, housing, health, entertainment
-    case subscriptions, education, travel, transfers, income, other
-
+/// A category key. Built-ins are static constants; custom categories and sub-categories
+/// are user-created (`CustomCategory`) and resolved through `CategoryRegistry`.
+struct SpendCategory: Hashable, Identifiable {
+    let rawValue: String
     var id: String { rawValue }
 
-    var title: String {
-        switch self {
-        case .groceries: "Groceries"
-        case .dining: "Food & Dining"
-        case .transport: "Transport"
-        case .shopping: "Shopping"
-        case .bills: "Bills & Utilities"
-        case .housing: "Rent & Housing"
-        case .health: "Health"
-        case .entertainment: "Entertainment"
-        case .subscriptions: "Subscriptions"
-        case .education: "Education"
-        case .travel: "Travel"
-        case .transfers: "Transfers"
-        case .income: "Income"
-        case .other: "Other"
-        }
+    private init(key: String) { rawValue = key }
+
+    /// Returns nil for unknown keys (e.g. a deleted custom category).
+    init?(rawValue: String) {
+        guard SpendCategory.builtInInfo[rawValue] != nil || CategoryRegistry.shared.info(rawValue) != nil else { return nil }
+        self.rawValue = rawValue
     }
 
-    var shortTitle: String {
-        switch self {
-        case .dining: "Food"
-        case .bills: "Bills"
-        case .housing: "Housing"
-        default: title
-        }
+    static func unchecked(_ key: String) -> SpendCategory { SpendCategory(key: key) }
+
+    static let groceries = SpendCategory(key: "groceries")
+    static let dining = SpendCategory(key: "dining")
+    static let transport = SpendCategory(key: "transport")
+    static let shopping = SpendCategory(key: "shopping")
+    static let bills = SpendCategory(key: "bills")
+    static let housing = SpendCategory(key: "housing")
+    static let health = SpendCategory(key: "health")
+    static let entertainment = SpendCategory(key: "entertainment")
+    static let subscriptions = SpendCategory(key: "subscriptions")
+    static let education = SpendCategory(key: "education")
+    static let travel = SpendCategory(key: "travel")
+    static let transfers = SpendCategory(key: "transfers")
+    static let income = SpendCategory(key: "income")
+    static let other = SpendCategory(key: "other")
+
+    static let builtIns: [SpendCategory] = [.groceries, .dining, .transport, .shopping, .bills, .housing, .health,
+                                            .entertainment, .subscriptions, .education, .travel, .transfers, .income, .other]
+
+    struct Info {
+        var title: String
+        var shortTitle: String
+        var symbol: String
+        var emoji: String
+        var color: Color
+        var isEssential: Bool
+        var isIncome: Bool
+        var parentKey: String
     }
 
-    var symbol: String {
-        switch self {
-        case .groceries: "cart.fill"
-        case .dining: "fork.knife"
-        case .transport: "car.fill"
-        case .shopping: "bag.fill"
-        case .bills: "bolt.fill"
-        case .housing: "house.fill"
-        case .health: "cross.case.fill"
-        case .entertainment: "popcorn.fill"
-        case .subscriptions: "play.rectangle.fill"
-        case .education: "graduationcap.fill"
-        case .travel: "airplane"
-        case .transfers: "arrow.left.arrow.right"
-        case .income: "arrow.down"
-        case .other: "square.grid.2x2.fill"
-        }
+    static let builtInInfo: [String: Info] = [
+        "groceries": Info(title: "Groceries", shortTitle: "Groceries", symbol: "cart.fill", emoji: "", color: Color(hex: 0x22A565), isEssential: true, isIncome: false, parentKey: ""),
+        "dining": Info(title: "Food & Dining", shortTitle: "Food", symbol: "fork.knife", emoji: "", color: Color(hex: 0xF08A24), isEssential: false, isIncome: false, parentKey: ""),
+        "transport": Info(title: "Transport", shortTitle: "Transport", symbol: "car.fill", emoji: "", color: Color(hex: 0x2F6BFF), isEssential: true, isIncome: false, parentKey: ""),
+        "shopping": Info(title: "Shopping", shortTitle: "Shopping", symbol: "bag.fill", emoji: "", color: Color(hex: 0x8B5CF6), isEssential: false, isIncome: false, parentKey: ""),
+        "bills": Info(title: "Bills & Utilities", shortTitle: "Bills", symbol: "bolt.fill", emoji: "", color: Color(hex: 0xE9A23B), isEssential: true, isIncome: false, parentKey: ""),
+        "housing": Info(title: "Rent & Housing", shortTitle: "Housing", symbol: "house.fill", emoji: "", color: Color(hex: 0x0EA5A4), isEssential: true, isIncome: false, parentKey: ""),
+        "health": Info(title: "Health", shortTitle: "Health", symbol: "cross.case.fill", emoji: "", color: Color(hex: 0xEC4899), isEssential: true, isIncome: false, parentKey: ""),
+        "entertainment": Info(title: "Entertainment", shortTitle: "Entertainment", symbol: "popcorn.fill", emoji: "", color: Color(hex: 0x6366F1), isEssential: false, isIncome: false, parentKey: ""),
+        "subscriptions": Info(title: "Subscriptions", shortTitle: "Subscriptions", symbol: "play.rectangle.fill", emoji: "", color: Color(hex: 0xF05252), isEssential: false, isIncome: false, parentKey: ""),
+        "education": Info(title: "Education", shortTitle: "Education", symbol: "graduationcap.fill", emoji: "", color: Color(hex: 0x0891B2), isEssential: true, isIncome: false, parentKey: ""),
+        "travel": Info(title: "Travel", shortTitle: "Travel", symbol: "airplane", emoji: "", color: Color(hex: 0x0EA5E9), isEssential: false, isIncome: false, parentKey: ""),
+        "transfers": Info(title: "Transfers", shortTitle: "Transfers", symbol: "arrow.left.arrow.right", emoji: "", color: Color(hex: 0x6B7385), isEssential: false, isIncome: false, parentKey: ""),
+        "income": Info(title: "Income", shortTitle: "Income", symbol: "arrow.down", emoji: "", color: Color(hex: 0x2BB673), isEssential: false, isIncome: true, parentKey: ""),
+        "other": Info(title: "Other", shortTitle: "Other", symbol: "square.grid.2x2.fill", emoji: "", color: Color(hex: 0x8A93A6), isEssential: false, isIncome: false, parentKey: ""),
+    ]
+
+    var info: Info {
+        SpendCategory.builtInInfo[rawValue] ?? CategoryRegistry.shared.info(rawValue)
+            ?? Info(title: "Other", shortTitle: "Other", symbol: "square.grid.2x2.fill", emoji: "", color: Color(hex: 0x8A93A6), isEssential: false, isIncome: false, parentKey: "")
     }
 
-    var color: Color {
-        switch self {
-        case .groceries: Color(hex: 0x22A565)
-        case .dining: Color(hex: 0xF08A24)
-        case .transport: Color(hex: 0x2F6BFF)
-        case .shopping: Color(hex: 0x8B5CF6)
-        case .bills: Color(hex: 0xE9A23B)
-        case .housing: Color(hex: 0x0EA5A4)
-        case .health: Color(hex: 0xEC4899)
-        case .entertainment: Color(hex: 0x6366F1)
-        case .subscriptions: Color(hex: 0xF05252)
-        case .education: Color(hex: 0x0891B2)
-        case .travel: Color(hex: 0x0EA5E9)
-        case .transfers: Color(hex: 0x6B7385)
-        case .income: Color(hex: 0x2BB673)
-        case .other: Color(hex: 0x8A93A6)
-        }
-    }
-
+    var title: String { info.title }
+    var shortTitle: String { info.shortTitle }
+    var symbol: String { info.symbol }
+    var emoji: String { info.emoji }
+    var color: Color { info.color }
     /// Essential spending is protected when calculating Safe to Spend.
-    var isEssential: Bool {
-        switch self {
-        case .groceries, .transport, .bills, .housing, .health, .education: true
-        default: false
-        }
+    var isEssential: Bool { info.isEssential }
+    var isIncomeCategory: Bool { info.isIncome }
+    var isBuiltIn: Bool { SpendCategory.builtInInfo[rawValue] != nil }
+    var isSubcategory: Bool { !info.parentKey.isEmpty }
+    var parent: SpendCategory? { isSubcategory ? SpendCategory.unchecked(info.parentKey) : nil }
+    var subcategories: [SpendCategory] { CategoryRegistry.shared.children(of: rawValue) }
+
+    /// Top-level categories (built-in + custom).
+    static var allCases: [SpendCategory] {
+        builtIns + CategoryRegistry.shared.topLevel.filter { !$0.isIncomeCategory } + CategoryRegistry.shared.topLevel.filter(\.isIncomeCategory)
+    }
+    static var expenseCases: [SpendCategory] { allCases.filter { !$0.isIncomeCategory } }
+    static var incomeCases: [SpendCategory] { allCases.filter(\.isIncomeCategory) }
+}
+
+/// User-created category or sub-category (parentKey set).
+@Model
+final class CustomCategory {
+    var id: UUID = UUID()
+    var key: String = ""
+    var name: String = ""
+    var emoji: String = ""
+    var colorHex: Int = 0x1E3FAE
+    var parentKey: String = ""
+    var isIncome: Bool = false
+    var isEssential: Bool = false
+    var createdAt: Date = Date()
+
+    init(name: String, emoji: String, colorHex: Int, parentKey: String = "", isIncome: Bool = false, isEssential: Bool = false) {
+        let id = UUID()
+        self.id = id
+        self.key = "c-" + id.uuidString.prefix(8).lowercased()
+        self.name = name
+        self.emoji = emoji
+        self.colorHex = colorHex
+        self.parentKey = parentKey
+        self.isIncome = isIncome
+        self.isEssential = isEssential
+        self.createdAt = Date()
+    }
+}
+
+/// In-memory, observable cache of custom categories so lookups are cheap everywhere.
+@Observable
+final class CategoryRegistry {
+    static let shared = CategoryRegistry()
+
+    private(set) var infos: [String: SpendCategory.Info] = [:]
+    private(set) var order: [String] = []
+
+    func info(_ key: String) -> SpendCategory.Info? { infos[key] }
+
+    var topLevel: [SpendCategory] {
+        order.filter { infos[$0]?.parentKey.isEmpty == true }.map(SpendCategory.unchecked)
     }
 
-    static var expenseCases: [SpendCategory] { allCases.filter { $0 != .income } }
+    func children(of key: String) -> [SpendCategory] {
+        order.filter { infos[$0]?.parentKey == key }.map(SpendCategory.unchecked)
+    }
+
+    func reload(context: ModelContext) {
+        let items = (try? context.fetch(FetchDescriptor<CustomCategory>(sortBy: [SortDescriptor(\.createdAt)]))) ?? []
+        var map: [String: SpendCategory.Info] = [:]
+        for c in items {
+            let parent = c.parentKey.isEmpty ? nil : (SpendCategory.builtInInfo[c.parentKey] ?? map[c.parentKey])
+            map[c.key] = SpendCategory.Info(
+                title: c.name, shortTitle: c.name, symbol: parent?.symbol ?? "tag.fill",
+                emoji: c.emoji.isEmpty ? (parent?.emoji ?? "") : c.emoji,
+                color: c.parentKey.isEmpty ? Color(hex: UInt32(c.colorHex)) : (parent?.color ?? Color(hex: UInt32(c.colorHex))),
+                isEssential: parent?.isEssential ?? c.isEssential,
+                isIncome: parent?.isIncome ?? c.isIncome,
+                parentKey: c.parentKey)
+        }
+        infos = map
+        order = items.map(\.key)
+    }
 }
 
 // MARK: - Accounts
@@ -144,14 +212,18 @@ final class Account {
     /// For liabilities this is the amount owed (positive).
     var balance: Double = 0
     var createdAt: Date = Date()
+    var emoji: String = ""
+    /// Last digits of the card/account as they appear in bank SMS, used to route imports.
+    var smsMatch: String = ""
 
-    init(name: String, kind: AccountKind, institution: String = "", balance: Double) {
+    init(name: String, kind: AccountKind, institution: String = "", balance: Double, emoji: String = "") {
         self.id = UUID()
         self.name = name
         self.kindRaw = kind.rawValue
         self.institution = institution
         self.balance = balance
         self.createdAt = Date()
+        self.emoji = emoji
     }
 
     var kind: AccountKind {
@@ -200,6 +272,15 @@ final class MoneyTransaction {
     var isPossibleDuplicate: Bool = false
     var aiCategorized: Bool = false
     var rawText: String?
+    /// Imported from SMS and waiting for the user's approval; not applied to balances yet.
+    var isPending: Bool = false
+    /// Destination account for transfers.
+    var toAccountID: UUID?
+    var subcategoryKey: String = ""
+    /// Available balance reported by the bank SMS, if any.
+    var smsBalance: Double?
+    /// How much the account balance was corrected to match the bank SMS.
+    var balanceAdjustment: Double = 0
 
     init(amount: Double, isIncome: Bool, merchant: String, category: SpendCategory, date: Date = .now,
          note: String = "", source: TxSource = .manual, accountID: UUID? = nil) {
@@ -218,6 +299,15 @@ final class MoneyTransaction {
         get { SpendCategory(rawValue: categoryRaw) ?? .other }
         set { categoryRaw = newValue.rawValue }
     }
+
+    var subcategory: SpendCategory? {
+        get { subcategoryKey.isEmpty ? nil : SpendCategory(rawValue: subcategoryKey) }
+        set { subcategoryKey = newValue?.rawValue ?? "" }
+    }
+
+    /// Most specific category for display (sub-category if set).
+    var displayCategory: SpendCategory { subcategory ?? category }
+    var isTransfer: Bool { category == .transfers }
 
     var source: TxSource {
         get { TxSource(rawValue: sourceRaw) ?? .manual }
@@ -387,8 +477,37 @@ final class ChatMessage {
 }
 
 enum DateKeys {
+    /// Key of the budget cycle containing `date` (respects the custom cycle start day).
     static func month(_ date: Date) -> String {
-        let c = Calendar.current.dateComponents([.year, .month], from: date)
-        return "\(c.year ?? 0)-\(c.month ?? 0)"
+        let start = Cycle.interval(containing: date).start
+        let c = Calendar.current.dateComponents([.year, .month, .day], from: start)
+        return "\(c.year ?? 0)-\(c.month ?? 0)-\(c.day ?? 1)"
+    }
+}
+
+/// Budget month that starts on a user-chosen day (e.g. payday on the 25th).
+enum Cycle {
+    static var startDay: Int {
+        let d = UserDefaults.standard.integer(forKey: Keys.cycleStartDay)
+        return d >= 1 && d <= 28 ? d : 1
+    }
+
+    static func interval(containing date: Date, startDay: Int = Cycle.startDay) -> DateInterval {
+        let cal = Calendar.current
+        var comps = cal.dateComponents([.year, .month], from: date)
+        comps.day = startDay
+        var start = cal.date(from: comps) ?? cal.startOfDay(for: date)
+        if start > date { start = cal.date(byAdding: .month, value: -1, to: start) ?? start }
+        let end = cal.date(byAdding: .month, value: 1, to: start) ?? start.addingTimeInterval(86_400 * 30)
+        return DateInterval(start: start, end: end)
+    }
+
+    /// "October" when cycles follow calendar months, otherwise "25 Oct – 24 Nov".
+    static func label(_ interval: DateInterval, short: Bool = false) -> String {
+        if startDay == 1 {
+            return interval.start.formatted(short ? .dateTime.month(.abbreviated).year() : .dateTime.month(.wide))
+        }
+        let last = interval.end.addingTimeInterval(-1)
+        return "\(interval.start.formatted(.dateTime.day().month(.abbreviated))) – \(last.formatted(.dateTime.day().month(.abbreviated)))"
     }
 }

@@ -8,12 +8,20 @@ enum Keys {
     static let billReminders = "billReminders"
     static let budgetAlerts = "budgetAlerts"
     static let geminiModel = "geminiModel"
+    static let cycleStartDay = "cycleStartDay"
+    static let smsAutoApprove = "smsAutoApprove"
+    static let smsAccountID = "smsAccountID"
+    static let smsSyncBalance = "smsSyncBalance"
 }
 
 enum AppSettings {
     static var currency: String { UserDefaults.standard.string(forKey: Keys.currency) ?? "BHD" }
     static var billReminders: Bool { UserDefaults.standard.object(forKey: Keys.billReminders) as? Bool ?? true }
     static var budgetAlerts: Bool { UserDefaults.standard.object(forKey: Keys.budgetAlerts) as? Bool ?? true }
+    static var smsAutoApprove: Bool { UserDefaults.standard.object(forKey: Keys.smsAutoApprove) as? Bool ?? true }
+    static var smsSyncBalance: Bool { UserDefaults.standard.object(forKey: Keys.smsSyncBalance) as? Bool ?? true }
+    /// Empty string means "detect automatically".
+    static var smsAccountID: UUID? { UUID(uuidString: UserDefaults.standard.string(forKey: Keys.smsAccountID) ?? "") }
 }
 
 enum Money {

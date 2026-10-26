@@ -23,7 +23,7 @@ struct GeminiTurn {
     let text: String
 }
 
-/// Talks directly to the user's own Google Gemini account (no Rork AI proxy).
+/// Talks directly to the user's own Google Gemini account.
 struct GeminiClient {
     static let models = ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-2.5-flash"]
     static let defaultModel = "gemini-3.8-flash"
@@ -135,8 +135,9 @@ enum GeminiAccount {
     }
 
     static var bundledKey: String? {
-        guard let k = Config.allValues["EXPO_PUBLIC_GEMINI_API_KEY"], !k.isEmpty else { return nil }
-        return k
+        if let k = Config.allValues["GEMINI_API_KEY"], !k.isEmpty { return k }
+        if let k = Config.allValues["EXPO_PUBLIC_GEMINI_API_KEY"], !k.isEmpty { return k }
+        return nil
     }
 
     static var apiKey: String? { userKey ?? bundledKey }

@@ -36,6 +36,9 @@ struct ParsedSMS {
     var category: SpendCategory
     var date: Date?
     var accountHint: String?
+    var cardDigits: String?
+    /// Available balance stated in the SMS, if any.
+    var balance: Double?
 }
 
 /// Regex-based bank SMS reader for GCC-style alerts. Used offline or when Gemini is unavailable.
@@ -57,7 +60,30 @@ enum SMSParser {
         if isIncome && category != .transfers { category = .income }
         if !isIncome && category == .income { category = .other }
         return ParsedSMS(amount: amount, currency: currency, isIncome: isIncome, merchant: merchant,
-                         category: category, date: nil, accountHint: accountHint(in: text))
+                         category: category, date: nil, accountHint: accountHint(in: text),
+                         cardDigits: cardDigits(in: text), balance: balance(in: text))
+    }
+
+    /// "Avl Bal BHD 1,234.500", "Available balance: 980.250", "Bal BD 12.000"
+    static func balance(in raw: String) -> Double? {
+        let text = raw.replacingOccurrences(of: "\n", with: " ")
+        let pattern = "(?i)\\b(?:avl\\.?\\s*bal(?:ance)?|available\\s*(?:bal(?:ance)?)?|a/c\\s*bal(?:ance)?|current\\s*bal(?:ance)?|bal(?:ance)?)\\s*(?:is|:|-)?\\s*(?:\(codes))?\\s*\\.?\\s*([0-9][0-9,]*(?:\\.[0-9]+)?)"
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
+        guard let last = matches.last, let r = Range(last.range(at: 1), in: text) else { return nil }
+        return Money.parse(String(text[r]))
+    }
+
+    /// "card ending 1234", "XXXX1234", "a/c **5678"
+    static func cardDigits(in raw: String) -> String? {
+        let patterns = ["(?i)ending\\s*(?:with|in)?\\s*([0-9]{3,4})", "(?i)[x*#]{2,}\\s?([0-9]{3,4})", "(?i)(?:card|a/c|acct|account)\\s*(?:no\\.?)?\\s*[x*]*([0-9]{4})\\b"]
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern),
+                  let m = regex.firstMatch(in: raw, range: NSRange(raw.startIndex..., in: raw)),
+                  let r = Range(m.range(at: 1), in: raw) else { continue }
+            return String(raw[r])
+        }
+        return nil
     }
 
     private static func amount(in text: String) -> (Double, String?)? {

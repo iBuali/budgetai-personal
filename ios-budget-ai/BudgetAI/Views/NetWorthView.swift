@@ -105,7 +105,7 @@ struct NetWorthView: View {
     private func accountRow(_ account: Account) -> some View {
         Button { editing = account } label: {
             HStack(spacing: 12) {
-                IconBadge(symbol: account.kind.symbol, color: account.kind.color, size: 40)
+                AccountIcon(account: account, size: 40)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(account.name).foregroundStyle(Theme.ink)
                     Text(account.institution.isEmpty ? account.kind.title : "\(account.kind.title) · \(account.institution)")
@@ -137,10 +137,15 @@ struct AccountEditor: View {
     @State private var kind: AccountKind = .bank
     @State private var institution = ""
     @State private var balanceText = ""
+    @State private var emoji = ""
+    @State private var smsMatch = ""
 
     var body: some View {
         NavigationStack {
             Form {
+                Section("Icon") {
+                    EmojiPicker(emoji: $emoji, suggestions: EmojiPicker.accountSuggestions)
+                }
                 Section {
                     TextField("Name (e.g. NBB Current)", text: $name)
                     Picker("Type", selection: $kind) {
@@ -159,6 +164,20 @@ struct AccountEditor: View {
                     }
                 } footer: {
                     Text(kind.isLiquid ? "Counts toward your total balance and Safe to Spend." : (kind.isLiability ? "Subtracted from your net worth." : "Counts toward your net worth."))
+                }
+                if kind == .bank || kind == .creditCard || kind == .cash {
+                    Section {
+                        TextField("Last digits, e.g. 4821", text: $smsMatch)
+                            .keyboardType(.numberPad)
+                            .onChange(of: smsMatch) { _, v in
+                                let digits = String(v.filter(\.isNumber).suffix(6))
+                                if digits != v { smsMatch = digits }
+                            }
+                    } header: {
+                        Text("Card or account digits in SMS")
+                    } footer: {
+                        Text("Bank messages mentioning these digits are filed to this account automatically.")
+                    }
                 }
                 if let account {
                     Section {
@@ -184,6 +203,8 @@ struct AccountEditor: View {
                 name = account.name
                 kind = account.kind
                 institution = account.institution
+                emoji = account.emoji
+                smsMatch = account.smsMatch
                 balanceText = Money.number(account.balance, decimals: Money.digits(currency)).replacingOccurrences(of: ",", with: "")
                 if account.balance < 0 { balanceText = "-" + balanceText }
             }
@@ -197,8 +218,12 @@ struct AccountEditor: View {
             account.kind = kind
             account.institution = institution
             account.balance = balance
+            account.emoji = emoji
+            account.smsMatch = smsMatch
         } else {
-            context.insert(Account(name: name.trimmingCharacters(in: .whitespaces), kind: kind, institution: institution, balance: balance))
+            let new = Account(name: name.trimmingCharacters(in: .whitespaces), kind: kind, institution: institution, balance: balance, emoji: emoji)
+            new.smsMatch = smsMatch
+            context.insert(new)
         }
         Ledger.recordSnapshot(context: context)
         try? context.save()

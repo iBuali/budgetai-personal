@@ -69,7 +69,7 @@ struct InsightsView: View {
             HStack {
                 Text("End-of-month forecast").font(.subheadline.weight(.medium)).foregroundStyle(Theme.ink)
                 Spacer()
-                Text(Date.now.formatted(.dateTime.month(.abbreviated).year()))
+                Text(Cycle.label(Cycle.interval(containing: .now), short: true))
                     .font(.caption.weight(.medium))
                     .padding(.horizontal, 10).padding(.vertical, 5)
                     .background(Theme.track.opacity(0.7), in: Capsule())

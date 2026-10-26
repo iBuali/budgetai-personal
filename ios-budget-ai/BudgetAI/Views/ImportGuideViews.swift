@@ -1,4 +1,5 @@
 import SwiftUI
+import SwiftData
 import AppIntents
 
 struct SMSSetupGuideView: View {
@@ -24,6 +25,8 @@ struct SMSSetupGuideView: View {
                 }
                 .padding(.vertical, 6)
             }
+
+            SMSImportSettingsSection()
 
             Section("Setup, about 1 minute") {
                 ForEach(Array(steps.enumerated()), id: \.offset) { index, step in
@@ -133,5 +136,49 @@ struct BankConnectionsView: View {
                 ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
             }
         }
+    }
+}
+
+
+/// How imported bank SMS are handled: approval, target account and balance matching.
+struct SMSImportSettingsSection: View {
+    @AppStorage(Keys.smsAutoApprove) private var autoApprove = true
+    @AppStorage(Keys.smsSyncBalance) private var syncBalance = true
+    @AppStorage(Keys.smsAccountID) private var accountIDString = ""
+    @Query(sort: \Account.createdAt) private var accounts: [Account]
+
+    private var targetAccounts: [Account] { accounts.filter { $0.kind == .bank || $0.kind == .creditCard || $0.kind == .cash } }
+
+    var body: some View {
+        Section {
+            Picker(selection: $autoApprove) {
+                Text("Add automatically").tag(true)
+                Text("Ask me to approve").tag(false)
+            } label: {
+                Label("New SMS transactions", systemImage: autoApprove ? "bolt.fill" : "hand.raised.fill")
+            }
+            Picker(selection: $accountIDString) {
+                Text("Detect automatically").tag("")
+                ForEach(targetAccounts) { a in Text(a.menuTitle).tag(a.id.uuidString) }
+            } label: {
+                Label("Add to account", systemImage: "creditcard.fill")
+            }
+            Toggle(isOn: $syncBalance) {
+                Label("Match balance from SMS", systemImage: "equal.circle.fill")
+            }
+        } header: {
+            Text("SMS import")
+        } footer: {
+            Text(footer)
+        }
+        .sensoryFeedback(.selection, trigger: autoApprove)
+    }
+
+    private var footer: String {
+        var parts: [String] = []
+        parts.append(autoApprove ? "Transactions count right away." : "Transactions wait in a list until you approve them.")
+        parts.append(accountIDString.isEmpty ? "Accounts are matched by card digits set on each account, or by bank name." : "All bank messages go to the chosen account.")
+        if syncBalance { parts.append("When a message shows your available balance, the account is updated to match it.") }
+        return parts.joined(separator: " ")
     }
 }
