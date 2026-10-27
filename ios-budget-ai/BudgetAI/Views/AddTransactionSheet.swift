@@ -219,6 +219,8 @@ struct PasteSMSSheet: View {
     @Environment(\.dismiss) private var dismiss
     @AppStorage(Keys.currency) private var currency = "BHD"
     @State private var text = ""
+    @State private var sender = ""
+    @State private var manualBank = ""
     @State private var working = false
     @State private var outcome: SMSImportOutcome?
     @State private var accountID: UUID?
@@ -226,6 +228,11 @@ struct PasteSMSSheet: View {
 
     private var trimmedText: String {
         text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var trimmedSender: String? {
+        let s = sender.trimmingCharacters(in: .whitespacesAndNewlines)
+        return s.isEmpty ? nil : s
     }
 
     private var batchChunks: [String] {
@@ -251,23 +258,37 @@ struct PasteSMSSheet: View {
                         if let s = UIPasteboard.general.string { text = s }
                     }
                     Menu {
+                        Button("BisB · Fawri+ Outgoing (EN)") {
+                            sender = "BisB"
+                            text = "Fawri+ payment BHD3.000, ref: BIB103KAK000KZUM was credited to IBAN ending 0846 on 2026/10/27 15:26. Balance BHD263.195. Tel: 17515151"
+                        }
                         Button("NBB Card · Talabat (EN)") {
+                            sender = "NBB"
                             text = "Your NBB card ending 1234 was used for BHD 6.750 at TALABAT BH on 24-Oct. Avl Bal: BHD 412.300"
                         }
                         Button("BenefitPay · Fawri+ Transfer (EN)") {
+                            sender = "BenefitPay"
                             text = "BenefitPay: Fawri+ transfer of BHD 15.000 to COLD STORE from IBAN xx4821 completed. Available Balance: BHD 397.300"
                         }
                         Button("ila Bank · Lulu Hypermarket (AR)") {
+                            sender = "ila"
                             text = "بنك إلى: تم خصم مبلغ ١٨.٤٥٠ د.ب باستخدام البطاقة رقم 9921 لدى اللولو هايبرماركت. الرصيد المتاح: ٣٧٨.٨٥٠ د.ب"
                         }
-                        Button("Al Rajhi · Apple Pay Purchase (AR)") {
-                            text = "مصرف الراجحي\nشراء عبر Apple Pay\nبطاقة: 4412 ;مدى\nمبلغ: 64.50 ر.س\nلدى: ستاربكس\nالرصيد المتاح: 2,410.00 ر.س"
-                        }
                         Button("Salary Credit · BBK (EN)") {
+                            sender = "BBK"
                             text = "BBK: Salary of BHD 1,250.000 has been credited to your account ending 8801. Avl Bal: BHD 1,628.850"
                         }
                     } label: {
                         Label("Try sample SMS (EN / عربي)", systemImage: "text.bubble")
+                    }
+                    TextField("Sender ID / phone (optional, e.g. BisB)", text: $sender)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    Picker("SMS sender bank", selection: $manualBank) {
+                        Text("Detect automatically").tag("")
+                        ForEach(BahrainBankCatalog.bahrainBanks, id: \.self) { bank in
+                            Text(bank).tag(bank)
+                        }
                     }
                     Picker("Account", selection: $accountID) {
                         Text("Detect automatically").tag(UUID?.none)
@@ -277,9 +298,9 @@ struct PasteSMSSheet: View {
                     HStack(spacing: 4) {
                         if GeminiAccount.isConfigured {
                             Image(systemName: "sparkles")
-                            Text("Gemini + Smart Parser read English & Arabic SMS and learn your categories.")
+                            Text("Deterministic Bahrain bank rules run first; Gemini is used only for uncertain messages.")
                         } else {
-                            Text("Smart on-device parser supports English & Arabic GCC bank SMS and learns from your history.")
+                            Text("Deterministic on-device Bahrain & GCC bank rules with Fawri+ direction and duplicate checks.")
                         }
                     }
                 }
@@ -348,7 +369,7 @@ struct PasteSMSSheet: View {
         Section("Live preview") {
             let chunks = batchChunks
             if chunks.count > 1 {
-                let parsedItems = chunks.compactMap { SMSParser.parse($0, context: context) }
+                let parsedItems = chunks.compactMap { SMSParser.parse($0, sender: trimmedSender, context: context) }
                 Label("\(parsedItems.count) of \(chunks.count) messages detected as transactions", systemImage: "doc.on.doc.fill")
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(Theme.cobalt)
@@ -358,22 +379,58 @@ struct PasteSMSSheet: View {
             } else if let reason = SMSParser.nonTransactionReason(trimmedText) {
                 Label("Will be skipped: \(reason)", systemImage: "hand.raised.fill")
                     .foregroundStyle(Theme.warning)
-            } else if let p = SMSParser.parse(trimmedText, context: context) {
+            } else if let p = SMSParser.parse(trimmedText, sender: trimmedSender, context: context) {
                 previewRow(for: p)
-                if Categorizer.learnedMatch(for: p.merchant, in: context, isIncome: p.isIncome) != nil {
+                if p.requiresReview {
+                    Label("Low confidence — will be saved as pending for your review", systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(Theme.warning)
+                }
+                if !p.transactionType.isTransferType && Categorizer.learnedMatch(for: p.merchant, in: context, isIncome: p.isIncome) != nil {
                     Label("Category learned from your transaction history", systemImage: "brain.head.profile")
                         .font(.caption)
                         .foregroundStyle(Theme.cobalt)
                 }
-                if let hint = p.accountHint ?? p.note {
+                HStack {
+                    Text("Detected bank")
+                        .font(.caption)
+                        .foregroundStyle(Theme.secondaryInk)
+                    Spacer()
+                    let effectiveBank = manualBank.isEmpty ? p.detectedBank : manualBank
+                    Text(effectiveBank ?? "Uncertain (assign above if known)")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(effectiveBank == nil ? Theme.warning : Theme.ink)
+                }
+                if let ref = p.referenceNumber {
                     HStack {
-                        Text("Detected details")
+                        Text("Reference")
                             .font(.caption)
                             .foregroundStyle(Theme.secondaryInk)
                         Spacer()
-                        let details = [p.accountHint, p.cardDigits.map { "••\($0)" }, p.note].compactMap { $0 }.joined(separator: " · ")
-                        Text(details.isEmpty ? hint : details)
-                            .font(.caption.weight(.medium))
+                        Text(ref)
+                            .font(.caption.monospaced().weight(.medium))
+                            .foregroundStyle(Theme.ink)
+                    }
+                }
+                if let recip = p.recipientSuffix {
+                    HStack {
+                        Text("Recipient IBAN / account")
+                            .font(.caption)
+                            .foregroundStyle(Theme.secondaryInk)
+                        Spacer()
+                        Text("••\(recip)")
+                            .font(.caption.monospacedDigit().weight(.medium))
+                            .foregroundStyle(Theme.ink)
+                    }
+                }
+                if let acct = p.accountSuffix {
+                    HStack {
+                        Text("Source card / account")
+                            .font(.caption)
+                            .foregroundStyle(Theme.secondaryInk)
+                        Spacer()
+                        Text("••\(acct)")
+                            .font(.caption.monospacedDigit().weight(.medium))
                             .foregroundStyle(Theme.ink)
                     }
                 }
@@ -404,20 +461,28 @@ struct PasteSMSSheet: View {
                 Text(p.merchant)
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(Theme.ink)
-                Text(p.subcategory != nil ? "\(p.category.title) · \(p.subcategory!.title)" : p.category.title)
+                Text("\(p.transactionType.title) · \(p.subcategory != nil ? "\(p.category.title) (\(p.subcategory!.title))" : p.category.title)")
                     .font(.caption)
-                    .foregroundStyle(Theme.secondaryInk)
+                    .foregroundStyle(p.requiresReview ? Theme.warning : Theme.secondaryInk)
             }
             Spacer()
-            Text((p.isIncome ? "+" : "−") + Money.format(p.amount, p.currency ?? currency))
+            let prefix = p.transactionType == .internalTransfer ? "" : (p.isIncome ? "+" : "−")
+            Text(prefix + Money.format(p.amount, p.currency ?? currency))
                 .font(.subheadline.monospacedDigit().weight(.semibold))
-                .foregroundStyle(p.isIncome ? Theme.positive : Theme.ink)
+                .foregroundStyle(p.isIncome ? Theme.positive : (p.transactionType.isTransferType ? Theme.secondaryInk : Theme.ink))
         }
     }
 
     private func run() async {
         working = true
-        let result = await SMSImporter.importText(text, context: context, forceApprove: true, accountID: accountID)
+        let result = await SMSImporter.importText(
+            text,
+            context: context,
+            forceApprove: true,
+            accountID: accountID,
+            sender: trimmedSender,
+            manualBank: manualBank.isEmpty ? nil : manualBank
+        )
         working = false
         withAnimation { outcome = result }
         if result.transaction != nil {

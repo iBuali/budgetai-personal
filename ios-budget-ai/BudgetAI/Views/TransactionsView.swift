@@ -54,8 +54,8 @@ struct TxFilterState: Equatable {
     func matches(_ tx: MoneyTransaction, ignoringDates: Bool = false) -> Bool {
         switch kind {
         case .all: break
-        case .income: if !(tx.isIncome && !tx.isTransfer) { return false }
-        case .expenses: if tx.isIncome || tx.isTransfer { return false }
+        case .income: if !tx.isOrdinaryIncome { return false }
+        case .expenses: if !tx.isSpending { return false }
         case .transfers: if !tx.isTransfer { return false }
         }
         if !ignoringDates, let interval, !(tx.date >= interval.start && tx.date < interval.end) { return false }
@@ -111,8 +111,9 @@ struct TransactionsView: View {
 
     private var filteredTotals: (income: Double, spent: Double) {
         filtered.reduce((0, 0)) { acc, tx in
-            if tx.isTransfer { return acc }
-            return tx.isIncome ? (acc.0 + tx.amount, acc.1) : (acc.0, acc.1 + tx.amount)
+            if tx.isOrdinaryIncome { return (acc.0 + tx.amount, acc.1) }
+            if tx.isSpending { return (acc.0, acc.1 + tx.amount) }
+            return acc
         }
     }
 
@@ -337,8 +338,9 @@ struct TransactionsView: View {
         Section {
             TransactionCalendar(month: $calendarMonth, selected: $selectedDay, totals: dayTotals.mapValues { items in
                 items.reduce((0.0, 0.0)) { acc, tx in
-                    if tx.isTransfer { return acc }
-                    return tx.isIncome ? (acc.0 + tx.amount, acc.1) : (acc.0, acc.1 + tx.amount)
+                    if tx.isOrdinaryIncome { return (acc.0 + tx.amount, acc.1) }
+                    if tx.isSpending { return (acc.0, acc.1 + tx.amount) }
+                    return acc
                 }
             }, currency: currency)
             .listRowInsets(EdgeInsets(top: 14, leading: 12, bottom: 14, trailing: 12))
@@ -808,6 +810,17 @@ struct TransactionDetailView: View {
                         Text("None").tag(UUID?.none)
                         ForEach(accounts) { a in Text(a.menuTitle).tag(UUID?.some(a.id)) }
                     }
+                    if tx.effectiveTransactionType == .internalTransfer {
+                        Picker("To account", selection: Binding(get: { tx.toAccountID }, set: { newID in
+                            guard newID != tx.accountID else { return }
+                            Ledger.edit(tx, context: context) { $0.toAccountID = newID }
+                        })) {
+                            Text("Select destination").tag(UUID?.none)
+                            ForEach(accounts.filter { $0.id != tx.accountID }) { a in
+                                Text(a.menuTitle).tag(UUID?.some(a.id))
+                            }
+                        }
+                    }
                     LabeledContent("Source") {
                         HStack(spacing: 6) {
                             Text(tx.source.title)
@@ -815,6 +828,91 @@ struct TransactionDetailView: View {
                         }
                     }
                     TextField("Note", text: $tx.note, axis: .vertical)
+                }
+            }
+
+            if tx.source == .sms || tx.smsTransactionType != nil {
+                Section {
+                    Picker("Transaction type", selection: Binding(
+                        get: { tx.effectiveTransactionType },
+                        set: { newType in
+                            let result = Ledger.applyUserCorrection(
+                                to: tx,
+                                newType: newType,
+                                newBank: tx.smsBank,
+                                toAccountID: tx.toAccountID,
+                                approveIfPending: false,
+                                rememberRule: true,
+                                context: context
+                            )
+                            appState.report(result, base: "Updated to \(newType.title)")
+                        }
+                    )) {
+                        ForEach(SMSTransactionType.allCases) { t in
+                            Text(t.title).tag(t)
+                        }
+                    }
+
+                    Picker("SMS sender bank", selection: Binding(
+                        get: { tx.smsBank ?? "" },
+                        set: { newBank in
+                            let clean = newBank.isEmpty ? nil : newBank
+                            tx.smsBank = clean
+                            if let clean, let sender = tx.smsSender, !sender.isEmpty {
+                                SMSUserRules.rememberBank(clean, forSender: sender)
+                            }
+                            if let raw = tx.rawText, !raw.isEmpty, tx.effectiveTransactionType != .unknown {
+                                SMSUserRules.rememberClassification(
+                                    type: tx.effectiveTransactionType,
+                                    category: tx.category,
+                                    bank: clean,
+                                    toAccountID: tx.toAccountID,
+                                    forRawSMS: raw,
+                                    sender: tx.smsSender,
+                                    counterparty: tx.smsRecipientSuffix ?? Finance.merchantKey(tx.merchant)
+                                )
+                            }
+                            try? context.save()
+                            appState.show(clean.map { "Bank set to \($0)" } ?? "Cleared SMS bank")
+                        }
+                    )) {
+                        Text("Unknown / Not set").tag("")
+                        ForEach(BahrainBankCatalog.bahrainBanks, id: \.self) { bank in
+                            Text(bank).tag(bank)
+                        }
+                    }
+
+                    if let ref = tx.smsReference, !ref.isEmpty {
+                        LabeledContent("Reference") {
+                            Text(ref).font(.subheadline.monospaced()).foregroundStyle(Theme.ink)
+                        }
+                    }
+                    if let recip = tx.smsRecipientSuffix, !recip.isEmpty {
+                        LabeledContent("Recipient IBAN / acct") {
+                            Text("••\(recip)").font(.subheadline.monospacedDigit()).foregroundStyle(Theme.ink)
+                        }
+                    }
+                    if let acct = tx.smsAccountSuffix, !acct.isEmpty {
+                        LabeledContent("Card / account suffix") {
+                            Text("••\(acct)").font(.subheadline.monospacedDigit()).foregroundStyle(Theme.ink)
+                        }
+                    }
+                    if let conf = tx.smsConfidence {
+                        LabeledContent("Confidence") {
+                            Text(conf.title)
+                                .foregroundStyle(conf == .low ? Theme.warning : Theme.secondaryInk)
+                        }
+                    }
+                    if !tx.smsClassificationReason.isEmpty {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Classification reason").font(.caption).foregroundStyle(Theme.secondaryInk)
+                            Text(tx.smsClassificationReason).font(.footnote).foregroundStyle(Theme.ink)
+                        }
+                    }
+                } header: {
+                    Text("SMS classification & bank")
+                } footer: {
+                    Text("Corrections update balances and totals and are remembered for matching future messages.")
                 }
             }
 

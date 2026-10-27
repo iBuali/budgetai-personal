@@ -11,13 +11,18 @@ struct AddBankSMSIntent: AppIntent {
     @Parameter(title: "Message", inputOptions: String.IntentInputOptions(multiline: true))
     var message: String
 
+    @Parameter(title: "Sender (Optional)")
+    var sender: String?
+
     static var parameterSummary: some ParameterSummary {
-        Summary("Add \(\.$message) to Budget AI")
+        Summary("Add \(\.$message) to Budget AI") {
+            \.$sender
+        }
     }
 
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog {
-        let outcome = await SMSImporter.importText(message, context: DataStore.shared.mainContext)
+        let outcome = await SMSImporter.importText(message, context: DataStore.shared.mainContext, sender: sender)
         return .result(dialog: IntentDialog(stringLiteral: outcome.message))
     }
 }

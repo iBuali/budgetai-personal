@@ -57,12 +57,13 @@ enum AIService {
 
     // MARK: SMS parsing
 
-    static func parseSMS(_ text: String, context: ModelContext? = nil) async throws -> ParsedSMS? {
+    static func parseSMS(_ text: String, sender: String? = nil, context: ModelContext? = nil) async throws -> ParsedSMS? {
         let normalized = SMSParser.normalizeText(text)
         if SMSParser.nonTransactionReason(normalized) != nil { return nil }
 
         let client = try GeminiAccount.client()
         let categories = SpendCategory.allCases.map(\.rawValue)
+        let txTypes = SMSTransactionType.allCases.map(\.rawValue)
         let names = SpendCategory.allCases.map { cat -> String in
             let subs = cat.subcategories.map { "\($0.rawValue) (\($0.title))" }.joined(separator: ", ")
             return subs.isEmpty ? "\(cat.rawValue) (\(cat.title))" : "\(cat.rawValue) (\(cat.title); subcategories: \(subs))"
@@ -81,6 +82,9 @@ enum AIService {
             "type": "OBJECT",
             "properties": [
                 "isTransaction": ["type": "BOOLEAN"],
+                "transactionType": ["type": "STRING", "enum": txTypes],
+                "confidence": ["type": "STRING", "enum": ["high", "medium", "low"]],
+                "classificationReason": ["type": "STRING"],
                 "amount": ["type": "NUMBER"],
                 "currency": ["type": "STRING"],
                 "isIncome": ["type": "BOOLEAN"],
@@ -88,65 +92,79 @@ enum AIService {
                 "category": ["type": "STRING", "enum": categories],
                 "subcategory": ["type": "STRING", "nullable": true],
                 "paymentMethod": ["type": "STRING", "nullable": true],
+                "referenceNumber": ["type": "STRING", "nullable": true],
+                "recipientSuffix": ["type": "STRING", "nullable": true],
                 "date": ["type": "STRING", "nullable": true],
                 "bank": ["type": "STRING", "nullable": true],
                 "cardLast4": ["type": "STRING", "nullable": true],
                 "availableBalance": ["type": "NUMBER", "nullable": true],
             ],
-            "required": ["isTransaction", "amount", "isIncome", "merchant", "category"],
+            "required": ["isTransaction", "transactionType", "confidence", "amount", "isIncome", "merchant", "category"],
         ]
         let system = """
         You read bank and wallet SMS alerts from Bahrain and the GCC in English or Arabic (including NBB, BBK, BisB, ila Bank, \
-        KFH, Al Salam Bank, BenefitPay, Fawri+, Fawri, Al Rajhi, SNB, Riyad Bank, Alinma, SAB, STC Pay, Emirates NBD, ADCB, FAB, \
-        NBK, QNB, Bank Muscat, Apple Pay, mada, KNET, SADAD) and extract one completed financial transaction.
-        Set isTransaction=false for OTPs, verification/login codes (رمز التحقق / كلمة المرور لمرة واحدة), declined/failed/reversed \
-        transactions (مرفوضة / لم تتم), promotional offers, or balance-only inquiries.
-        merchant must be a clean, human-readable brand or counterparty name (e.g. "Lulu Hypermarket", "Talabat", "Batelco", \
-        "EWA", "Salary"); strip terminal IDs, country suffixes (BH, BAH, KSA), and payment prefixes (BENEFITPAY*, FAWRI+*, APPLE PAY*).
-        category must be one of these keys: \(names). Income uses "income" (or a custom income category). \
-        subcategory is an optional subcategory key or title if one fits, otherwise null. \
-        paymentMethod is the payment rail if mentioned (e.g. "BenefitPay · Fawri+", "BenefitPay", "Fawri+", "Apple Pay", "ATM Withdrawal", "mada", "SADAD"), otherwise null. \
-        date as yyyy-MM-dd if present. bank is the short bank name if present (NBB, BBK, BisB, ila, KFH, Al Salam, BenefitPay, Al Rajhi, SNB, ...). \
-        cardLast4 is the last 3-4 digits of the card or account if shown. availableBalance is the remaining/available account balance \
-        stated in the message (never confuse available balance with the transaction amount), or null.\(learnedSection)
+        KFH, Al Salam Bank, BenefitPay, Fawri+, Fawri) and extract one financial transaction.
+        CRITICAL RULES:
+        1. Set isTransaction=false for OTPs, verification codes, declined/failed alerts, promotional offers, or balance-only inquiries.
+        2. Fawri+ is an interbank transfer service in Bahrain. Do NOT classify Fawri+ as ordinary income or ordinary expense. \
+        Specifically, "Fawri+ payment BHD..., ref: BIB... was credited to IBAN ending XXXX ... Balance BHD..." is a sender notification \
+        meaning the outgoing transfer was credited to the recipient's IBAN -> transactionType="transfer_out", isIncome=false, category="transfers".
+        3. Use transactionType="transfer_in" for incoming bank/Fawri+ transfers, "transfer_out" for outgoing bank/Fawri+ transfers, \
+        "internal_transfer" for transfers between the user's own accounts, "fee" for bank fees/charges, "refund" for purchase refunds/reversals, \
+        "income" for salary/payroll/dividends, "expense" for card/POS/bill purchases, and "unknown" (with confidence="low") when direction or type is ambiguous.
+        4. Never guess a bank when confidence is low (return bank=null if uncertain).
+        5. Distinguish the transaction amount from the reported account balance (availableBalance).
+        category must be one of these keys: \(names).\(learnedSection)
         """
         let reply = try await client.generate(system: system, turns: [GeminiTurn(isUser: true, text: normalized)], schema: schema, temperature: 0.1)
         let obj = try GeminiClient.decodeObject(reply)
         guard (obj["isTransaction"] as? Bool) == true, let amount = (obj["amount"] as? NSNumber)?.doubleValue, amount > 0 else { return nil }
-        let isIncome = obj["isIncome"] as? Bool ?? false
+
+        let fallbackParsed = SMSParser.parse(normalized, sender: sender, context: context)
+        let txType = SMSTransactionType(rawValue: obj["transactionType"] as? String ?? "") ?? fallbackParsed?.transactionType ?? .unknown
+        let confidence = SMSConfidence(rawValue: obj["confidence"] as? String ?? "") ?? (txType == .unknown ? .low : .medium)
+        let isIncome = txType.isIncomeDirection
+
         var category = SpendCategory(rawValue: obj["category"] as? String ?? "") ?? .other
-        if isIncome && category != .transfers && !category.isIncomeCategory { category = .income }
+        if txType.isTransferType {
+            category = .transfers
+        } else if txType == .income && !category.isIncomeCategory {
+            category = .income
+        } else if txType == .unknown {
+            category = .other
+        }
 
         var subcategory: SpendCategory?
-        if let subRaw = (obj["subcategory"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !subRaw.isEmpty {
+        if !txType.isTransferType,
+           let subRaw = (obj["subcategory"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !subRaw.isEmpty {
             let candidates = category.subcategories
             subcategory = candidates.first(where: { $0.rawValue.caseInsensitiveCompare(subRaw) == .orderedSame || $0.title.caseInsensitiveCompare(subRaw) == .orderedSame })
         }
 
-        var date: Date?
-        if let ds = obj["date"] as? String {
+        let (fallbackDate, fallbackTime) = SMSParser.extractDateAndTime(in: normalized)
+        var date: Date? = fallbackDate
+        if date == nil, let ds = obj["date"] as? String {
             let df = DateFormatter()
             df.locale = Locale(identifier: "en_US_POSIX")
             df.dateFormat = "yyyy-MM-dd"
-            if let d = df.date(from: ds), Calendar.current.isDate(d, inSameDayAs: .now) == false, d < .now {
+            if let d = df.date(from: ds) {
                 date = Calendar.current.date(bySettingHour: 12, minute: 0, second: 0, of: d)
             }
         }
-        if date == nil {
-            date = SMSParser.extractDate(in: normalized)
-        }
 
         let rawMerchant = (obj["merchant"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let cleanMerchant = (rawMerchant?.isEmpty == false ? rawMerchant! : (isIncome ? "Incoming transfer" : "Card purchase"))
+        let cleanMerchant = (rawMerchant?.isEmpty == false ? rawMerchant! : (fallbackParsed?.merchant ?? "Bank SMS"))
 
-        if let context, let learned = Categorizer.learnedMatch(for: cleanMerchant, in: context, isIncome: isIncome) {
+        if !txType.isTransferType, let context, let learned = Categorizer.learnedMatch(for: cleanMerchant, in: context, isIncome: isIncome) {
             category = learned.category
             if learned.subcategory != nil { subcategory = learned.subcategory }
         }
 
-        let paymentNote = (obj["paymentMethod"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let fallbackParsed = SMSParser.parse(normalized, context: context)
-        let bankHint = (obj["bank"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let bankInfo = SMSParser.identifyBank(in: normalized, sender: sender)
+        let resolvedBank = bankInfo.bank
+        let suffixes = SMSParser.extractSuffixes(in: normalized)
+        let ref = (obj["referenceNumber"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? SMSParser.referenceNumber(in: normalized)
+        let reason = (obj["classificationReason"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "AI fallback classification"
 
         return ParsedSMS(
             amount: amount,
@@ -156,10 +174,21 @@ enum AIService {
             category: category,
             subcategory: subcategory ?? fallbackParsed?.subcategory,
             date: date,
-            accountHint: (bankHint?.isEmpty == false ? bankHint : nil) ?? SMSParser.accountHint(in: normalized),
-            cardDigits: (obj["cardLast4"] as? String) ?? SMSParser.cardDigits(in: normalized),
+            accountHint: resolvedBank,
+            cardDigits: suffixes.accountSuffix ?? (obj["cardLast4"] as? String),
             balance: (obj["availableBalance"] as? NSNumber)?.doubleValue ?? SMSParser.balance(in: normalized),
-            note: (paymentNote?.isEmpty == false ? paymentNote : nil) ?? fallbackParsed?.note
+            note: fallbackParsed?.note ?? (obj["paymentMethod"] as? String),
+            transactionType: txType,
+            detectedBank: resolvedBank,
+            bankConfidence: bankInfo.confidence,
+            confidence: confidence,
+            classificationReason: reason,
+            referenceNumber: ref,
+            accountSuffix: suffixes.accountSuffix ?? (obj["cardLast4"] as? String),
+            recipientSuffix: suffixes.recipientSuffix ?? (obj["recipientSuffix"] as? String),
+            timeString: fallbackTime,
+            sender: sender,
+            toAccountID: fallbackParsed?.toAccountID
         )
     }
 
@@ -303,21 +332,41 @@ struct SMSImportOutcome {
 }
 
 enum SMSImporter {
-    /// - Parameter forceApprove: manual paste from inside the app is applied immediately.
-    static func importText(_ text: String, context: ModelContext, forceApprove: Bool = false, accountID: UUID? = nil) async -> SMSImportOutcome {
+    /// - Parameter forceApprove: manual paste from inside the app is applied immediately when confidence is high/medium.
+    ///   Uncertain/unknown messages (`requiresReview == true`) are always kept pending for user review.
+    static func importText(
+        _ text: String,
+        context: ModelContext,
+        forceApprove: Bool = false,
+        accountID: UUID? = nil,
+        sender: String? = nil,
+        manualBank: String? = nil
+    ) async -> SMSImportOutcome {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return SMSImportOutcome(message: "The message was empty.") }
         CategoryRegistry.shared.reload(context: context)
 
-        let chunks = SMSParser.splitBatch(trimmed)
-        if chunks.count > 1 {
-            return await importBatch(chunks, context: context, forceApprove: forceApprove, accountID: accountID)
+        if let manualBank, !manualBank.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           let sender, !sender.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            SMSUserRules.rememberBank(manualBank, forSender: sender)
         }
 
-        return await importSingle(trimmed, context: context, forceApprove: forceApprove, accountID: accountID)
+        let chunks = SMSParser.splitBatch(trimmed)
+        if chunks.count > 1 {
+            return await importBatch(chunks, context: context, forceApprove: forceApprove, accountID: accountID, sender: sender, manualBank: manualBank)
+        }
+
+        return await importSingle(trimmed, context: context, forceApprove: forceApprove, accountID: accountID, sender: sender, manualBank: manualBank)
     }
 
-    private static func importBatch(_ chunks: [String], context: ModelContext, forceApprove: Bool, accountID: UUID?) async -> SMSImportOutcome {
+    private static func importBatch(
+        _ chunks: [String],
+        context: ModelContext,
+        forceApprove: Bool,
+        accountID: UUID?,
+        sender: String?,
+        manualBank: String?
+    ) async -> SMSImportOutcome {
         var imported: [MoneyTransaction] = []
         var anyAI = false
         var anyLearned = false
@@ -327,7 +376,7 @@ enum SMSImporter {
         var skippedCount = 0
 
         for chunk in chunks {
-            let single = await importSingle(chunk, context: context, forceApprove: forceApprove, accountID: accountID)
+            let single = await importSingle(chunk, context: context, forceApprove: forceApprove, accountID: accountID, sender: sender, manualBank: manualBank)
             if let tx = single.transaction {
                 imported.append(tx)
                 if single.usedAI { anyAI = true }
@@ -357,51 +406,95 @@ enum SMSImporter {
             learnedMerchant: anyLearned,
             flaggedDuplicate: anyDuplicate,
             alerts: allAlerts,
-            pending: first.isPending,
+            pending: imported.contains(where: \.isPending),
             balanceSynced: lastSynced,
             message: msg
         )
     }
 
-    private static func importSingle(_ trimmed: String, context: ModelContext, forceApprove: Bool, accountID: UUID?) async -> SMSImportOutcome {
+    private static func importSingle(
+        _ trimmed: String,
+        context: ModelContext,
+        forceApprove: Bool,
+        accountID: UUID?,
+        sender: String?,
+        manualBank: String?
+    ) async -> SMSImportOutcome {
         if let reason = SMSParser.nonTransactionReason(trimmed) {
-            return SMSImportOutcome(message: "Skipped: \(reason).")
+            return SMSImportOutcome(message: reason)
         }
 
-        var parsed: ParsedSMS?
+        // 1. Deterministic, bank-specific parsing rules first
+        let deterministic = SMSParser.parse(trimmed, sender: sender, context: context)
+        var parsed: ParsedSMS? = deterministic
         var usedAI = false
-        var aiSaidNotTransaction = false
-        if GeminiAccount.isConfigured {
+
+        // 2. Use AI only as a fallback when deterministic parsing is nil or uncertain
+        if (deterministic == nil || deterministic?.requiresReview == true) && GeminiAccount.isConfigured {
             do {
-                parsed = try await AIService.parseSMS(trimmed, context: context)
-                usedAI = true
-                aiSaidNotTransaction = parsed == nil
+                if let aiParsed = try await AIService.parseSMS(trimmed, sender: sender, context: context) {
+                    parsed = aiParsed
+                    usedAI = true
+                }
             } catch {
-                parsed = nil
+                // Keep deterministic result on AI error
             }
         }
-        if parsed == nil && !aiSaidNotTransaction {
-            parsed = SMSParser.parse(trimmed, context: context)
-        }
+
         guard var p = parsed else {
             return SMSImportOutcome(usedAI: usedAI, message: "No transaction found in this message.")
         }
 
         var learnedMerchant = false
-        if let learned = Categorizer.learnedMatch(for: p.merchant, in: context, isIncome: p.isIncome) {
+        if !p.transactionType.isTransferType && p.transactionType != .unknown,
+           let learned = Categorizer.learnedMatch(for: p.merchant, in: context, isIncome: p.isIncome) {
             p.category = learned.category
             if learned.subcategory != nil { p.subcategory = learned.subcategory }
             learnedMerchant = true
         }
 
-        let target = accountID ?? Ledger.smsAccountID(context: context, digits: p.cardDigits, hint: p.accountHint)
-        let tx = MoneyTransaction(amount: p.amount, isIncome: p.isIncome, merchant: p.merchant, category: p.category,
-                                  date: p.date ?? .now, source: .sms, accountID: target)
+        let cleanManualBank = manualBank?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedSMSBank = (cleanManualBank?.isEmpty == false ? cleanManualBank : nil) ?? p.detectedBank
+
+        // Determine account involved in the transaction (kept separate from smsBank)
+        let matchingDigits: String? = {
+            if p.transactionType == .transferIn {
+                return p.accountSuffix ?? p.recipientSuffix
+            }
+            // For outgoing transfers, never match recipientSuffix as the source account
+            return p.accountSuffix
+        }()
+        let target = accountID ?? Ledger.smsAccountID(context: context, digits: matchingDigits, hint: resolvedSMSBank)
+
+        let tx = MoneyTransaction(
+            amount: p.amount,
+            isIncome: p.isIncome,
+            merchant: p.merchant,
+            category: p.category,
+            date: p.date ?? .now,
+            source: .sms,
+            accountID: target
+        )
         tx.subcategory = p.subcategory
         tx.rawText = trimmed
         tx.aiCategorized = usedAI
         tx.smsBalance = p.balance
-        tx.isPending = !forceApprove && !AppSettings.smsAutoApprove
+        tx.smsBank = resolvedSMSBank
+        tx.smsSender = sender?.trimmingCharacters(in: .whitespacesAndNewlines)
+        tx.smsTransactionType = p.transactionType
+        tx.smsConfidence = p.confidence
+        tx.smsClassificationReason = p.classificationReason
+        tx.smsReference = p.referenceNumber
+        tx.smsAccountSuffix = p.accountSuffix
+        tx.smsRecipientSuffix = p.recipientSuffix
+        tx.toAccountID = p.toAccountID
+
+        // Uncertain transactions are ALWAYS marked pending for user review rather than silently applied
+        if p.requiresReview {
+            tx.isPending = true
+        } else {
+            tx.isPending = !forceApprove && !AppSettings.smsAutoApprove
+        }
 
         let code = AppSettings.currency
         var notes: [String] = []
@@ -415,13 +508,25 @@ enum SMSImporter {
         }
 
         let result = Ledger.add(tx, context: context)
-        let catLabel = tx.displayCategory.title
-        var summary = "\(tx.isIncome ? "Income" : "Expense") \(Money.format(tx.amount, code)) · \(tx.merchant) · \(catLabel)"
-        if tx.isPending { summary = "Waiting for approval: " + summary }
+        let typeLabel = p.transactionType.title
+        var summary = "\(typeLabel) \(Money.format(tx.amount, code)) · \(tx.merchant)"
+        if p.requiresReview {
+            summary = "Needs review: " + summary
+        } else if tx.isPending {
+            summary = "Waiting for approval: " + summary
+        }
         if result.flaggedDuplicate { summary += " (possible duplicate)" }
         if let synced = result.balanceSynced { summary += ". Balance matched to bank: \(Money.format(synced, code))" }
-        return SMSImportOutcome(transaction: tx, batchTransactions: [tx], usedAI: usedAI, learnedMerchant: learnedMerchant,
-                                flaggedDuplicate: result.flaggedDuplicate, alerts: result.alerts, pending: tx.isPending,
-                                balanceSynced: result.balanceSynced, message: summary)
+        return SMSImportOutcome(
+            transaction: tx,
+            batchTransactions: [tx],
+            usedAI: usedAI,
+            learnedMerchant: learnedMerchant,
+            flaggedDuplicate: result.flaggedDuplicate,
+            alerts: result.alerts,
+            pending: tx.isPending,
+            balanceSynced: result.balanceSynced,
+            message: summary
+        )
     }
 }

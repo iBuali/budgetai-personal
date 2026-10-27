@@ -84,7 +84,7 @@ struct Finance {
     }
 
     func income(in interval: DateInterval) -> Double {
-        transactions(in: interval).filter { $0.isIncome && !$0.isTransfer }.reduce(0) { $0 + $1.amount }
+        transactions(in: interval).filter(\.isOrdinaryIncome).reduce(0) { $0 + $1.amount }
     }
 
     func expenses(in interval: DateInterval) -> Double {
@@ -162,6 +162,8 @@ struct Finance {
     func balanceSeries() -> (actual: [ChartPoint], projected: [ChartPoint]) {
         let liquidIDs = Set(accounts.filter { $0.kind.isLiquid }.map(\.id))
         func liquidEffect(_ tx: MoneyTransaction) -> Double {
+            if tx.smsTransactionType == .unknown { return 0 }
+            if tx.smsTransactionType == .internalTransfer && tx.toAccountID == nil { return 0 }
             var effect = 0.0
             if let id = tx.accountID { if liquidIDs.contains(id) { effect += tx.signedAmount } } else if !tx.isTransfer { effect += tx.signedAmount }
             if let to = tx.toAccountID, liquidIDs.contains(to) { effect += tx.amount }

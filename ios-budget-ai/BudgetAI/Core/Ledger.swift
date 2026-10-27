@@ -79,6 +79,13 @@ enum Ledger {
     }
 
     static func applyBalance(_ tx: MoneyTransaction, sign: Double, context: ModelContext) {
+        if tx.smsTransactionType == .unknown {
+            return
+        }
+        if tx.smsTransactionType == .internalTransfer && tx.toAccountID == nil {
+            // Do not change net worth on an internal transfer without a destination account.
+            return
+        }
         if let id = tx.accountID, let account = account(id, context: context) {
             if account.kind.isLiability {
                 account.balance += (tx.isIncome ? -tx.amount : tx.amount) * sign
@@ -86,10 +93,111 @@ enum Ledger {
                 account.balance += tx.signedAmount * sign
             }
         }
-        // Transfers credit the destination account (paying down a loan or card reduces what's owed).
-        if tx.isTransfer, let to = tx.toAccountID, let dest = account(to, context: context) {
+        // Internal transfers credit the destination account (paying down a loan or card reduces what's owed).
+        if (tx.smsTransactionType == .internalTransfer || (tx.smsTransactionType == nil && tx.isTransfer)),
+           let to = tx.toAccountID, let dest = account(to, context: context) {
             dest.balance += (dest.kind.isLiability ? -tx.amount : tx.amount) * sign
         }
+    }
+
+    /// Applies a user correction to a transaction's SMS classification, bank, category, or destination account,
+    /// updating account balances, budgets, and net worth consistently and optionally saving a scoped user rule.
+    @discardableResult
+    static func applyUserCorrection(
+        to tx: MoneyTransaction,
+        newType: SMSTransactionType,
+        newBank: String? = nil,
+        newCategory: SpendCategory? = nil,
+        toAccountID: UUID? = nil,
+        approveIfPending: Bool = false,
+        rememberRule: Bool = true,
+        context: ModelContext
+    ) -> LedgerResult {
+        let resolvedBank: String? = {
+            if let newBank {
+                let clean = newBank.trimmingCharacters(in: .whitespacesAndNewlines)
+                return clean.isEmpty ? nil : clean
+            }
+            return tx.smsBank
+        }()
+
+        func mutate(_ target: MoneyTransaction) {
+            target.smsTransactionType = newType
+            target.isIncome = newType.isIncomeDirection
+            target.smsBank = resolvedBank
+            target.smsConfidence = .high
+            target.smsClassificationReason = "Corrected by user to \(newType.title)"
+            target.aiCategorized = false
+
+            switch newType {
+            case .transferIn, .transferOut:
+                target.category = .transfers
+                target.subcategory = nil
+                target.toAccountID = nil
+            case .internalTransfer:
+                target.category = .transfers
+                target.subcategory = nil
+                if let toAccountID, toAccountID != target.accountID {
+                    target.toAccountID = toAccountID
+                }
+            case .income:
+                target.toAccountID = nil
+                if let newCategory {
+                    target.category = newCategory
+                } else if !target.category.isIncomeCategory {
+                    target.category = .income
+                }
+            case .fee:
+                target.toAccountID = nil
+                if let newCategory {
+                    target.category = newCategory
+                } else if target.category == .transfers || target.category.isIncomeCategory {
+                    target.category = .bills
+                }
+            case .expense, .refund:
+                target.toAccountID = nil
+                if let newCategory {
+                    target.category = newCategory
+                } else if target.category == .transfers || target.category.isIncomeCategory {
+                    target.category = Categorizer.guess(target.merchant) ?? .other
+                }
+            case .unknown:
+                target.toAccountID = nil
+                target.category = .other
+                target.smsConfidence = .low
+            }
+        }
+
+        var result = LedgerResult()
+        if tx.isPending && approveIfPending && newType != .unknown {
+            mutate(tx)
+            result = approve(tx, context: context)
+        } else {
+            edit(tx, context: context) { target in
+                mutate(target)
+            }
+            if !tx.isPending && tx.isSpending {
+                result.alerts = checkBudgetAlerts(for: tx.category, context: context)
+            }
+        }
+
+        if rememberRule {
+            if let bank = resolvedBank, let sender = tx.smsSender, !sender.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                SMSUserRules.rememberBank(bank, forSender: sender)
+            }
+            if let raw = tx.rawText, !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, newType != .unknown {
+                SMSUserRules.rememberClassification(
+                    type: newType,
+                    category: tx.category,
+                    bank: resolvedBank,
+                    toAccountID: tx.toAccountID,
+                    forRawSMS: raw,
+                    sender: tx.smsSender,
+                    counterparty: tx.smsRecipientSuffix ?? Finance.merchantKey(tx.merchant)
+                )
+            }
+        }
+        return result
     }
 
     /// Records a transfer between two accounts.
@@ -153,13 +261,46 @@ enum Ledger {
     // MARK: Duplicates
 
     static func isLikelyDuplicate(_ tx: MoneyTransaction, context: ModelContext) -> Bool {
+        let txRef = tx.smsReference?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !txRef.isEmpty {
+            let all = (try? context.fetch(FetchDescriptor<MoneyTransaction>())) ?? []
+            if all.contains(where: { other in
+                guard other.id != tx.id, let otherRef = other.smsReference?.trimmingCharacters(in: .whitespacesAndNewlines), !otherRef.isEmpty else {
+                    return false
+                }
+                return otherRef.caseInsensitiveCompare(txRef) == .orderedSame
+            }) {
+                return true
+            }
+        }
+
         let start = tx.date.addingTimeInterval(-2 * 86_400)
         let end = tx.date.addingTimeInterval(2 * 86_400)
         let descriptor = FetchDescriptor<MoneyTransaction>(predicate: #Predicate { $0.date >= start && $0.date <= end })
         let candidates = (try? context.fetch(descriptor)) ?? []
         let key = Finance.merchantKey(tx.merchant)
+        let normRaw = tx.rawText.map { SMSParser.normalizeText($0).trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
+
         return candidates.contains { other in
-            guard other.id != tx.id, other.isIncome == tx.isIncome, abs(other.amount - tx.amount) < 0.0005 else { return false }
+            guard other.id != tx.id else { return false }
+            let otherRef = other.smsReference?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            // If both have non-empty reference numbers and they differ, they are distinct bank transactions.
+            if !txRef.isEmpty && !otherRef.isEmpty && txRef.caseInsensitiveCompare(otherRef) != .orderedSame {
+                return false
+            }
+            guard abs(other.amount - tx.amount) < 0.0005 else { return false }
+
+            if !normRaw.isEmpty, let oRaw = other.rawText {
+                let normOther = SMSParser.normalizeText(oRaw).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !normOther.isEmpty && normRaw == normOther {
+                    return true
+                }
+            }
+
+            guard other.effectiveTransactionType == tx.effectiveTransactionType, other.isIncome == tx.isIncome else { return false }
+            if let r1 = tx.smsRecipientSuffix, let r2 = other.smsRecipientSuffix, !r1.isEmpty, !r2.isEmpty {
+                return r1 == r2
+            }
             let otherKey = Finance.merchantKey(other.merchant)
             if key.isEmpty || otherKey.isEmpty { return true }
             return key == otherKey || key.contains(otherKey) || otherKey.contains(key)
@@ -254,6 +395,7 @@ enum Ledger {
         try? context.delete(model: ChatMessage.self)
         try? context.delete(model: CustomCategory.self)
         try? context.save()
+        SMSUserRules.clearAll()
         CategoryRegistry.shared.reload(context: context)
         Notifier.rescheduleBills([])
     }

@@ -258,6 +258,66 @@ enum TxSource: String, CaseIterable {
     }
 }
 
+/// Fine-grained classification for bank SMS transactions.
+enum SMSTransactionType: String, CaseIterable, Codable, Identifiable {
+    case income = "income"
+    case expense = "expense"
+    case transferIn = "transfer_in"
+    case transferOut = "transfer_out"
+    case internalTransfer = "internal_transfer"
+    case fee = "fee"
+    case refund = "refund"
+    case unknown = "unknown"
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .income: "Income"
+        case .expense: "Expense"
+        case .transferIn: "Transfer In"
+        case .transferOut: "Transfer Out"
+        case .internalTransfer: "Internal Transfer"
+        case .fee: "Fee"
+        case .refund: "Refund"
+        case .unknown: "Unknown (Needs Review)"
+        }
+    }
+
+    var isTransferType: Bool {
+        self == .transferIn || self == .transferOut || self == .internalTransfer
+    }
+
+    var isIncomeDirection: Bool {
+        self == .income || self == .transferIn || self == .refund
+    }
+
+    var countsAsIncome: Bool {
+        self == .income
+    }
+
+    var countsAsExpense: Bool {
+        self == .expense || self == .fee
+    }
+}
+
+/// Confidence level assigned by the SMS parser or user rule.
+enum SMSConfidence: String, CaseIterable, Codable, Identifiable {
+    case high = "high"
+    case medium = "medium"
+    case low = "low"
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .high: "High"
+        case .medium: "Medium"
+        case .low: "Low (Review Required)"
+        }
+    }
+}
+
 @Model
 final class MoneyTransaction {
     var id: UUID = UUID()
@@ -281,6 +341,22 @@ final class MoneyTransaction {
     var smsBalance: Double?
     /// How much the account balance was corrected to match the bank SMS.
     var balanceAdjustment: Double = 0
+    /// Detected or user-assigned SMS sender bank (kept separate from the accountID involved in the transaction).
+    var smsBank: String?
+    /// Raw SMS sender ID or phone number, if provided.
+    var smsSender: String?
+    /// Stored raw value of `SMSTransactionType`.
+    var smsTransactionTypeRaw: String = ""
+    /// Stored raw value of `SMSConfidence`.
+    var smsConfidenceRaw: String = ""
+    /// Human-readable reason explaining how the transaction was classified.
+    var smsClassificationReason: String = ""
+    /// Transaction reference number extracted from the SMS (e.g. BIB103KAK000KZUM).
+    var smsReference: String?
+    /// Card or source account suffix extracted from the SMS.
+    var smsAccountSuffix: String?
+    /// Recipient IBAN or destination account suffix extracted from the SMS (e.g. 0846).
+    var smsRecipientSuffix: String?
 
     init(amount: Double, isIncome: Bool, merchant: String, category: SpendCategory, date: Date = .now,
          note: String = "", source: TxSource = .manual, accountID: UUID? = nil) {
@@ -305,9 +381,32 @@ final class MoneyTransaction {
         set { subcategoryKey = newValue?.rawValue ?? "" }
     }
 
+    var smsTransactionType: SMSTransactionType? {
+        get { smsTransactionTypeRaw.isEmpty ? nil : SMSTransactionType(rawValue: smsTransactionTypeRaw) }
+        set { smsTransactionTypeRaw = newValue?.rawValue ?? "" }
+    }
+
+    var smsConfidence: SMSConfidence? {
+        get { smsConfidenceRaw.isEmpty ? nil : SMSConfidence(rawValue: smsConfidenceRaw) }
+        set { smsConfidenceRaw = newValue?.rawValue ?? "" }
+    }
+
+    var effectiveTransactionType: SMSTransactionType {
+        if let t = smsTransactionType { return t }
+        if category == .transfers {
+            if toAccountID != nil { return .internalTransfer }
+            return isIncome ? .transferIn : .transferOut
+        }
+        return isIncome ? .income : .expense
+    }
+
     /// Most specific category for display (sub-category if set).
     var displayCategory: SpendCategory { subcategory ?? category }
-    var isTransfer: Bool { category == .transfers }
+
+    var isTransfer: Bool {
+        if let t = smsTransactionType { return t.isTransferType }
+        return category == .transfers
+    }
 
     var source: TxSource {
         get { TxSource(rawValue: sourceRaw) ?? .manual }
@@ -315,7 +414,16 @@ final class MoneyTransaction {
     }
 
     var signedAmount: Double { isIncome ? amount : -amount }
-    var isSpending: Bool { !isIncome && category != .transfers }
+
+    var isSpending: Bool {
+        if let t = smsTransactionType { return t.countsAsExpense }
+        return !isIncome && category != .transfers
+    }
+
+    var isOrdinaryIncome: Bool {
+        if let t = smsTransactionType { return t.countsAsIncome }
+        return isIncome && category != .transfers
+    }
 }
 
 // MARK: - Budgets & goals

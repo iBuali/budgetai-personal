@@ -194,7 +194,7 @@ struct TransactionRow: View {
                     .foregroundStyle(Theme.ink)
                     .lineLimit(1)
                 if tx.isPending {
-                    Label("Waiting for approval", systemImage: "clock.fill")
+                    Label(tx.smsTransactionType == .unknown || tx.smsConfidence == .low ? "Needs review" : "Waiting for approval", systemImage: "clock.fill")
                         .font(.subheadline)
                         .foregroundStyle(Theme.warning)
                 } else if tx.isPossibleDuplicate {
@@ -212,7 +212,7 @@ struct TransactionRow: View {
                 }
             }
             Spacer(minLength: 8)
-            Text(tx.isTransfer && tx.toAccountID != nil ? Money.format(tx.amount, currency) : Money.format(tx.signedAmount, currency, signed: true))
+            Text(tx.effectiveTransactionType == .internalTransfer ? Money.format(tx.amount, currency) : Money.format(tx.signedAmount, currency, signed: true))
                 .font(.body.weight(.semibold).monospacedDigit())
                 .foregroundStyle(tx.isPending ? Theme.secondaryInk : (tx.isIncome ? Theme.positive : (tx.isTransfer ? Theme.secondaryInk : Theme.negative)))
         }
@@ -221,9 +221,29 @@ struct TransactionRow: View {
     }
 
     private var subtitle: String {
-        if tx.isTransfer && tx.toAccountID != nil { return "Transfer" }
-        if let sub = tx.subcategory { return "\(tx.category.title) · \(sub.title)" }
-        return tx.category.title
+        var base: String
+        if let smsType = tx.smsTransactionType {
+            switch smsType {
+            case .transferIn, .transferOut, .internalTransfer, .fee, .refund, .unknown:
+                base = smsType.title
+            case .income, .expense:
+                if let sub = tx.subcategory {
+                    base = "\(tx.category.title) · \(sub.title)"
+                } else {
+                    base = tx.category.title
+                }
+            }
+        } else if tx.isTransfer && tx.toAccountID != nil {
+            base = "Transfer"
+        } else if let sub = tx.subcategory {
+            base = "\(tx.category.title) · \(sub.title)"
+        } else {
+            base = tx.category.title
+        }
+        if let bank = tx.smsBank, !bank.isEmpty {
+            return "\(base) · \(bank)"
+        }
+        return base
     }
 }
 
