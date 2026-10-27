@@ -70,7 +70,15 @@ struct AddTransactionSheet: View {
                         TextField(isIncome ? "From (e.g. Salary)" : "Merchant (e.g. Lulu Hypermarket)", text: $merchant)
                             .textInputAutocapitalization(.words)
                             .onChange(of: merchant) { _, value in
-                                guard !userPickedCategory, !isIncome, let guess = Categorizer.guess(value),
+                                guard !userPickedCategory else { return }
+                                if let learned = Categorizer.learnedMatch(for: value, in: context, isIncome: isIncome) {
+                                    withAnimation(.snappy) {
+                                        category = learned.category
+                                        subcategory = learned.subcategory
+                                    }
+                                    return
+                                }
+                                guard !isIncome, let guess = Categorizer.guess(value),
                                       guess != .income, guess != .transfers else { return }
                                 withAnimation(.snappy) { category = guess; subcategory = nil }
                             }
@@ -216,6 +224,14 @@ struct PasteSMSSheet: View {
     @State private var accountID: UUID?
     @Query(sort: \Account.createdAt) private var accounts: [Account]
 
+    private var trimmedText: String {
+        text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var batchChunks: [String] {
+        SMSParser.splitBatch(trimmedText)
+    }
+
     var body: some View {
         NavigationStack {
             Form {
@@ -224,7 +240,7 @@ struct PasteSMSSheet: View {
                         .frame(minHeight: 140)
                         .overlay(alignment: .topLeading) {
                             if text.isEmpty {
-                                Text("Paste a bank SMS, e.g. \"Your NBB card ending 1234 was used for BHD 6.750 at TALABAT on 24-Oct.\"")
+                                Text("Paste one or more bank SMS alerts (English or Arabic), e.g. \"Your NBB card ending 1234 was used for BHD 6.750 at TALABAT on 24-Oct.\"")
                                     .foregroundStyle(.tertiary)
                                     .padding(.top, 8)
                                     .padding(.leading, 4)
@@ -234,6 +250,25 @@ struct PasteSMSSheet: View {
                     Button("Paste from clipboard", systemImage: "doc.on.clipboard") {
                         if let s = UIPasteboard.general.string { text = s }
                     }
+                    Menu {
+                        Button("NBB Card · Talabat (EN)") {
+                            text = "Your NBB card ending 1234 was used for BHD 6.750 at TALABAT BH on 24-Oct. Avl Bal: BHD 412.300"
+                        }
+                        Button("BenefitPay · Fawri+ Transfer (EN)") {
+                            text = "BenefitPay: Fawri+ transfer of BHD 15.000 to COLD STORE from IBAN xx4821 completed. Available Balance: BHD 397.300"
+                        }
+                        Button("ila Bank · Lulu Hypermarket (AR)") {
+                            text = "بنك إلى: تم خصم مبلغ ١٨.٤٥٠ د.ب باستخدام البطاقة رقم 9921 لدى اللولو هايبرماركت. الرصيد المتاح: ٣٧٨.٨٥٠ د.ب"
+                        }
+                        Button("Al Rajhi · Apple Pay Purchase (AR)") {
+                            text = "مصرف الراجحي\nشراء عبر Apple Pay\nبطاقة: 4412 ;مدى\nمبلغ: 64.50 ر.س\nلدى: ستاربكس\nالرصيد المتاح: 2,410.00 ر.س"
+                        }
+                        Button("Salary Credit · BBK (EN)") {
+                            text = "BBK: Salary of BHD 1,250.000 has been credited to your account ending 8801. Avl Bal: BHD 1,628.850"
+                        }
+                    } label: {
+                        Label("Try sample SMS (EN / عربي)", systemImage: "text.bubble")
+                    }
                     Picker("Account", selection: $accountID) {
                         Text("Detect automatically").tag(UUID?.none)
                         ForEach(accounts) { a in Text(a.menuTitle).tag(UUID?.some(a.id)) }
@@ -242,18 +277,35 @@ struct PasteSMSSheet: View {
                     HStack(spacing: 4) {
                         if GeminiAccount.isConfigured {
                             Image(systemName: "sparkles")
-                            Text("Gemini reads the message and picks a category.")
+                            Text("Gemini + Smart Parser read English & Arabic SMS and learn your categories.")
                         } else {
-                            Text("Read on-device. Connect Gemini in Profile for smarter reading.")
+                            Text("Smart on-device parser supports English & Arabic GCC bank SMS and learns from your history.")
                         }
                     }
                 }
 
+                if !trimmedText.isEmpty {
+                    livePreviewSection
+                }
+
                 if let outcome {
                     Section("Result") {
-                        if let tx = outcome.transaction {
-                            TransactionRow(tx: tx, currency: currency)
+                        let txs = outcome.batchTransactions.isEmpty ? (outcome.transaction.map { [$0] } ?? []) : outcome.batchTransactions
+                        if !txs.isEmpty {
+                            if txs.count > 1 {
+                                Label(outcome.message, systemImage: "checkmark.circle.fill")
+                                    .font(.subheadline.weight(.medium))
+                                    .foregroundStyle(Theme.positive)
+                            }
+                            ForEach(txs) { tx in
+                                TransactionRow(tx: tx, currency: currency)
+                            }
                             if outcome.usedAI { LabeledContent("Read by") { AIBadge() } }
+                            if outcome.learnedMerchant {
+                                Label("Category matched from your past transactions", systemImage: "brain.head.profile")
+                                    .font(.footnote)
+                                    .foregroundStyle(Theme.cobalt)
+                            }
                             if let synced = outcome.balanceSynced {
                                 Label("Account balance matched to bank: \(Money.format(synced, currency))", systemImage: "equal.circle.fill")
                                     .foregroundStyle(Theme.cobalt)
@@ -277,14 +329,89 @@ struct PasteSMSSheet: View {
                     if working {
                         ProgressView()
                     } else {
-                        Button("Import") { Task { await run() } }
+                        Button(batchChunks.count > 1 ? "Import (\(batchChunks.count))" : "Import") { Task { await run() } }
                             .fontWeight(.semibold)
-                            .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                            .disabled(trimmedText.isEmpty)
                     }
                 }
             }
             .sensoryFeedback(.success, trigger: outcome?.transaction?.id)
-            .onAppear { if accountID == nil { accountID = AppSettings.smsAccountID } }
+            .onAppear {
+                CategoryRegistry.shared.reload(context: context)
+                if accountID == nil { accountID = AppSettings.smsAccountID }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var livePreviewSection: some View {
+        Section("Live preview") {
+            let chunks = batchChunks
+            if chunks.count > 1 {
+                let parsedItems = chunks.compactMap { SMSParser.parse($0, context: context) }
+                Label("\(parsedItems.count) of \(chunks.count) messages detected as transactions", systemImage: "doc.on.doc.fill")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(Theme.cobalt)
+                ForEach(Array(parsedItems.enumerated()), id: \.offset) { _, p in
+                    previewRow(for: p)
+                }
+            } else if let reason = SMSParser.nonTransactionReason(trimmedText) {
+                Label("Will be skipped: \(reason)", systemImage: "hand.raised.fill")
+                    .foregroundStyle(Theme.warning)
+            } else if let p = SMSParser.parse(trimmedText, context: context) {
+                previewRow(for: p)
+                if Categorizer.learnedMatch(for: p.merchant, in: context, isIncome: p.isIncome) != nil {
+                    Label("Category learned from your transaction history", systemImage: "brain.head.profile")
+                        .font(.caption)
+                        .foregroundStyle(Theme.cobalt)
+                }
+                if let hint = p.accountHint ?? p.note {
+                    HStack {
+                        Text("Detected details")
+                            .font(.caption)
+                            .foregroundStyle(Theme.secondaryInk)
+                        Spacer()
+                        let details = [p.accountHint, p.cardDigits.map { "••\($0)" }, p.note].compactMap { $0 }.joined(separator: " · ")
+                        Text(details.isEmpty ? hint : details)
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(Theme.ink)
+                    }
+                }
+                if let bal = p.balance {
+                    HStack {
+                        Text("Bank balance in SMS")
+                            .font(.caption)
+                            .foregroundStyle(Theme.secondaryInk)
+                        Spacer()
+                        Text(Money.format(bal, p.currency ?? currency))
+                            .font(.caption.monospacedDigit().weight(.medium))
+                            .foregroundStyle(Theme.cobalt)
+                    }
+                }
+            } else {
+                Label("No clear amount detected on-device yet.", systemImage: "info.circle")
+                    .font(.footnote)
+                    .foregroundStyle(Theme.secondaryInk)
+            }
+        }
+    }
+
+    private func previewRow(for p: ParsedSMS) -> some View {
+        let displayCat = p.subcategory ?? p.category
+        return HStack(spacing: 12) {
+            IconBadge(symbol: displayCat.symbol, color: displayCat.color, size: 36)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(p.merchant)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Theme.ink)
+                Text(p.subcategory != nil ? "\(p.category.title) · \(p.subcategory!.title)" : p.category.title)
+                    .font(.caption)
+                    .foregroundStyle(Theme.secondaryInk)
+            }
+            Spacer()
+            Text((p.isIncome ? "+" : "−") + Money.format(p.amount, p.currency ?? currency))
+                .font(.subheadline.monospacedDigit().weight(.semibold))
+                .foregroundStyle(p.isIncome ? Theme.positive : Theme.ink)
         }
     }
 
