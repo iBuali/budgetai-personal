@@ -3,20 +3,32 @@ import SwiftData
 import Testing
 @testable import BudgetAI
 
+@Suite(.serialized)
 @MainActor
 struct BudgetAITests {
 
-    private func makeInMemoryContext() throws -> ModelContext {
-        let config = ModelConfiguration(schema: DataStore.schema, isStoredInMemoryOnly: true)
-        let container = try ModelContainer(for: DataStore.schema, configurations: config)
-        return container.mainContext
+    private func makeCleanContext() -> ModelContext {
+        let context = DataStore.shared.mainContext
+        let txs = (try? context.fetch(FetchDescriptor<MoneyTransaction>())) ?? []
+        for t in txs { context.delete(t) }
+        let accs = (try? context.fetch(FetchDescriptor<Account>())) ?? []
+        for a in accs { context.delete(a) }
+        let budgets = (try? context.fetch(FetchDescriptor<Budget>())) ?? []
+        for b in budgets { context.delete(b) }
+        let cats = (try? context.fetch(FetchDescriptor<CustomCategory>())) ?? []
+        for c in cats { context.delete(c) }
+        try? context.save()
+        UserDefaults.standard.removeObject(forKey: Keys.smsAccountID)
+        UserDefaults.standard.removeObject(forKey: Keys.smsAutoApprove)
+        UserDefaults.standard.removeObject(forKey: Keys.smsSyncBalance)
+        SMSUserRules.clearAll()
+        return context
     }
 
     // MARK: - 1. Critical Fawri+ Outgoing Regression Test
 
     @Test func confirmedBisBFawriPlusOutgoingRegression() async throws {
-        SMSUserRules.clearAll()
-        let context = try makeInMemoryContext()
+        let context = makeCleanContext()
         let bisbAccount = Account(name: "BisB Current", kind: .bank, institution: "BisB", balance: 266.195)
         context.insert(bisbAccount)
         try context.save()
@@ -68,8 +80,7 @@ struct BudgetAITests {
     // MARK: - 2. Incoming Transfers, Outgoing Transfers, Internal Transfers & Net Worth
 
     @Test func incomingFawriPlusTransfer() async throws {
-        SMSUserRules.clearAll()
-        let context = try makeInMemoryContext()
+        let context = makeCleanContext()
         let nbb = Account(name: "NBB Savings", kind: .bank, institution: "NBB", balance: 100.000)
         nbb.smsMatch = "1234"
         context.insert(nbb)
@@ -99,8 +110,7 @@ struct BudgetAITests {
     }
 
     @Test func internalTransferBetweenOwnAccountsPreservesNetWorth() async throws {
-        SMSUserRules.clearAll()
-        let context = try makeInMemoryContext()
+        let context = makeCleanContext()
         let bisb = Account(name: "BisB Account", kind: .bank, institution: "BisB", balance: 266.195)
         bisb.smsMatch = "9001"
         let ila = Account(name: "ila Account", kind: .bank, institution: "ila", balance: 100.000)
@@ -132,8 +142,7 @@ struct BudgetAITests {
     // MARK: - 3. Salary Credits, Card Purchases, Refunds, and Fees
 
     @Test func salaryCreditClassification() async throws {
-        SMSUserRules.clearAll()
-        let context = try makeInMemoryContext()
+        let context = makeCleanContext()
         let bbk = Account(name: "BBK Main", kind: .bank, institution: "BBK", balance: 378.850)
         bbk.smsMatch = "8801"
         context.insert(bbk)
@@ -179,8 +188,7 @@ struct BudgetAITests {
     }
 
     @Test func refundAndFeeClassification() async throws {
-        SMSUserRules.clearAll()
-        let context = try makeInMemoryContext()
+        let context = makeCleanContext()
         let nbb = Account(name: "NBB", kind: .bank, institution: "NBB", balance: 200.000)
         nbb.smsMatch = "1234"
         context.insert(nbb)
@@ -206,8 +214,7 @@ struct BudgetAITests {
     // MARK: - 4. Ambiguous Messages, Low Confidence Bank, and Non-Transaction Filtering
 
     @Test func ambiguousFawriMessageRequiresReviewAndDoesNotGuessBank() async throws {
-        SMSUserRules.clearAll()
-        let context = try makeInMemoryContext()
+        let context = makeCleanContext()
         let acc = Account(name: "Main Bank", kind: .bank, balance: 500.000)
         context.insert(acc)
         try context.save()
@@ -238,8 +245,7 @@ struct BudgetAITests {
     // MARK: - 5. Duplicate Prevention via Reference Numbers
 
     @Test func duplicatePreventionByReferenceNumber() async throws {
-        SMSUserRules.clearAll()
-        let context = try makeInMemoryContext()
+        let context = makeCleanContext()
         let bisb = Account(name: "BisB", kind: .bank, institution: "BisB", balance: 300.000)
         context.insert(bisb)
         try context.save()
@@ -261,8 +267,7 @@ struct BudgetAITests {
     // MARK: - 6. User Corrections, Scoped Learning, and Sender-vs-Account Separation
 
     @Test func userCorrectionsUpdateBalancesAndScopeRulesProperly() async throws {
-        SMSUserRules.clearAll()
-        let context = try makeInMemoryContext()
+        let context = makeCleanContext()
         let nbb = Account(name: "NBB Current", kind: .bank, institution: "NBB", balance: 500.000)
         let bbk = Account(name: "BBK Savings", kind: .bank, institution: "BBK", balance: 200.000)
         context.insert(nbb)
