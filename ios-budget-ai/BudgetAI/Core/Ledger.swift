@@ -193,7 +193,7 @@ enum Ledger {
                     toAccountID: tx.toAccountID,
                     forRawSMS: raw,
                     sender: tx.smsSender,
-                    counterparty: tx.smsRecipientSuffix ?? Finance.merchantKey(tx.merchant)
+                    counterparty: SMSParser.extractRecipientOrMerchantKey(in: raw)
                 )
             }
         }
