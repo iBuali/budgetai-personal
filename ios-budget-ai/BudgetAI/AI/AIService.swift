@@ -72,7 +72,8 @@ enum AIService {
         if let context {
             let examples = Categorizer.learnedExamples(in: context, limit: 40)
             if !examples.isEmpty {
-                learnedSection = "\nUser's past merchant categorizations (prefer these for matching merchants):\n" + examples.joined(separator: "\n")
+                let lines = examples.map { "\($0.key) -> \($0.value)" }.sorted().joined(separator: "\n")
+                learnedSection = "\nUser's past merchant categorizations (prefer these for matching merchants):\n" + lines
             }
         }
 
@@ -132,7 +133,7 @@ enum AIService {
             }
         }
         if date == nil {
-            date = SMSParser.extractDate(from: normalized)
+            date = SMSParser.extractDate(in: normalized)
         }
 
         let rawMerchant = (obj["merchant"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
