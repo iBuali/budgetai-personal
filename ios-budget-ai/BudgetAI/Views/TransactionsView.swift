@@ -693,10 +693,28 @@ struct TransactionDetailView: View {
     @AppStorage(Keys.currency) private var currency = "BHD"
     @State private var confirmDelete = false
     @State private var editingCategory = false
+    @State private var nameText = ""
+    @State private var amountText = ""
+    @FocusState private var focusedField: DetailField?
+
+    private enum DetailField: Hashable {
+        case name, amount
+    }
 
     private var account: Account? { accounts.first { $0.id == tx.accountID } }
     private var toAccount: Account? { accounts.first { $0.id == tx.toAccountID } }
     private var isAccountTransfer: Bool { tx.isTransfer && tx.toAccountID != nil }
+    private var isSMSTransaction: Bool { tx.source == .sms || tx.smsTransactionType != nil }
+
+    private var hasUnsavedName: Bool {
+        let trimmed = nameText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !trimmed.isEmpty && trimmed != tx.merchant
+    }
+
+    private var hasUnsavedAmount: Bool {
+        guard let parsed = Money.parse(amountText), parsed > 0 else { return false }
+        return abs(parsed - tx.amount) >= 0.0005
+    }
 
     var body: some View {
         List {
@@ -723,7 +741,11 @@ struct TransactionDetailView: View {
                     Label("Imported from SMS and waiting for your approval. It doesn't affect balances or budgets yet.", systemImage: "clock.fill")
                         .foregroundStyle(Theme.warning)
                     Button {
+                        commitPendingEdits(silent: true)
                         let result = Ledger.approve(tx, context: context)
+                        if isSMSTransaction {
+                            SMSUserRules.rememberTransactionRule(for: tx)
+                        }
                         appState.report(result, base: "Approved \(Money.format(tx.amount, currency))")
                     } label: {
                         Label("Approve", systemImage: "checkmark.circle.fill").fontWeight(.semibold)
@@ -751,17 +773,76 @@ struct TransactionDetailView: View {
                 }
             }
 
+            Section("Transaction") {
+                HStack(spacing: 8) {
+                    Text("Name")
+                    Spacer()
+                    TextField("Merchant or title", text: $nameText)
+                        .multilineTextAlignment(.trailing)
+                        .focused($focusedField, equals: .name)
+                        .submitLabel(.done)
+                        .onSubmit { commitName() }
+                    if hasUnsavedName {
+                        Button("Save") {
+                            commitName()
+                            focusedField = nil
+                        }
+                        .font(.caption.weight(.semibold))
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                    }
+                }
+
+                HStack(spacing: 8) {
+                    Text("Amount (\(currency))")
+                    Spacer()
+                    TextField(Money.format(0, currency), text: $amountText)
+                        .keyboardType(.decimalPad)
+                        .multilineTextAlignment(.trailing)
+                        .monospacedDigit()
+                        .focused($focusedField, equals: .amount)
+                    if hasUnsavedAmount {
+                        Button("Save") {
+                            commitAmount()
+                            focusedField = nil
+                        }
+                        .font(.caption.weight(.semibold))
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                    }
+                }
+
+                DatePicker(
+                    "Date",
+                    selection: Binding(
+                        get: { tx.date },
+                        set: { newDate in
+                            tx.date = newDate
+                            Ledger.recordSnapshot(context: context)
+                            try? context.save()
+                        }
+                    ),
+                    displayedComponents: [.date, .hourAndMinute]
+                )
+            }
+
             if isAccountTransfer {
                 Section("Transfer") {
                     Picker("From", selection: Binding(get: { tx.accountID }, set: { newID in
                         guard newID != tx.toAccountID else { return }
                         Ledger.edit(tx, context: context) { $0.accountID = newID }
+                        if isSMSTransaction {
+                            SMSUserRules.rememberTransactionRule(for: tx)
+                        }
                     })) {
                         ForEach(accounts) { a in Text(a.menuTitle).tag(UUID?.some(a.id)) }
                     }
                     Picker("To", selection: Binding(get: { tx.toAccountID }, set: { newID in
                         guard newID != tx.accountID else { return }
                         Ledger.edit(tx, context: context) { $0.toAccountID = newID }
+                        if isSMSTransaction {
+                            SMSUserRules.rememberTransactionRule(for: tx)
+                        }
                     })) {
                         ForEach(accounts) { a in Text(a.menuTitle).tag(UUID?.some(a.id)) }
                     }
@@ -796,8 +877,17 @@ struct TransactionDetailView: View {
                                 tx.category = new
                                 tx.aiCategorized = false
                                 try? context.save()
+                                if isSMSTransaction {
+                                    SMSUserRules.rememberTransactionRule(for: tx)
+                                }
                             }),
-                            subcategory: Binding(get: { tx.subcategory }, set: { tx.subcategory = $0; try? context.save() }),
+                            subcategory: Binding(get: { tx.subcategory }, set: { newSub in
+                                tx.subcategory = newSub
+                                try? context.save()
+                                if isSMSTransaction {
+                                    SMSUserRules.rememberTransactionRule(for: tx)
+                                }
+                            }),
                             income: tx.isIncome
                         )
                     }
@@ -806,6 +896,9 @@ struct TransactionDetailView: View {
                 Section("Details") {
                     Picker("Account", selection: Binding(get: { tx.accountID }, set: { newID in
                         Ledger.edit(tx, context: context) { $0.accountID = newID }
+                        if isSMSTransaction {
+                            SMSUserRules.rememberTransactionRule(for: tx)
+                        }
                     })) {
                         Text("None").tag(UUID?.none)
                         ForEach(accounts) { a in Text(a.menuTitle).tag(UUID?.some(a.id)) }
@@ -814,6 +907,9 @@ struct TransactionDetailView: View {
                         Picker("To account", selection: Binding(get: { tx.toAccountID }, set: { newID in
                             guard newID != tx.accountID else { return }
                             Ledger.edit(tx, context: context) { $0.toAccountID = newID }
+                            if isSMSTransaction {
+                                SMSUserRules.rememberTransactionRule(for: tx)
+                            }
                         })) {
                             Text("Select destination").tag(UUID?.none)
                             ForEach(accounts.filter { $0.id != tx.accountID }) { a in
@@ -831,11 +927,12 @@ struct TransactionDetailView: View {
                 }
             }
 
-            if tx.source == .sms || tx.smsTransactionType != nil {
+            if isSMSTransaction {
                 Section {
                     Picker("Transaction type", selection: Binding(
                         get: { tx.effectiveTransactionType },
                         set: { newType in
+                            commitPendingEdits(silent: true)
                             let result = Ledger.applyUserCorrection(
                                 to: tx,
                                 newType: newType,
@@ -856,22 +953,13 @@ struct TransactionDetailView: View {
                     Picker("SMS sender bank", selection: Binding(
                         get: { tx.smsBank ?? "" },
                         set: { newBank in
+                            commitPendingEdits(silent: true)
                             let clean = newBank.isEmpty ? nil : newBank
                             tx.smsBank = clean
                             if let clean, let sender = tx.smsSender, !sender.isEmpty {
                                 SMSUserRules.rememberBank(clean, forSender: sender)
                             }
-                            if let raw = tx.rawText, !raw.isEmpty, tx.effectiveTransactionType != .unknown {
-                                SMSUserRules.rememberClassification(
-                                    type: tx.effectiveTransactionType,
-                                    category: tx.category,
-                                    bank: clean,
-                                    toAccountID: tx.toAccountID,
-                                    forRawSMS: raw,
-                                    sender: tx.smsSender,
-                                    counterparty: tx.smsRecipientSuffix ?? Finance.merchantKey(tx.merchant)
-                                )
-                            }
+                            SMSUserRules.rememberTransactionRule(for: tx)
                             try? context.save()
                             appState.show(clean.map { "Bank set to \($0)" } ?? "Cleared SMS bank")
                         }
@@ -912,7 +1000,7 @@ struct TransactionDetailView: View {
                 } header: {
                     Text("SMS classification & bank")
                 } footer: {
-                    Text("Corrections update balances and totals and are remembered for matching future messages.")
+                    Text("All options (name, type, category, bank, and accounts) are remembered for matching future SMS messages.")
                 }
             }
 
@@ -960,12 +1048,69 @@ struct TransactionDetailView: View {
         .navigationTitle(isAccountTransfer ? "Transfer" : "Transaction")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.hidden, for: .tabBar)
-        .onDisappear { try? context.save() }
+        .toolbar {
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                Button("Done") {
+                    commitPendingEdits(silent: false)
+                    focusedField = nil
+                }
+                .fontWeight(.semibold)
+            }
+        }
+        .onAppear {
+            nameText = tx.merchant
+            amountText = Money.number(tx.amount, decimals: Money.digits(currency)).replacingOccurrences(of: ",", with: "")
+        }
+        .onChange(of: focusedField) { oldValue, _ in
+            if oldValue == .name && hasUnsavedName {
+                commitName()
+            } else if oldValue == .amount && hasUnsavedAmount {
+                commitAmount()
+            }
+        }
+        .onDisappear {
+            commitPendingEdits(silent: true)
+            try? context.save()
+        }
         .confirmationDialog("Delete this transaction?", isPresented: $confirmDelete, titleVisibility: .visible) {
             Button("Delete", role: .destructive) {
                 Ledger.delete(tx, context: context)
                 dismiss()
             }
+        }
+    }
+
+    private func commitPendingEdits(silent: Bool) {
+        if hasUnsavedName { commitName(silent: silent) }
+        if hasUnsavedAmount { commitAmount(silent: silent) }
+    }
+
+    private func commitName(silent: Bool = false) {
+        let trimmed = nameText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != tx.merchant else { return }
+        tx.merchant = trimmed
+        try? context.save()
+        if isSMSTransaction {
+            SMSUserRules.rememberTransactionRule(for: tx)
+        }
+        if !silent {
+            appState.show("Updated name to \(trimmed)")
+        }
+    }
+
+    private func commitAmount(silent: Bool = false) {
+        guard let parsed = Money.parse(amountText), parsed > 0, abs(parsed - tx.amount) >= 0.0005 else { return }
+        Ledger.edit(tx, context: context) { target in
+            target.amount = abs(parsed)
+        }
+        amountText = Money.number(tx.amount, decimals: Money.digits(currency)).replacingOccurrences(of: ",", with: "")
+        if !silent {
+            var result = LedgerResult()
+            if !tx.isPending && tx.isSpending {
+                result.alerts = Ledger.checkBudgetAlerts(for: tx.category, context: context)
+            }
+            appState.report(result, base: "Updated amount to \(Money.format(tx.amount, currency))")
         }
     }
 }

@@ -12,10 +12,17 @@ enum SMSUserRules {
 
     struct ClassificationRule: Codable, Equatable {
         var signature: String
+        var senderKey: String = ""
+        var bankKey: String = ""
+        var partyKey: String = ""
+        var templateKey: String = ""
         var transactionTypeRaw: String
         var categoryRaw: String
-        var bank: String?
-        var toAccountIDString: String?
+        var subcategoryRaw: String? = nil
+        var merchant: String? = nil
+        var bank: String? = nil
+        var accountIDString: String? = nil
+        var toAccountIDString: String? = nil
         var updatedAt: Date
     }
 
@@ -45,10 +52,7 @@ enum SMSUserRules {
         return map[key]
     }
 
-    /// Creates a scoped signature from the structural template of the SMS, the counterparty/suffix, and the bank.
-    /// Numbers, dates, and reference IDs are replaced with placeholders so only messages with the exact same
-    /// wording structure AND the same counterparty/suffix match.
-    static func structuralSignature(for rawSMS: String, sender: String? = nil, bank: String? = nil, counterparty: String? = nil) -> String {
+    private static func normalizedTemplate(for rawSMS: String) -> String {
         var template = SMSParser.normalizeText(rawSMS).lowercased()
         // Replace dates/times
         template = template.replacingOccurrences(
@@ -73,9 +77,15 @@ enum SMSUserRules {
             with: "<num>",
             options: .regularExpression
         )
-        template = template.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+        return template.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
+    /// Creates a scoped signature from the structural template of the SMS, the counterparty/suffix, and the bank.
+    /// Numbers, dates, and reference IDs are replaced with placeholders so only messages with the exact same
+    /// wording structure AND the same counterparty/suffix match.
+    static func structuralSignature(for rawSMS: String, sender: String? = nil, bank: String? = nil, counterparty: String? = nil) -> String {
+        let template = normalizedTemplate(for: rawSMS)
         let normSender = sender.map(normalizeSender) ?? ""
         let normBank = (bank ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let normParty = (counterparty ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -85,7 +95,10 @@ enum SMSUserRules {
     static func rememberClassification(
         type: SMSTransactionType,
         category: SpendCategory,
+        subcategory: SpendCategory? = nil,
+        merchant: String? = nil,
         bank: String?,
+        accountID: UUID? = nil,
         toAccountID: UUID? = nil,
         forRawSMS rawSMS: String,
         sender: String? = nil,
@@ -94,15 +107,36 @@ enum SMSUserRules {
         let trimmed = rawSMS.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         let party = counterparty ?? SMSParser.extractRecipientOrMerchantKey(in: trimmed)
-        let sig = structuralSignature(for: trimmed, sender: sender, bank: bank, counterparty: party)
+        let template = normalizedTemplate(for: trimmed)
+        let normSender = sender.map(normalizeSender) ?? ""
+        let normBank = (bank ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let normParty = (party ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let sig = "\(normSender)|\(normBank)|\(normParty)|\(template)"
+        let cleanMerchant = merchant?.trimmingCharacters(in: .whitespacesAndNewlines)
+
         var rules = allClassificationRules()
-        rules.removeAll { $0.signature == sig }
+        rules.removeAll { existing in
+            if existing.signature == sig { return true }
+            if !existing.templateKey.isEmpty && existing.templateKey == template && existing.partyKey == normParty {
+                if existing.senderKey == normSender || existing.senderKey.isEmpty || normSender.isEmpty {
+                    return true
+                }
+            }
+            return false
+        }
         rules.append(
             ClassificationRule(
                 signature: sig,
+                senderKey: normSender,
+                bankKey: normBank,
+                partyKey: normParty,
+                templateKey: template,
                 transactionTypeRaw: type.rawValue,
                 categoryRaw: category.rawValue,
+                subcategoryRaw: subcategory?.rawValue,
+                merchant: (cleanMerchant?.isEmpty == false) ? cleanMerchant : nil,
                 bank: bank,
+                accountIDString: accountID?.uuidString,
                 toAccountIDString: toAccountID?.uuidString,
                 updatedAt: .now
             )
@@ -112,6 +146,30 @@ enum SMSUserRules {
         }
     }
 
+    /// Saves all user-selected options on an SMS transaction (type, category, subcategory, name/merchant, bank, source account, and destination account)
+    /// so future matching SMS messages automatically receive the same options.
+    static func rememberTransactionRule(for tx: MoneyTransaction) {
+        if let bank = tx.smsBank, !bank.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           let sender = tx.smsSender, !sender.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            rememberBank(bank, forSender: sender)
+        }
+        guard let raw = tx.rawText, !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        let type = tx.effectiveTransactionType
+        guard type != .unknown else { return }
+        rememberClassification(
+            type: type,
+            category: tx.category,
+            subcategory: tx.subcategory,
+            merchant: tx.merchant,
+            bank: tx.smsBank,
+            accountID: tx.accountID,
+            toAccountID: tx.toAccountID,
+            forRawSMS: raw,
+            sender: tx.smsSender,
+            counterparty: SMSParser.extractRecipientOrMerchantKey(in: raw)
+        )
+    }
+
     static func matchingRule(forRawSMS rawSMS: String, sender: String? = nil, bank: String? = nil, counterparty: String? = nil) -> ClassificationRule? {
         let trimmed = rawSMS.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
@@ -119,7 +177,7 @@ enum SMSUserRules {
         let rules = allClassificationRules()
         guard !rules.isEmpty else { return nil }
 
-        // Try exact match with sender + bank + counterparty + template, then bank-agnostic if bank wasn't set initially
+        // 1. Try exact signature candidates first
         let candidateSignatures = [
             structuralSignature(for: trimmed, sender: sender, bank: bank, counterparty: party),
             structuralSignature(for: trimmed, sender: sender, bank: nil, counterparty: party),
@@ -131,6 +189,21 @@ enum SMSUserRules {
                 return hit
             }
         }
+
+        // 2. Match by template + counterparty when bank was added or updated on the rule after initial receipt
+        let template = normalizedTemplate(for: trimmed)
+        let normSender = sender.map(normalizeSender) ?? ""
+        let normParty = (party ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if let hit = rules.last(where: { rule in
+            guard !rule.templateKey.isEmpty, rule.templateKey == template, rule.partyKey == normParty else { return false }
+            if !normSender.isEmpty && !rule.senderKey.isEmpty {
+                return rule.senderKey == normSender
+            }
+            return true
+        }) {
+            return hit
+        }
+
         return nil
     }
 
@@ -369,7 +442,9 @@ struct ParsedSMS {
     var recipientSuffix: String? = nil
     var timeString: String? = nil
     var sender: String? = nil
+    var accountID: UUID? = nil
     var toAccountID: UUID? = nil
+    var matchedUserRule: Bool = false
 
     var requiresReview: Bool {
         confidence == .low || transactionType == .unknown
@@ -627,17 +702,19 @@ enum SMSParser {
             counterparty: partyKey
         ), let ruleType = SMSTransactionType(rawValue: userRule.transactionTypeRaw) {
             let ruleCat = SpendCategory(rawValue: userRule.categoryRaw) ?? (ruleType.isTransferType ? .transfers : (ruleType.countsAsIncome ? .income : .other))
+            let ruleSubcat = userRule.subcategoryRaw.flatMap(SpendCategory.init(rawValue:))
             let resolvedBank = userRule.bank ?? bankInfo.bank
             let isInc = ruleType.isIncomeDirection
-            let merch = merchant(in: normalized, isIncome: isInc, rail: rail, recipientSuffix: suffixes.recipientSuffix)
+            let defaultMerch = merchant(in: normalized, isIncome: isInc, rail: rail, recipientSuffix: suffixes.recipientSuffix)
                 ?? defaultMerchant(for: ruleType, rail: rail, recipientSuffix: suffixes.recipientSuffix)
+            let merch = (userRule.merchant?.isEmpty == false) ? userRule.merchant! : defaultMerch
             return ParsedSMS(
                 amount: amt,
                 currency: currency,
                 isIncome: isInc,
                 merchant: merch,
-                category: ruleType.isTransferType ? .transfers : ruleCat,
-                subcategory: nil,
+                category: ruleType.isTransferType && ruleCat == .other ? .transfers : ruleCat,
+                subcategory: ruleSubcat,
                 date: parsedDate,
                 accountHint: resolvedBank,
                 cardDigits: suffixes.accountSuffix,
@@ -653,7 +730,9 @@ enum SMSParser {
                 recipientSuffix: suffixes.recipientSuffix,
                 timeString: parsedTime,
                 sender: sender,
-                toAccountID: userRule.toAccountIDString.flatMap(UUID.init(uuidString:))
+                accountID: userRule.accountIDString.flatMap(UUID.init(uuidString:)),
+                toAccountID: userRule.toAccountIDString.flatMap(UUID.init(uuidString:)),
+                matchedUserRule: true
             )
         }
 
@@ -783,16 +862,24 @@ enum SMSParser {
             forRawSMS: singleLine,
             sender: sender,
             bank: bankInfo.bank,
+            counterparty: "iban_\(recipientIBANSuffix)"
+        ) ?? SMSUserRules.matchingRule(
+            forRawSMS: singleLine,
+            sender: sender,
+            bank: bankInfo.bank,
             counterparty: recipientIBANSuffix
         ), let ruleType = SMSTransactionType(rawValue: userRule.transactionTypeRaw) {
             let resolvedBank = userRule.bank ?? bankInfo.bank
+            let ruleCat = SpendCategory(rawValue: userRule.categoryRaw) ?? (ruleType.isTransferType ? .transfers : .other)
+            let ruleSubcat = userRule.subcategoryRaw.flatMap(SpendCategory.init(rawValue:))
+            let merch = (userRule.merchant?.isEmpty == false) ? userRule.merchant! : "IBAN ending \(recipientIBANSuffix)"
             return ParsedSMS(
                 amount: amount,
                 currency: currency ?? "BHD",
                 isIncome: ruleType.isIncomeDirection,
-                merchant: "IBAN ending \(recipientIBANSuffix)",
-                category: ruleType.isTransferType ? .transfers : (SpendCategory(rawValue: userRule.categoryRaw) ?? .other),
-                subcategory: nil,
+                merchant: merch,
+                category: ruleType.isTransferType && ruleCat == .other ? .transfers : ruleCat,
+                subcategory: ruleSubcat,
                 date: date,
                 accountHint: resolvedBank,
                 cardDigits: nil,
@@ -808,7 +895,9 @@ enum SMSParser {
                 recipientSuffix: recipientIBANSuffix,
                 timeString: timeString,
                 sender: sender,
-                toAccountID: userRule.toAccountIDString.flatMap(UUID.init(uuidString:))
+                accountID: userRule.accountIDString.flatMap(UUID.init(uuidString:)),
+                toAccountID: userRule.toAccountIDString.flatMap(UUID.init(uuidString:)),
+                matchedUserRule: true
             )
         }
 

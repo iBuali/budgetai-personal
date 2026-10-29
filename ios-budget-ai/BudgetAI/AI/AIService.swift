@@ -446,7 +446,7 @@ enum SMSImporter {
         }
 
         var learnedMerchant = false
-        if !p.transactionType.isTransferType && p.transactionType != .unknown,
+        if !p.matchedUserRule && !p.transactionType.isTransferType && p.transactionType != .unknown,
            let learned = Categorizer.learnedMatch(for: p.merchant, in: context, isIncome: p.isIncome) {
             p.category = learned.category
             if learned.subcategory != nil { p.subcategory = learned.subcategory }
@@ -464,7 +464,11 @@ enum SMSImporter {
             // For outgoing transfers, never match recipientSuffix as the source account
             return p.accountSuffix
         }()
-        let target = accountID ?? Ledger.smsAccountID(context: context, digits: matchingDigits, hint: resolvedSMSBank)
+        let savedRuleAccount: UUID? = {
+            guard let ruleAccID = p.accountID, Ledger.account(ruleAccID, context: context) != nil else { return nil }
+            return ruleAccID
+        }()
+        let target = accountID ?? savedRuleAccount ?? Ledger.smsAccountID(context: context, digits: matchingDigits, hint: resolvedSMSBank)
 
         let tx = MoneyTransaction(
             amount: p.amount,

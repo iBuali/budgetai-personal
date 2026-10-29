@@ -283,27 +283,45 @@ struct BudgetAITests {
         #expect(tx1.smsBank == nil)
         #expect(abs(nbb.balance - 500.000) < 0.0001)
 
-        // 2. User corrects tx1: assigns bank "Al Salam" (separate from NBB account!) and classifies as .transferOut, approving it
+        // 2. User corrects tx1: assigns bank "Al Salam" (separate from NBB account!), classifies as .expense,
+        // and customizes the name ("Gym Membership"), category (.health), and account (bbk.id)
         Ledger.applyUserCorrection(
             to: tx1,
-            newType: .transferOut,
+            newType: .expense,
             newBank: "Al Salam",
+            newCategory: .health,
             approveIfPending: true,
             rememberRule: true,
             context: context
         )
-        #expect(tx1.isPending == false)
-        #expect(tx1.smsTransactionType == .transferOut)
-        #expect(tx1.smsBank == "Al Salam")
-        #expect(tx1.accountID == nbb.id) // Sender bank "Al Salam" kept separate from transaction account "NBB Current"
-        #expect(abs(nbb.balance - 490.000) < 0.0001)
+        tx1.merchant = "Gym Membership"
+        Ledger.edit(tx1, context: context) { target in
+            target.accountID = bbk.id
+            target.amount = 12.500 // Also test editing transaction amount
+        }
+        SMSUserRules.rememberTransactionRule(for: tx1)
 
-        // 3. Future message from the same sender "88990" with same template & counterparty *7711 automatically remembers bank & classification
+        #expect(tx1.isPending == false)
+        #expect(tx1.smsTransactionType == .expense)
+        #expect(tx1.smsBank == "Al Salam")
+        #expect(tx1.merchant == "Gym Membership")
+        #expect(tx1.category == .health)
+        #expect(tx1.accountID == bbk.id)
+        #expect(abs(nbb.balance - 500.000) < 0.0001) // Reversed from NBB when moved to BBK
+        #expect(abs(bbk.balance - 187.500) < 0.0001) // Deducted edited amount 12.500 from BBK
+
+        // 3. Future message from the same sender "88990" with same template & counterparty *7711 automatically remembers
+        // bank, transaction type, category, custom name, and source account!
         let ambiguous2 = "Alert: BHD 25.000 processed for ACCT *7711 on 2026/10/28"
-        let parsed2 = try #require(SMSParser.parse(ambiguous2, sender: "88990", context: context))
-        #expect(parsed2.detectedBank == "Al Salam")
-        #expect(parsed2.transactionType == .transferOut)
-        #expect(parsed2.confidence == .high)
+        let outcome2 = await SMSImporter.importText(ambiguous2, context: context, forceApprove: true, sender: "88990")
+        let tx2 = try #require(outcome2.transaction)
+        #expect(tx2.smsBank == "Al Salam")
+        #expect(tx2.smsTransactionType == .expense)
+        #expect(tx2.smsConfidence == .high)
+        #expect(tx2.merchant == "Gym Membership")
+        #expect(tx2.category == .health)
+        #expect(tx2.accountID == bbk.id)
+        #expect(abs(tx2.amount - 25.000) < 0.0001)
 
         // 4. Unrelated message with a different counterparty/structure is NOT affected by the correction rule
         let unrelated = "Alert: BHD 15.000 processed for ACCT *9999 on 2026/10/28"

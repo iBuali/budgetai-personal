@@ -182,20 +182,7 @@ enum Ledger {
         }
 
         if rememberRule {
-            if let bank = resolvedBank, let sender = tx.smsSender, !sender.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                SMSUserRules.rememberBank(bank, forSender: sender)
-            }
-            if let raw = tx.rawText, !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, newType != .unknown {
-                SMSUserRules.rememberClassification(
-                    type: newType,
-                    category: tx.category,
-                    bank: resolvedBank,
-                    toAccountID: tx.toAccountID,
-                    forRawSMS: raw,
-                    sender: tx.smsSender,
-                    counterparty: SMSParser.extractRecipientOrMerchantKey(in: raw)
-                )
-            }
+            SMSUserRules.rememberTransactionRule(for: tx)
         }
         return result
     }
