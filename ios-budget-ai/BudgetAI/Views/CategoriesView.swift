@@ -1,7 +1,7 @@
 import SwiftUI
 import SwiftData
 
-/// Manage built-in and custom categories plus their sub-categories.
+/// Manage built-in and custom categories.
 struct CategoriesView: View {
     @Environment(\.modelContext) private var context
     @Query(sort: \CustomCategory.createdAt) private var custom: [CustomCategory]
@@ -14,8 +14,6 @@ struct CategoriesView: View {
                 ForEach(SpendCategory.expenseCases.filter { $0 != .transfers }) { categoryBlock($0) }
             } header: {
                 Text("Expenses")
-            } footer: {
-                Text("Tap + on a category to add sub-categories like Coffee under Food & Dining.")
             }
             Section("Income") {
                 ForEach(SpendCategory.incomeCases) { categoryBlock($0) }
@@ -49,29 +47,9 @@ struct CategoriesView: View {
                 if !category.isBuiltIn { Text("Custom").font(.caption).foregroundStyle(Theme.secondaryInk) }
             }
             Spacer()
-            Button {
-                editorTarget = .new(parent: category.rawValue, income: category.isIncomeCategory)
-            } label: {
-                Image(systemName: "plus.circle").font(.title3)
-            }
-            .buttonStyle(.borderless)
-            .accessibilityLabel("Add sub-category to \(category.title)")
         }
         .contentShape(Rectangle())
         .onTapGesture { if let model = model(category) { editorTarget = .edit(model.id) } }
-
-        ForEach(category.subcategories) { sub in
-            HStack(spacing: 12) {
-                Image(systemName: "arrow.turn.down.right").font(.caption).foregroundStyle(.tertiary)
-                    .frame(width: 20)
-                CategoryIcon(category: sub, size: 30)
-                Text(sub.title).foregroundStyle(Theme.ink)
-                Spacer()
-            }
-            .padding(.leading, 8)
-            .contentShape(Rectangle())
-            .onTapGesture { if let model = model(sub) { editorTarget = .edit(model.id) } }
-        }
     }
 
     private func model(_ category: SpendCategory) -> CustomCategory? {
@@ -124,7 +102,7 @@ struct CategoryEditor: View {
                 Section {
                     HStack(spacing: 14) {
                         preview
-                        TextField(parentKey.isEmpty ? "Category name" : "Sub-category name", text: $name)
+                        TextField("Category name", text: $name)
                             .font(.title3.weight(.semibold))
                             .textInputAutocapitalization(.words)
                     }
@@ -136,45 +114,32 @@ struct CategoryEditor: View {
                 }
 
                 Section {
-                    Picker("Belongs to", selection: $parentKey) {
-                        Text("Nothing (main category)").tag("")
-                        ForEach(parentOptions) { Text($0.menuTitle).tag($0.rawValue) }
-                    }
-                    .disabled(existing.map { !children(of: $0.key).isEmpty } ?? false)
-                    if parentKey.isEmpty {
-                        if existing == nil {
-                            Picker("Type", selection: $isIncome) {
-                                Text("Expense").tag(false)
-                                Text("Income").tag(true)
-                            }
-                            .pickerStyle(.segmented)
+                    if existing == nil {
+                        Picker("Type", selection: $isIncome) {
+                            Text("Expense").tag(false)
+                            Text("Income").tag(true)
                         }
-                        if !isIncome {
-                            Toggle("Essential spending", isOn: $isEssential)
-                        }
+                        .pickerStyle(.segmented)
                     }
-                } footer: {
-                    Text(parentKey.isEmpty
-                         ? (isEssential ? "Essential budgets are protected in Safe to Spend." : "Main categories can have their own budgets.")
-                         : "Sub-category spending counts toward its main category's budget.")
+                    if !isIncome {
+                        Toggle("Essential spending", isOn: $isEssential)
+                    }
                 }
 
-                if parentKey.isEmpty {
-                    Section("Color") {
-                        LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 5), spacing: 12) {
-                            ForEach(Self.palette, id: \.self) { hex in
-                                Button { colorHex = hex } label: {
-                                    Circle()
-                                        .fill(Color(hex: UInt32(hex)))
-                                        .frame(width: 36, height: 36)
-                                        .overlay(Circle().stroke(.white, lineWidth: 3).padding(3).opacity(colorHex == hex ? 1 : 0))
-                                }
-                                .buttonStyle(.plain)
-                                .accessibilityLabel("Color")
+                Section("Color") {
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 5), spacing: 12) {
+                        ForEach(Self.palette, id: \.self) { hex in
+                            Button { colorHex = hex } label: {
+                                Circle()
+                                    .fill(Color(hex: UInt32(hex)))
+                                    .frame(width: 36, height: 36)
+                                    .overlay(Circle().stroke(.white, lineWidth: 3).padding(3).opacity(colorHex == hex ? 1 : 0))
                             }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Color")
                         }
-                        .padding(.vertical, 6)
                     }
+                    .padding(.vertical, 6)
                 }
 
                 if existing != nil {
@@ -183,7 +148,7 @@ struct CategoryEditor: View {
                     }
                 }
             }
-            .navigationTitle(existing == nil ? (parentKey.isEmpty ? "New category" : "New sub-category") : "Edit category")
+            .navigationTitle(existing == nil ? "New category" : "Edit category")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
@@ -195,7 +160,7 @@ struct CategoryEditor: View {
             .confirmationDialog("Delete this category?", isPresented: $confirmDelete, titleVisibility: .visible) {
                 Button("Delete", role: .destructive, action: delete)
             } message: {
-                Text("Its transactions move to \(parentKey.isEmpty ? "Other" : "the main category"), and its sub-categories are removed.")
+                Text("Its transactions will move to Other.")
             }
             .onAppear(perform: load)
         }
@@ -265,7 +230,14 @@ struct CategoryEditor: View {
             if tx.subcategoryKey == key || subKeys.contains(tx.subcategoryKey) { tx.subcategoryKey = "" }
         }
         let budgets = (try? context.fetch(FetchDescriptor<Budget>())) ?? []
-        for b in budgets where b.categoryRaw == key { context.delete(b) }
+        for b in budgets {
+            let remaining = b.categories.filter { $0.rawValue != key }
+            if remaining.isEmpty {
+                context.delete(b)
+            } else if remaining.count != b.categories.count {
+                b.categories = remaining
+            }
+        }
         let bills = (try? context.fetch(FetchDescriptor<Bill>())) ?? []
         for b in bills where b.categoryRaw == key { b.categoryRaw = SpendCategory.bills.rawValue }
         for child in children(of: key) { context.delete(child) }
@@ -276,22 +248,30 @@ struct CategoryEditor: View {
     }
 }
 
-/// Grid of top-level categories with a "New" tile, plus sub-category chips for the selection.
+/// Grid of categories with a "New" tile.
 struct CategoryPickerGrid: View {
     @Binding var category: SpendCategory
     @Binding var subcategory: SpendCategory?
     var income: Bool
+    var includeAllTypes: Bool = false
     var onPick: () -> Void = {}
     @State private var editorTarget: CategoryEditorTarget?
 
     var body: some View {
         let registry = CategoryRegistry.shared
-        let options = income ? SpendCategory.incomeCases : SpendCategory.expenseCases.filter { $0 != .transfers }
+        let options: [SpendCategory] = {
+            if includeAllTypes {
+                return SpendCategory.allCases.filter { $0 != .transfers }
+            }
+            return income
+                ? (SpendCategory.incomeCases + [.internalTransfer])
+                : SpendCategory.expenseCases.filter { $0 != .transfers }
+        }()
         VStack(alignment: .leading, spacing: 14) {
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 4), spacing: 12) {
                 ForEach(options) { c in
                     Button {
-                        if category != c { subcategory = nil }
+                        subcategory = nil
                         category = c
                         onPick()
                     } label: {
@@ -322,44 +302,14 @@ struct CategoryPickerGrid: View {
                 }
                 .buttonStyle(PressableStyle())
             }
-
-            let subs = category.subcategories
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(subs) { sub in
-                        Button {
-                            subcategory = subcategory == sub ? nil : sub
-                        } label: {
-                            Text(sub.emoji.isEmpty ? sub.title : "\(sub.emoji) \(sub.title)")
-                                .font(.subheadline.weight(.medium))
-                                .padding(.horizontal, 12).padding(.vertical, 7)
-                                .foregroundStyle(subcategory == sub ? .white : Theme.ink)
-                                .background(subcategory == sub ? category.color : Theme.track.opacity(0.8), in: Capsule())
-                        }
-                        .buttonStyle(PressableStyle())
-                    }
-                    Button { editorTarget = .new(parent: category.rawValue, income: income) } label: {
-                        Label(subs.isEmpty ? "Add sub-category to \(category.shortTitle)" : "Add", systemImage: "plus")
-                            .font(.subheadline.weight(.medium))
-                            .padding(.horizontal, 12).padding(.vertical, 7)
-                            .foregroundStyle(Theme.cobalt)
-                            .background(Theme.cobaltSoft, in: Capsule())
-                    }
-                    .buttonStyle(PressableStyle())
-                }
-            }
         }
         .id(registry.order)
         .padding(.vertical, 6)
         .sensoryFeedback(.selection, trigger: category)
         .sheet(item: $editorTarget) { target in
             CategoryEditor(target: target) { created in
-                if created.isSubcategory {
-                    subcategory = created
-                } else {
-                    category = created
-                    subcategory = nil
-                }
+                category = created
+                subcategory = nil
                 onPick()
             }
         }

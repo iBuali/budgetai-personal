@@ -14,6 +14,7 @@ struct BudgetsView: View {
     @State private var showNewBudget = false
     @State private var editingGoal: SavingsGoal?
     @State private var showNewGoal = false
+    @State private var expandedBudgets: Set<UUID> = []
 
     private var finance: Finance {
         Finance(transactions: transactions, accounts: accounts, budgets: budgets, goals: goals, bills: bills)
@@ -30,7 +31,6 @@ struct BudgetsView: View {
             ScrollView {
                 VStack(spacing: 16) {
                     overview(f, interval: interval)
-                    if monthOffset == 0 { safeRow(f) }
                     categorySection(f, interval: interval)
                     goalsSection
                     Button { showNewBudget = true } label: {
@@ -63,7 +63,6 @@ struct BudgetsView: View {
                     }
                 }
             }
-            .navigationDestination(for: HomeRoute.self) { _ in SafeToSpendView() }
             .sheet(item: $editingBudget) { BudgetEditor(budget: $0) }
             .sheet(isPresented: $showNewBudget) { BudgetEditor(budget: nil) }
             .sheet(item: $editingGoal) { GoalSheet(goal: $0) }
@@ -101,24 +100,6 @@ struct BudgetsView: View {
         .card(padding: 20)
     }
 
-    private func safeRow(_ f: Finance) -> some View {
-        NavigationLink(value: HomeRoute.safe) {
-            HStack(spacing: 12) {
-                IconBadge(symbol: "shield.checkered", color: Theme.positive)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Safe to spend").font(.subheadline).foregroundStyle(Theme.secondaryInk)
-                    Text("\(Money.format(f.safeToSpend.daily, currency)) today · \(Money.format(f.safeToSpend.monthly, currency)) this month")
-                        .font(.subheadline.weight(.semibold).monospacedDigit())
-                        .foregroundStyle(Theme.ink)
-                }
-                Spacer()
-                Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(.tertiary)
-            }
-            .card(padding: 14)
-        }
-        .buttonStyle(PressableStyle())
-    }
-
     private func categorySection(_ f: Finance, interval: DateInterval) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             SectionTitle(title: "Category budgets") {
@@ -126,32 +107,98 @@ struct BudgetsView: View {
                     .accessibilityLabel("Add budget")
             }
             if budgets.isEmpty {
-                Text("Set monthly limits for groceries, dining and more. We'll alert you at 80% and 100%.")
+                Text("Create custom budgets and assign one or more categories to track your monthly spending.")
                     .font(.subheadline)
                     .foregroundStyle(Theme.secondaryInk)
             }
             ForEach(budgets) { budget in
-                let spent = f.spent(budget.category, in: interval)
+                let spent = f.spent(for: budget, in: interval)
                 let ratio = budget.limit > 0 ? spent / budget.limit : 0
-                Button { editingBudget = budget } label: {
+                let isExpanded = expandedBudgets.contains(budget.id)
+                let cats = budget.categories
+
+                VStack(alignment: .leading, spacing: 10) {
                     HStack(spacing: 12) {
-                        CategoryIcon(category: budget.category)
-                        VStack(alignment: .leading, spacing: 8) {
-                            HStack {
-                                Text(budget.category.title).font(.body.weight(.medium)).foregroundStyle(Theme.ink)
-                                Spacer()
-                                (Text(Money.format(spent, currency, decimals: 0)).fontWeight(.semibold).foregroundStyle(Theme.ink)
-                                 + Text(" / \(Money.number(budget.limit, decimals: 0))").foregroundStyle(Theme.secondaryInk)
-                                 + Text(ratio >= 0.8 ? " · \(Int(ratio * 100))%" : "").foregroundStyle(ratio >= 1 ? Theme.negative : Theme.secondaryInk))
-                                    .font(.footnote.monospacedDigit())
+                        Button {
+                            withAnimation(.snappy) {
+                                if isExpanded {
+                                    expandedBudgets.remove(budget.id)
+                                } else {
+                                    expandedBudgets.insert(budget.id)
+                                }
                             }
-                            ProgressBar(progress: ratio, color: ratio >= 0.9 ? Theme.negative : (ratio >= 0.8 ? Theme.warning : Theme.cobalt))
+                        } label: {
+                            HStack(spacing: 12) {
+                                CategoryIcon(category: budget.category)
+                                VStack(alignment: .leading, spacing: 6) {
+                                    HStack {
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(budget.displayName)
+                                                .font(.body.weight(.semibold))
+                                                .foregroundStyle(Theme.ink)
+                                            Text("\(cats.count) categor\(cats.count == 1 ? "y" : "ies")")
+                                                .font(.caption2)
+                                                .foregroundStyle(Theme.secondaryInk)
+                                        }
+                                        Spacer()
+                                        (Text(Money.format(spent, currency, decimals: 0)).fontWeight(.semibold).foregroundStyle(Theme.ink)
+                                         + Text(" / \(Money.number(budget.limit, decimals: 0))").foregroundStyle(Theme.secondaryInk)
+                                         + Text(ratio >= 0.8 ? " · \(Int(ratio * 100))%" : "").foregroundStyle(ratio >= 1 ? Theme.negative : Theme.secondaryInk))
+                                            .font(.footnote.monospacedDigit())
+                                    }
+                                    ProgressBar(progress: ratio, color: ratio >= 0.9 ? Theme.negative : (ratio >= 0.8 ? Theme.warning : Theme.cobalt))
+                                }
+                                Image(systemName: "chevron.down")
+                                    .font(.footnote.weight(.semibold))
+                                    .foregroundStyle(.tertiary)
+                                    .rotationEffect(.degrees(isExpanded ? 180 : 0))
+                            }
+                            .contentShape(Rectangle())
                         }
-                        Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(.tertiary)
+                        .buttonStyle(.plain)
+
+                        Button {
+                            editingBudget = budget
+                        } label: {
+                            Image(systemName: "slider.horizontal.3")
+                                .font(.subheadline)
+                                .foregroundStyle(Theme.cobalt)
+                                .frame(width: 30, height: 30)
+                                .background(Theme.cobaltSoft, in: Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Edit \(budget.displayName)")
                     }
-                    .contentShape(Rectangle())
+
+                    if isExpanded {
+                        VStack(alignment: .leading, spacing: 10) {
+                            ForEach(cats) { cat in
+                                let catSpent = f.spent(cat, in: interval)
+                                let catRatio = budget.limit > 0 ? catSpent / budget.limit : (spent > 0 ? catSpent / spent : 0)
+                                HStack(spacing: 10) {
+                                    CategoryIcon(category: cat, size: 28)
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        HStack {
+                                            Text(cat.title)
+                                                .font(.subheadline)
+                                                .foregroundStyle(Theme.ink)
+                                            Spacer()
+                                            Text(Money.format(catSpent, currency))
+                                                .font(.caption.weight(.semibold).monospacedDigit())
+                                                .foregroundStyle(Theme.ink)
+                                        }
+                                        ProgressBar(progress: catRatio, color: cat.color, height: 6)
+                                    }
+                                }
+                            }
+                        }
+                        .padding(.leading, 12)
+                        .padding(.vertical, 8)
+                        .padding(.horizontal, 10)
+                        .background(Theme.track.opacity(0.35), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+                    }
                 }
-                .buttonStyle(.plain)
             }
         }
         .card()
@@ -169,11 +216,28 @@ struct BudgetsView: View {
                     .foregroundStyle(Theme.secondaryInk)
             }
             ForEach(goals) { goal in
+                let linkedAcc = accounts.first { $0.id == goal.linkedAccountID }
+                let linkedSuffix = !goal.smsMatch.trimmingCharacters(in: .whitespaces).isEmpty
+                    ? goal.smsMatch.trimmingCharacters(in: .whitespaces)
+                    : (linkedAcc.flatMap { !$0.smsMatch.trimmingCharacters(in: .whitespaces).isEmpty ? $0.smsMatch.trimmingCharacters(in: .whitespaces) : nil })
                 Button { editingGoal = goal } label: {
                     HStack(spacing: 12) {
                         IconBadge(symbol: goal.symbol, color: goal.isComplete ? Theme.positive : Theme.cobalt)
                         VStack(alignment: .leading, spacing: 6) {
-                            Text(goal.name).font(.body.weight(.medium)).foregroundStyle(Theme.ink)
+                            HStack(spacing: 6) {
+                                Text(goal.name).font(.body.weight(.medium)).foregroundStyle(Theme.ink)
+                                if linkedAcc != nil || linkedSuffix != nil {
+                                    Label(
+                                        linkedSuffix.map { "••\($0)" } ?? (linkedAcc?.name ?? "Linked"),
+                                        systemImage: "link"
+                                    )
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(Theme.cobalt)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Theme.cobalt.opacity(0.12), in: Capsule())
+                                }
+                            }
                             Text("\(Money.format(goal.saved, currency, decimals: 0)) / \(Money.number(goal.target, decimals: 0)) · \(goal.targetDate.formatted(.dateTime.month(.abbreviated).year()))")
                                 .font(.footnote.monospacedDigit())
                                 .foregroundStyle(Theme.secondaryInk)
@@ -196,18 +260,21 @@ struct BudgetEditor: View {
     let budget: Budget?
     @Environment(\.modelContext) private var context
     @Environment(\.dismiss) private var dismiss
-    @Query private var budgets: [Budget]
     @AppStorage(Keys.currency) private var currency = "BHD"
-    @State private var category: SpendCategory = .groceries
+    @State private var name = ""
+    @State private var selectedCategories: [SpendCategory] = []
     @State private var limitText = ""
+
+    private var availableCategories: [SpendCategory] {
+        SpendCategory.expenseCases.filter { $0 != .transfers && $0 != .internalTransfer }
+    }
 
     var body: some View {
         NavigationStack {
             Form {
-                Section {
-                    Picker("Category", selection: $category) {
-                        ForEach(available) { c in Label(c.title, systemImage: c.symbol).tag(c) }
-                    }
+                Section("Budget details") {
+                    TextField("Budget name (e.g. Daily Living)", text: $name)
+                        .textInputAutocapitalization(.words)
                     HStack {
                         Text("Monthly limit")
                         Spacer()
@@ -216,9 +283,33 @@ struct BudgetEditor: View {
                             .multilineTextAlignment(.trailing)
                             .monospacedDigit()
                     }
-                } footer: {
-                    Text(category.isEssential ? "Essential category: what's left is protected in Safe to Spend." : "You'll get alerts at 80% and 100% of this limit.")
                 }
+
+                Section {
+                    ForEach(availableCategories) { c in
+                        let isSelected = selectedCategories.contains(c)
+                        Button {
+                            toggleCategory(c)
+                        } label: {
+                            HStack(spacing: 12) {
+                                CategoryIcon(category: c, size: 34)
+                                Text(c.title)
+                                    .foregroundStyle(Theme.ink)
+                                Spacer()
+                                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                                    .font(.title3)
+                                    .foregroundStyle(isSelected ? Theme.cobalt : Color(hex: 0xC7CCD6))
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                } header: {
+                    Text("Categories (\(selectedCategories.count) selected)")
+                } footer: {
+                    Text("Select one or more categories to track together under this budget. You'll get alerts at 80% and 100% of the limit.")
+                }
+
                 if let budget {
                     Section {
                         Button("Delete budget", role: .destructive) {
@@ -234,33 +325,47 @@ struct BudgetEditor: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Save", action: save).fontWeight(.semibold).disabled((Money.parse(limitText) ?? 0) <= 0)
+                    Button("Save", action: save)
+                        .fontWeight(.semibold)
+                        .disabled((Money.parse(limitText) ?? 0) <= 0 || selectedCategories.isEmpty)
                 }
             }
             .onAppear {
+                CategoryRegistry.shared.reload(context: context)
                 if let budget {
-                    category = budget.category
+                    name = budget.displayName
+                    selectedCategories = budget.categories
                     limitText = Money.number(budget.limit, decimals: Money.digits(currency)).replacingOccurrences(of: ",", with: "")
-                } else if let first = available.first {
-                    category = first
+                } else if let first = availableCategories.first {
+                    selectedCategories = [first]
                 }
             }
         }
-        .presentationDetents([.medium, .large])
+        .presentationDetents([.large])
     }
 
-    private var available: [SpendCategory] {
-        let used = Set(budgets.filter { $0.id != budget?.id }.map(\.category))
-        return SpendCategory.expenseCases.filter { !used.contains($0) && $0 != .transfers }
+    private func toggleCategory(_ category: SpendCategory) {
+        if let idx = selectedCategories.firstIndex(of: category) {
+            selectedCategories.remove(at: idx)
+        } else {
+            selectedCategories.append(category)
+        }
     }
 
     private func save() {
         let limit = Money.parse(limitText) ?? 0
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedName: String = {
+            if !trimmedName.isEmpty { return trimmedName }
+            if selectedCategories.count == 1 { return selectedCategories[0].title }
+            return selectedCategories.map(\.shortTitle).joined(separator: " & ")
+        }()
         if let budget {
-            budget.category = category
+            budget.name = resolvedName
+            budget.categories = selectedCategories
             budget.limit = limit
         } else {
-            context.insert(Budget(category: category, limit: limit))
+            context.insert(Budget(name: resolvedName, categories: selectedCategories, limit: limit))
         }
         try? context.save()
         dismiss()
@@ -282,6 +387,8 @@ struct GoalSheet: View {
     @State private var targetDate = Calendar.current.date(byAdding: .month, value: 6, to: .now) ?? .now
     @State private var contributionText = ""
     @State private var fromAccount: UUID?
+    @State private var linkedAccountID: UUID?
+    @State private var smsMatch = ""
 
     private let symbols = ["star.fill", "shield.lefthalf.filled", "airplane", "car.fill", "house.fill", "graduationcap.fill", "gift.fill", "heart.fill", "laptopcomputer", "ring"]
 
@@ -332,6 +439,34 @@ struct GoalSheet: View {
                     }
                     DatePicker("Target date", selection: $targetDate, in: Date.now..., displayedComponents: .date)
                 }
+                Section {
+                    Picker("Linked savings account", selection: $linkedAccountID) {
+                        Text("None").tag(UUID?.none)
+                        ForEach(accounts.filter { !$0.kind.isLiability }) { a in
+                            Text(a.menuTitle).tag(UUID?.some(a.id))
+                        }
+                    }
+                    .onChange(of: linkedAccountID) { _, newID in
+                        if smsMatch.trimmingCharacters(in: .whitespaces).isEmpty,
+                           let newID,
+                           let acc = accounts.first(where: { $0.id == newID }),
+                           !acc.smsMatch.trimmingCharacters(in: .whitespaces).isEmpty {
+                            smsMatch = acc.smsMatch
+                        }
+                    }
+                    HStack {
+                        Text("Savings IBAN / account suffix")
+                        Spacer()
+                        TextField("e.g. 0846", text: $smsMatch)
+                            .keyboardType(.asciiCapable)
+                            .multilineTextAlignment(.trailing)
+                            .monospacedDigit()
+                    }
+                } header: {
+                    Text("Auto-save from SMS / Transfers")
+                } footer: {
+                    Text("Whenever an SMS transfer (such as Fawri+ to your savings IBAN ending in these digits) or transfer to the linked account is imported, its amount is automatically added to this goal.")
+                }
                 Section("Icon") {
                     LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 5), spacing: 12) {
                         ForEach(symbols, id: \.self) { s in
@@ -379,6 +514,8 @@ struct GoalSheet: View {
         targetText = plain(goal.target)
         commitmentText = plain(goal.monthlyCommitment)
         targetDate = goal.targetDate
+        linkedAccountID = goal.linkedAccountID
+        smsMatch = goal.smsMatch
     }
 
     private func suggestion(_ goal: SavingsGoal) -> String {
@@ -400,15 +537,19 @@ struct GoalSheet: View {
         let target = Money.parse(targetText) ?? 0
         let commitment = Money.parse(commitmentText) ?? 0
         let trimmed = name.trimmingCharacters(in: .whitespaces)
+        let cleanSuffix = smsMatch.trimmingCharacters(in: .whitespacesAndNewlines)
         if let goal {
             goal.name = trimmed
             goal.symbol = symbol
             goal.target = target
             goal.monthlyCommitment = commitment
             goal.targetDate = targetDate
+            goal.linkedAccountID = linkedAccountID
+            goal.smsMatch = cleanSuffix
         } else {
             context.insert(SavingsGoal(name: trimmed, symbol: symbol, target: target, saved: Money.parse(savedText) ?? 0,
-                                       targetDate: targetDate, monthlyCommitment: commitment))
+                                       targetDate: targetDate, monthlyCommitment: commitment,
+                                       linkedAccountID: linkedAccountID, smsMatch: cleanSuffix))
         }
         try? context.save()
         dismiss()

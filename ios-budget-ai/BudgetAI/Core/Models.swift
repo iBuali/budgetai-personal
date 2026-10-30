@@ -31,12 +31,13 @@ struct SpendCategory: Hashable, Identifiable {
     static let subscriptions = SpendCategory(key: "subscriptions")
     static let education = SpendCategory(key: "education")
     static let travel = SpendCategory(key: "travel")
+    static let internalTransfer = SpendCategory(key: "internal_transfer")
     static let transfers = SpendCategory(key: "transfers")
     static let income = SpendCategory(key: "income")
     static let other = SpendCategory(key: "other")
 
     static let builtIns: [SpendCategory] = [.groceries, .dining, .transport, .shopping, .bills, .housing, .health,
-                                            .entertainment, .subscriptions, .education, .travel, .transfers, .income, .other]
+                                            .entertainment, .subscriptions, .education, .travel, .internalTransfer, .transfers, .income, .other]
 
     struct Info {
         var title: String
@@ -61,6 +62,7 @@ struct SpendCategory: Hashable, Identifiable {
         "subscriptions": Info(title: "Subscriptions", shortTitle: "Subscriptions", symbol: "play.rectangle.fill", emoji: "", color: Color(hex: 0xF05252), isEssential: false, isIncome: false, parentKey: ""),
         "education": Info(title: "Education", shortTitle: "Education", symbol: "graduationcap.fill", emoji: "", color: Color(hex: 0x0891B2), isEssential: true, isIncome: false, parentKey: ""),
         "travel": Info(title: "Travel", shortTitle: "Travel", symbol: "airplane", emoji: "", color: Color(hex: 0x0EA5E9), isEssential: false, isIncome: false, parentKey: ""),
+        "internal_transfer": Info(title: "Internal Transfer", shortTitle: "Internal", symbol: "arrow.left.arrow.right.circle.fill", emoji: "", color: Theme.cobalt, isEssential: false, isIncome: false, parentKey: ""),
         "transfers": Info(title: "Transfers", shortTitle: "Transfers", symbol: "arrow.left.arrow.right", emoji: "", color: Color(hex: 0x6B7385), isEssential: false, isIncome: false, parentKey: ""),
         "income": Info(title: "Income", shortTitle: "Income", symbol: "arrow.down", emoji: "", color: Color(hex: 0x2BB673), isEssential: false, isIncome: true, parentKey: ""),
         "other": Info(title: "Other", shortTitle: "Other", symbol: "square.grid.2x2.fill", emoji: "", color: Color(hex: 0x8A93A6), isEssential: false, isIncome: false, parentKey: ""),
@@ -80,9 +82,9 @@ struct SpendCategory: Hashable, Identifiable {
     var isEssential: Bool { info.isEssential }
     var isIncomeCategory: Bool { info.isIncome }
     var isBuiltIn: Bool { SpendCategory.builtInInfo[rawValue] != nil }
-    var isSubcategory: Bool { !info.parentKey.isEmpty }
-    var parent: SpendCategory? { isSubcategory ? SpendCategory.unchecked(info.parentKey) : nil }
-    var subcategories: [SpendCategory] { CategoryRegistry.shared.children(of: rawValue) }
+    var isSubcategory: Bool { false }
+    var parent: SpendCategory? { nil }
+    var subcategories: [SpendCategory] { [] }
 
     /// Top-level categories (built-in + custom).
     static var allCases: [SpendCategory] {
@@ -140,18 +142,19 @@ final class CategoryRegistry {
     func reload(context: ModelContext) {
         let items = (try? context.fetch(FetchDescriptor<CustomCategory>(sortBy: [SortDescriptor(\.createdAt)]))) ?? []
         var map: [String: SpendCategory.Info] = [:]
-        for c in items {
-            let parent = c.parentKey.isEmpty ? nil : (SpendCategory.builtInInfo[c.parentKey] ?? map[c.parentKey])
+        var topKeys: [String] = []
+        for c in items where c.parentKey.isEmpty {
             map[c.key] = SpendCategory.Info(
-                title: c.name, shortTitle: c.name, symbol: parent?.symbol ?? "tag.fill",
-                emoji: c.emoji.isEmpty ? (parent?.emoji ?? "") : c.emoji,
-                color: c.parentKey.isEmpty ? Color(hex: UInt32(c.colorHex)) : (parent?.color ?? Color(hex: UInt32(c.colorHex))),
-                isEssential: parent?.isEssential ?? c.isEssential,
-                isIncome: parent?.isIncome ?? c.isIncome,
-                parentKey: c.parentKey)
+                title: c.name, shortTitle: c.name, symbol: "tag.fill",
+                emoji: c.emoji,
+                color: Color(hex: UInt32(c.colorHex)),
+                isEssential: c.isEssential,
+                isIncome: c.isIncome,
+                parentKey: "")
+            topKeys.append(c.key)
         }
         infos = map
-        order = items.map(\.key)
+        order = topKeys
     }
 }
 
@@ -284,6 +287,11 @@ enum SMSTransactionType: String, CaseIterable, Codable, Identifiable {
         }
     }
 
+    /// Cases shown in the Transaction Type picker (Internal Transfer is selected as a Category instead).
+    static let pickerCases: [SMSTransactionType] = [
+        .income, .expense, .transferIn, .transferOut, .fee, .refund, .unknown
+    ]
+
     var isTransferType: Bool {
         self == .transferIn || self == .transferOut || self == .internalTransfer
     }
@@ -357,6 +365,8 @@ final class MoneyTransaction {
     var smsAccountSuffix: String?
     /// Recipient IBAN or destination account suffix extracted from the SMS (e.g. 0846).
     var smsRecipientSuffix: String?
+    /// Linked savings goal that receives this transfer's amount automatically.
+    var goalID: UUID?
 
     init(amount: Double, isIncome: Bool, merchant: String, category: SpendCategory, date: Date = .now,
          note: String = "", source: TxSource = .manual, accountID: UUID? = nil) {
@@ -377,8 +387,8 @@ final class MoneyTransaction {
     }
 
     var subcategory: SpendCategory? {
-        get { subcategoryKey.isEmpty ? nil : SpendCategory(rawValue: subcategoryKey) }
-        set { subcategoryKey = newValue?.rawValue ?? "" }
+        get { nil }
+        set { subcategoryKey = "" }
     }
 
     var smsTransactionType: SMSTransactionType? {
@@ -392,6 +402,7 @@ final class MoneyTransaction {
     }
 
     var effectiveTransactionType: SMSTransactionType {
+        if category == .internalTransfer { return .internalTransfer }
         if let t = smsTransactionType { return t }
         if category == .transfers {
             if toAccountID != nil { return .internalTransfer }
@@ -404,8 +415,9 @@ final class MoneyTransaction {
     var displayCategory: SpendCategory { subcategory ?? category }
 
     var isTransfer: Bool {
+        if category == .internalTransfer || category == .transfers { return true }
         if let t = smsTransactionType { return t.isTransferType }
-        return category == .transfers
+        return false
     }
 
     var source: TxSource {
@@ -416,13 +428,15 @@ final class MoneyTransaction {
     var signedAmount: Double { isIncome ? amount : -amount }
 
     var isSpending: Bool {
+        if category == .internalTransfer || category == .transfers { return false }
         if let t = smsTransactionType { return t.countsAsExpense }
-        return !isIncome && category != .transfers
+        return !isIncome
     }
 
     var isOrdinaryIncome: Bool {
+        if category == .internalTransfer || category == .transfers { return false }
         if let t = smsTransactionType { return t.countsAsIncome }
-        return isIncome && category != .transfers
+        return isIncome
     }
 }
 
@@ -431,20 +445,65 @@ final class MoneyTransaction {
 @Model
 final class Budget {
     var id: UUID = UUID()
+    var name: String = ""
     var categoryRaw: String = SpendCategory.groceries.rawValue
+    /// Comma-separated list of SpendCategory rawValues assigned to this budget.
+    var categoryKeysRaw: String = ""
     var limit: Double = 0
     var createdAt: Date = Date()
 
-    init(category: SpendCategory, limit: Double) {
+    init(name: String = "", categories: [SpendCategory], limit: Double) {
         self.id = UUID()
-        self.categoryRaw = category.rawValue
+        let list = categories.isEmpty ? [.other] : categories
+        self.name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.categoryRaw = list[0].rawValue
+        self.categoryKeysRaw = list.map(\.rawValue).joined(separator: ",")
         self.limit = limit
         self.createdAt = Date()
     }
 
+    convenience init(category: SpendCategory, limit: Double) {
+        self.init(name: category.title, categories: [category], limit: limit)
+    }
+
     var category: SpendCategory {
-        get { SpendCategory(rawValue: categoryRaw) ?? .other }
-        set { categoryRaw = newValue.rawValue }
+        get { categories.first ?? SpendCategory(rawValue: categoryRaw) ?? .other }
+        set {
+            categoryRaw = newValue.rawValue
+            if categoryKeysRaw.isEmpty {
+                categoryKeysRaw = newValue.rawValue
+            }
+        }
+    }
+
+    var categories: [SpendCategory] {
+        get {
+            let parsed = categoryKeysRaw
+                .split(separator: ",")
+                .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+                .compactMap { SpendCategory(rawValue: $0) }
+            if !parsed.isEmpty { return parsed }
+            if let single = SpendCategory(rawValue: categoryRaw) { return [single] }
+            return [.other]
+        }
+        set {
+            let unique = Array(NSOrderedSet(array: newValue)) as? [SpendCategory] ?? newValue
+            let list = unique.isEmpty ? [.other] : unique
+            categoryRaw = list[0].rawValue
+            categoryKeysRaw = list.map(\.rawValue).joined(separator: ",")
+        }
+    }
+
+    var displayName: String {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty { return trimmed }
+        let cats = categories
+        if cats.count == 1 { return cats[0].title }
+        return cats.map(\.shortTitle).joined(separator: " & ")
+    }
+
+    func includes(_ cat: SpendCategory) -> Bool {
+        categories.contains(cat)
     }
 }
 
@@ -460,8 +519,13 @@ final class SavingsGoal {
     var monthKey: String = ""
     var monthContributed: Double = 0
     var createdAt: Date = Date()
+    /// Optional savings account linked to this goal so transfers into that account automatically add to `saved`.
+    var linkedAccountID: UUID?
+    /// Optional IBAN or account suffix (e.g. "0846") so SMS transfers to this suffix automatically add to `saved`.
+    var smsMatch: String = ""
 
-    init(name: String, symbol: String, target: Double, saved: Double, targetDate: Date, monthlyCommitment: Double) {
+    init(name: String, symbol: String, target: Double, saved: Double, targetDate: Date, monthlyCommitment: Double,
+         linkedAccountID: UUID? = nil, smsMatch: String = "") {
         self.id = UUID()
         self.name = name
         self.symbol = symbol
@@ -470,6 +534,8 @@ final class SavingsGoal {
         self.targetDate = targetDate
         self.monthlyCommitment = monthlyCommitment
         self.createdAt = Date()
+        self.linkedAccountID = linkedAccountID
+        self.smsMatch = smsMatch
     }
 
     var progress: Double { target > 0 ? min(saved / target, 1) : 0 }

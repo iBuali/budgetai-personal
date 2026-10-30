@@ -80,9 +80,6 @@ struct ProfileView: View {
                     Button { appState.showPasteSMS = true } label: {
                         row("Paste bank SMS", "doc.on.clipboard.fill", SpendCategory.transport.color)
                     }
-                    NavigationLink { BankConnectionsView() } label: {
-                        row("Bank connections", "link", Theme.secondaryInk, value: "Coming soon")
-                    }
                 }
 
                 SMSImportSettingsSection()

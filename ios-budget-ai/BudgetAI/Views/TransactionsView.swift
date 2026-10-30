@@ -83,7 +83,6 @@ struct TransactionsView: View {
     @State private var filters = TxFilterState()
     @State private var mode: TxViewMode = .list
     @State private var showFilters = false
-    @State private var showBanks = false
     @State private var categorizing = false
     @State private var calendarMonth = Calendar.current.date(from: Calendar.current.dateComponents([.year, .month], from: .now)) ?? .now
     @State private var selectedDay: Date = Calendar.current.startOfDay(for: .now)
@@ -206,15 +205,11 @@ struct TransactionsView: View {
                     Menu {
                         Button("Add manually", systemImage: "doc.text") { appState.showAddTransaction = true }
                         Button("Paste bank SMS", systemImage: "message") { appState.showPasteSMS = true }
-                        Button("Connect bank", systemImage: "building.columns") { showBanks = true }
                     } label: {
                         Image(systemName: "plus")
                     }
                     .accessibilityLabel("Add transaction")
                 }
-            }
-            .sheet(isPresented: $showBanks) {
-                NavigationStack { BankConnectionsView(isSheet: true) }
             }
             .sheet(isPresented: $showFilters) {
                 TransactionFilterSheet(filters: $filters, accounts: accounts)
@@ -603,7 +598,7 @@ struct TransactionFilterSheet: View {
                 }
                 Section {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 104), spacing: 8)], spacing: 8) {
-                        ForEach(SpendCategory.allCases.filter { !$0.isSubcategory }) { c in
+                        ForEach(SpendCategory.allCases) { c in
                             toggleChip(c.menuTitle, on: draft.categories.contains(c.rawValue)) {
                                 toggle(c.rawValue, in: &draft.categories)
                             }
@@ -612,8 +607,6 @@ struct TransactionFilterSheet: View {
                     .padding(.vertical, 4)
                 } header: {
                     Text("Categories")
-                } footer: {
-                    Text("Sub-categories are included with their parent.")
                 }
                 if !accounts.isEmpty {
                     Section("Accounts") {
@@ -690,6 +683,7 @@ struct TransactionDetailView: View {
     @Environment(\.modelContext) private var context
     @Environment(\.dismiss) private var dismiss
     @Query(sort: \Account.createdAt) private var accounts: [Account]
+    @Query(sort: \SavingsGoal.createdAt) private var goals: [SavingsGoal]
     @AppStorage(Keys.currency) private var currency = "BHD"
     @State private var confirmDelete = false
     @State private var editingCategory = false
@@ -781,16 +775,15 @@ struct TransactionDetailView: View {
                         .multilineTextAlignment(.trailing)
                         .focused($focusedField, equals: .name)
                         .submitLabel(.done)
-                        .onSubmit { commitName() }
-                    if hasUnsavedName {
-                        Button("Save") {
-                            commitName()
-                            focusedField = nil
+                        .onChange(of: nameText) { _, newValue in
+                            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                            guard !trimmed.isEmpty, trimmed != tx.merchant else { return }
+                            tx.merchant = trimmed
+                            try? context.save()
+                            if isSMSTransaction {
+                                SMSUserRules.rememberTransactionRule(for: tx)
+                            }
                         }
-                        .font(.caption.weight(.semibold))
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.small)
-                    }
                 }
 
                 HStack(spacing: 8) {
@@ -801,15 +794,15 @@ struct TransactionDetailView: View {
                         .multilineTextAlignment(.trailing)
                         .monospacedDigit()
                         .focused($focusedField, equals: .amount)
-                    if hasUnsavedAmount {
-                        Button("Save") {
-                            commitAmount()
-                            focusedField = nil
+                        .onChange(of: amountText) { _, newValue in
+                            guard let parsed = Money.parse(newValue), parsed > 0, abs(parsed - tx.amount) >= 0.0005 else { return }
+                            Ledger.edit(tx, context: context) { target in
+                                target.amount = abs(parsed)
+                            }
+                            if isSMSTransaction {
+                                SMSUserRules.rememberTransactionRule(for: tx)
+                            }
                         }
-                        .font(.caption.weight(.semibold))
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.small)
-                    }
                 }
 
                 DatePicker(
@@ -824,132 +817,139 @@ struct TransactionDetailView: View {
                     ),
                     displayedComponents: [.date, .hourAndMinute]
                 )
-            }
 
-            if isAccountTransfer {
-                Section("Transfer") {
-                    Picker("From", selection: Binding(get: { tx.accountID }, set: { newID in
-                        guard newID != tx.toAccountID else { return }
-                        Ledger.edit(tx, context: context) { $0.accountID = newID }
-                        if isSMSTransaction {
-                            SMSUserRules.rememberTransactionRule(for: tx)
-                        }
-                    })) {
-                        ForEach(accounts) { a in Text(a.menuTitle).tag(UUID?.some(a.id)) }
+                Button {
+                    withAnimation(.snappy) { editingCategory.toggle() }
+                } label: {
+                    HStack(spacing: 12) {
+                        Text("Category").foregroundStyle(Theme.ink)
+                        Spacer()
+                        CategoryIcon(category: tx.category, size: 28)
+                        Text(tx.category.title).foregroundStyle(Theme.ink)
+                        if tx.aiCategorized { AIBadge() }
+                        Image(systemName: "chevron.down")
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(.tertiary)
+                            .rotationEffect(.degrees(editingCategory ? 180 : 0))
                     }
-                    Picker("To", selection: Binding(get: { tx.toAccountID }, set: { newID in
-                        guard newID != tx.accountID else { return }
-                        Ledger.edit(tx, context: context) { $0.toAccountID = newID }
-                        if isSMSTransaction {
-                            SMSUserRules.rememberTransactionRule(for: tx)
-                        }
-                    })) {
-                        ForEach(accounts) { a in Text(a.menuTitle).tag(UUID?.some(a.id)) }
-                    }
-                    TextField("Note", text: $tx.note, axis: .vertical)
                 }
-            } else {
-                Section("Category") {
-                    Button {
-                        withAnimation(.snappy) { editingCategory.toggle() }
-                    } label: {
-                        HStack(spacing: 12) {
-                            CategoryIcon(category: tx.displayCategory, size: 34)
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text(tx.category.title).foregroundStyle(Theme.ink)
-                                if let sub = tx.subcategory {
-                                    Text(sub.title).font(.caption).foregroundStyle(Theme.secondaryInk)
+                .buttonStyle(.plain)
+
+                if editingCategory {
+                    CategoryPickerGrid(
+                        category: Binding(get: { tx.category }, set: { new in
+                            commitPendingEdits(silent: true)
+                            if new == .internalTransfer {
+                                Ledger.edit(tx, context: context) { target in
+                                    target.subcategory = nil
+                                    target.category = .internalTransfer
+                                    target.isIncome = false
+                                    target.smsTransactionType = .internalTransfer
+                                    target.aiCategorized = false
+                                    if target.goalID == nil,
+                                       let matchedGoal = SMSParser.findMatchingGoal(suffix: target.smsRecipientSuffix, accountID: target.toAccountID, in: context),
+                                       matchedGoal.linkedAccountID == nil || matchedGoal.linkedAccountID != target.accountID {
+                                        target.goalID = matchedGoal.id
+                                        if target.toAccountID == nil, let linkedAcc = matchedGoal.linkedAccountID, linkedAcc != target.accountID {
+                                            target.toAccountID = linkedAcc
+                                        }
+                                    }
                                 }
-                            }
-                            Spacer()
-                            if tx.aiCategorized { AIBadge() }
-                            Image(systemName: "chevron.down")
-                                .font(.footnote.weight(.semibold))
-                                .foregroundStyle(.tertiary)
-                                .rotationEffect(.degrees(editingCategory ? 180 : 0))
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    if editingCategory {
-                        CategoryPickerGrid(
-                            category: Binding(get: { tx.category }, set: { new in
+                            } else if tx.category == .internalTransfer || tx.smsTransactionType == .internalTransfer || tx.isIncome != new.isIncomeCategory {
+                                Ledger.edit(tx, context: context) { target in
+                                    target.subcategory = nil
+                                    target.category = new
+                                    target.toAccountID = nil
+                                    target.goalID = nil
+                                    target.isIncome = new.isIncomeCategory
+                                    if isSMSTransaction {
+                                        target.smsTransactionType = new.isIncomeCategory ? .income : (new == .transfers ? .transferOut : .expense)
+                                    }
+                                    target.aiCategorized = false
+                                }
+                            } else {
                                 if new != tx.category { tx.subcategory = nil }
                                 tx.category = new
                                 tx.aiCategorized = false
                                 try? context.save()
-                                if isSMSTransaction {
-                                    SMSUserRules.rememberTransactionRule(for: tx)
-                                }
-                            }),
-                            subcategory: Binding(get: { tx.subcategory }, set: { newSub in
-                                tx.subcategory = newSub
-                                try? context.save()
-                                if isSMSTransaction {
-                                    SMSUserRules.rememberTransactionRule(for: tx)
-                                }
-                            }),
-                            income: tx.isIncome
-                        )
+                            }
+                            if isSMSTransaction {
+                                SMSUserRules.rememberTransactionRule(for: tx)
+                            }
+                        }),
+                        subcategory: Binding(get: { tx.subcategory }, set: { newSub in
+                            tx.subcategory = newSub
+                            try? context.save()
+                            if isSMSTransaction {
+                                SMSUserRules.rememberTransactionRule(for: tx)
+                            }
+                        }),
+                        income: tx.isIncome,
+                        includeAllTypes: true
+                    )
+                }
+
+                Picker("Account", selection: Binding(get: { tx.accountID }, set: { newID in
+                    Ledger.edit(tx, context: context) { $0.accountID = newID }
+                    if isSMSTransaction {
+                        SMSUserRules.rememberTransactionRule(for: tx)
+                    }
+                })) {
+                    Text("None").tag(UUID?.none)
+                    ForEach(accounts) { a in Text(a.menuTitle).tag(UUID?.some(a.id)) }
+                }
+
+                if tx.category == .internalTransfer || tx.effectiveTransactionType == .internalTransfer || tx.toAccountID != nil {
+                    Picker("To account", selection: Binding(get: { tx.toAccountID }, set: { newID in
+                        guard newID != tx.accountID else { return }
+                        Ledger.edit(tx, context: context) { target in
+                            target.toAccountID = newID
+                            if let newID, let matchedGoal = goals.first(where: { $0.linkedAccountID == newID }) {
+                                target.goalID = matchedGoal.id
+                            }
+                        }
+                        if isSMSTransaction {
+                            SMSUserRules.rememberTransactionRule(for: tx)
+                        }
+                    })) {
+                        Text("Select destination").tag(UUID?.none)
+                        ForEach(accounts.filter { $0.id != tx.accountID }) { a in
+                            Text(a.menuTitle).tag(UUID?.some(a.id))
+                        }
                     }
                 }
 
-                Section("Details") {
-                    Picker("Account", selection: Binding(get: { tx.accountID }, set: { newID in
-                        Ledger.edit(tx, context: context) { $0.accountID = newID }
+                if !goals.isEmpty && (tx.category == .internalTransfer || tx.effectiveTransactionType == .internalTransfer || tx.goalID != nil) {
+                    Picker("Savings goal", selection: Binding(get: { tx.goalID }, set: { newGoalID in
+                        Ledger.edit(tx, context: context) { target in
+                            target.goalID = newGoalID
+                            if let newGoalID,
+                               let g = goals.first(where: { $0.id == newGoalID }),
+                               target.toAccountID == nil,
+                               let linkedAcc = g.linkedAccountID,
+                               linkedAcc != target.accountID {
+                                target.toAccountID = linkedAcc
+                            }
+                        }
                         if isSMSTransaction {
                             SMSUserRules.rememberTransactionRule(for: tx)
                         }
                     })) {
                         Text("None").tag(UUID?.none)
-                        ForEach(accounts) { a in Text(a.menuTitle).tag(UUID?.some(a.id)) }
-                    }
-                    if tx.effectiveTransactionType == .internalTransfer {
-                        Picker("To account", selection: Binding(get: { tx.toAccountID }, set: { newID in
-                            guard newID != tx.accountID else { return }
-                            Ledger.edit(tx, context: context) { $0.toAccountID = newID }
-                            if isSMSTransaction {
-                                SMSUserRules.rememberTransactionRule(for: tx)
-                            }
-                        })) {
-                            Text("Select destination").tag(UUID?.none)
-                            ForEach(accounts.filter { $0.id != tx.accountID }) { a in
-                                Text(a.menuTitle).tag(UUID?.some(a.id))
-                            }
+                        ForEach(goals) { g in
+                            Text(g.name).tag(UUID?.some(g.id))
                         }
                     }
-                    LabeledContent("Source") {
-                        HStack(spacing: 6) {
-                            Text(tx.source.title)
-                            if tx.aiCategorized { AIBadge() }
-                        }
-                    }
-                    TextField("Note", text: $tx.note, axis: .vertical)
                 }
+
+                TextField("Note", text: $tx.note, axis: .vertical)
+                    .onChange(of: tx.note) { _, _ in
+                        try? context.save()
+                    }
             }
 
-            if isSMSTransaction {
-                Section {
-                    Picker("Transaction type", selection: Binding(
-                        get: { tx.effectiveTransactionType },
-                        set: { newType in
-                            commitPendingEdits(silent: true)
-                            let result = Ledger.applyUserCorrection(
-                                to: tx,
-                                newType: newType,
-                                newBank: tx.smsBank,
-                                toAccountID: tx.toAccountID,
-                                approveIfPending: false,
-                                rememberRule: true,
-                                context: context
-                            )
-                            appState.report(result, base: "Updated to \(newType.title)")
-                        }
-                    )) {
-                        ForEach(SMSTransactionType.allCases) { t in
-                            Text(t.title).tag(t)
-                        }
-                    }
-
+            if isSMSTransaction || tx.smsBalance != nil {
+                Section("SMS Details") {
                     Picker("SMS sender bank", selection: Binding(
                         get: { tx.smsBank ?? "" },
                         set: { newBank in
@@ -970,49 +970,35 @@ struct TransactionDetailView: View {
                         }
                     }
 
-                    if let ref = tx.smsReference, !ref.isEmpty {
-                        LabeledContent("Reference") {
-                            Text(ref).font(.subheadline.monospaced()).foregroundStyle(Theme.ink)
-                        }
+                    LabeledContent("Reference") {
+                        Text((tx.smsReference?.isEmpty == false) ? tx.smsReference! : "—")
+                            .font(.subheadline.monospaced())
+                            .foregroundStyle(Theme.ink)
                     }
-                    if let recip = tx.smsRecipientSuffix, !recip.isEmpty {
-                        LabeledContent("Recipient IBAN / acct") {
-                            Text("••\(recip)").font(.subheadline.monospacedDigit()).foregroundStyle(Theme.ink)
-                        }
-                    }
-                    if let acct = tx.smsAccountSuffix, !acct.isEmpty {
-                        LabeledContent("Card / account suffix") {
-                            Text("••\(acct)").font(.subheadline.monospacedDigit()).foregroundStyle(Theme.ink)
-                        }
-                    }
-                    if let conf = tx.smsConfidence {
-                        LabeledContent("Confidence") {
-                            Text(conf.title)
-                                .foregroundStyle(conf == .low ? Theme.warning : Theme.secondaryInk)
-                        }
-                    }
-                    if !tx.smsClassificationReason.isEmpty {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Classification reason").font(.caption).foregroundStyle(Theme.secondaryInk)
-                            Text(tx.smsClassificationReason).font(.footnote).foregroundStyle(Theme.ink)
-                        }
-                    }
-                } header: {
-                    Text("SMS classification & bank")
-                } footer: {
-                    Text("All options (name, type, category, bank, and accounts) are remembered for matching future SMS messages.")
-                }
-            }
 
-            if let bank = tx.smsBalance {
-                Section {
-                    LabeledContent("Balance in SMS") {
-                        Text(Money.format(bank, currency)).monospacedDigit()
+                    LabeledContent("Recipient IBAN / Account") {
+                        let suffix = (tx.smsRecipientSuffix?.isEmpty == false ? tx.smsRecipientSuffix : nil)
+                            ?? (tx.smsAccountSuffix?.isEmpty == false ? tx.smsAccountSuffix : nil)
+                        Text(suffix.map { "••\($0)" } ?? "—")
+                            .font(.subheadline.monospacedDigit())
+                            .foregroundStyle(Theme.ink)
                     }
-                    if let account, !account.kind.isLiability {
-                        LabeledContent("\(account.name) in app") {
-                            Text(Money.format(account.balance, currency)).monospacedDigit()
+
+                    LabeledContent("Balance in SMS") {
+                        Text(tx.smsBalance.map { Money.format($0, currency) } ?? "—")
+                            .monospacedDigit()
+                    }
+
+                    LabeledContent("Account in App") {
+                        if let account {
+                            Text("\(account.name) (\(Money.format(account.balance, currency)))")
+                                .monospacedDigit()
+                        } else {
+                            Text("None").foregroundStyle(Theme.secondaryInk)
                         }
+                    }
+
+                    if let bank = tx.smsBalance, let account, !account.kind.isLiability {
                         if abs(account.balance - bank) >= 0.0005 && !tx.isPending {
                             Button {
                                 if let synced = Ledger.syncBalanceFromSMS(tx, context: context, force: true) {
@@ -1026,10 +1012,13 @@ struct TransactionDetailView: View {
                                 .foregroundStyle(Theme.positive)
                         }
                     }
-                } header: {
-                    Text("Bank balance")
-                } footer: {
-                    Text("Your bank included the available balance in this message.")
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Classification reason").font(.caption).foregroundStyle(Theme.secondaryInk)
+                        Text(tx.smsClassificationReason.isEmpty ? "—" : tx.smsClassificationReason)
+                            .font(.footnote)
+                            .foregroundStyle(Theme.ink)
+                    }
                 }
             }
 
@@ -1052,7 +1041,7 @@ struct TransactionDetailView: View {
             ToolbarItemGroup(placement: .keyboard) {
                 Spacer()
                 Button("Done") {
-                    commitPendingEdits(silent: false)
+                    commitPendingEdits(silent: true)
                     focusedField = nil
                 }
                 .fontWeight(.semibold)
@@ -1063,10 +1052,11 @@ struct TransactionDetailView: View {
             amountText = Money.number(tx.amount, decimals: Money.digits(currency)).replacingOccurrences(of: ",", with: "")
         }
         .onChange(of: focusedField) { oldValue, _ in
-            if oldValue == .name && hasUnsavedName {
-                commitName()
-            } else if oldValue == .amount && hasUnsavedAmount {
-                commitAmount()
+            if oldValue == .name {
+                commitName(silent: true)
+            } else if oldValue == .amount {
+                commitAmount(silent: true)
+                amountText = Money.number(tx.amount, decimals: Money.digits(currency)).replacingOccurrences(of: ",", with: "")
             }
         }
         .onDisappear {

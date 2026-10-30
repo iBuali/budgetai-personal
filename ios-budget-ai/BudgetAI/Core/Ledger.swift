@@ -82,8 +82,18 @@ enum Ledger {
         if tx.smsTransactionType == .unknown {
             return
         }
-        if tx.smsTransactionType == .internalTransfer && tx.toAccountID == nil {
-            // Do not change net worth on an internal transfer without a destination account.
+        if sign > 0, tx.goalID == nil,
+           (tx.smsTransactionType == .internalTransfer || tx.category == .internalTransfer || tx.isTransfer) {
+            if let matchedGoal = SMSParser.findMatchingGoal(suffix: tx.smsRecipientSuffix, accountID: tx.toAccountID, in: context),
+               matchedGoal.linkedAccountID == nil || matchedGoal.linkedAccountID != tx.accountID {
+                tx.goalID = matchedGoal.id
+                if tx.toAccountID == nil, let linkedAcc = matchedGoal.linkedAccountID, linkedAcc != tx.accountID {
+                    tx.toAccountID = linkedAcc
+                }
+            }
+        }
+        if (tx.smsTransactionType == .internalTransfer || tx.category == .internalTransfer) && tx.toAccountID == nil && tx.goalID == nil {
+            // Do not change net worth on an internal transfer without a destination account or linked savings goal.
             return
         }
         if let id = tx.accountID, let account = account(id, context: context) {
@@ -94,9 +104,22 @@ enum Ledger {
             }
         }
         // Internal transfers credit the destination account (paying down a loan or card reduces what's owed).
-        if (tx.smsTransactionType == .internalTransfer || (tx.smsTransactionType == nil && tx.isTransfer)),
+        if (tx.smsTransactionType == .internalTransfer || tx.category == .internalTransfer || (tx.smsTransactionType == nil && tx.isTransfer)),
            let to = tx.toAccountID, let dest = account(to, context: context) {
             dest.balance += (dest.kind.isLiability ? -tx.amount : tx.amount) * sign
+        }
+        // Automatically update the linked savings goal when a transfer contributes to it.
+        if let goalID = tx.goalID, let targetGoal = goal(goalID, context: context) {
+            let txMonthKey = DateKeys.month(tx.date)
+            let currentMonthKey = DateKeys.month(.now)
+            if targetGoal.monthKey != currentMonthKey {
+                targetGoal.monthKey = currentMonthKey
+                targetGoal.monthContributed = 0
+            }
+            targetGoal.saved = max(0, targetGoal.saved + tx.amount * sign)
+            if txMonthKey == currentMonthKey {
+                targetGoal.monthContributed = max(0, targetGoal.monthContributed + tx.amount * sign)
+            }
         }
     }
 
@@ -134,14 +157,21 @@ enum Ledger {
                 target.category = .transfers
                 target.subcategory = nil
                 target.toAccountID = nil
+                target.goalID = nil
             case .internalTransfer:
-                target.category = .transfers
+                target.category = newCategory ?? .internalTransfer
                 target.subcategory = nil
                 if let toAccountID, toAccountID != target.accountID {
                     target.toAccountID = toAccountID
                 }
+                if target.goalID == nil,
+                   let matchedGoal = SMSParser.findMatchingGoal(suffix: target.smsRecipientSuffix, accountID: target.toAccountID, in: context),
+                   matchedGoal.linkedAccountID == nil || matchedGoal.linkedAccountID != target.accountID {
+                    target.goalID = matchedGoal.id
+                }
             case .income:
                 target.toAccountID = nil
+                target.goalID = nil
                 if let newCategory {
                     target.category = newCategory
                 } else if !target.category.isIncomeCategory {
@@ -149,20 +179,23 @@ enum Ledger {
                 }
             case .fee:
                 target.toAccountID = nil
+                target.goalID = nil
                 if let newCategory {
                     target.category = newCategory
-                } else if target.category == .transfers || target.category.isIncomeCategory {
+                } else if target.category == .transfers || target.category == .internalTransfer || target.category.isIncomeCategory {
                     target.category = .bills
                 }
             case .expense, .refund:
                 target.toAccountID = nil
+                target.goalID = nil
                 if let newCategory {
                     target.category = newCategory
-                } else if target.category == .transfers || target.category.isIncomeCategory {
+                } else if target.category == .transfers || target.category == .internalTransfer || target.category.isIncomeCategory {
                     target.category = Categorizer.guess(target.merchant) ?? .other
                 }
             case .unknown:
                 target.toAccountID = nil
+                target.goalID = nil
                 target.category = .other
                 target.smsConfidence = .low
             }
@@ -190,9 +223,11 @@ enum Ledger {
     /// Records a transfer between two accounts.
     @discardableResult
     static func transfer(amount: Double, from: Account, to: Account, date: Date, note: String, context: ModelContext) -> LedgerResult {
-        let tx = MoneyTransaction(amount: amount, isIncome: false, merchant: "\(from.name) → \(to.name)", category: .transfers,
+        let matchedGoal = SMSParser.findMatchingGoal(accountID: to.id, in: context)
+        let tx = MoneyTransaction(amount: amount, isIncome: false, merchant: "\(from.name) → \(to.name)", category: .internalTransfer,
                                   date: date, note: note, source: .transfer, accountID: from.id)
         tx.toAccountID = to.id
+        tx.goalID = matchedGoal?.id
         return add(tx, context: context, checkDuplicates: false)
     }
 
@@ -220,6 +255,11 @@ enum Ledger {
 
     static func account(_ id: UUID, context: ModelContext) -> Account? {
         let descriptor = FetchDescriptor<Account>(predicate: #Predicate { $0.id == id })
+        return try? context.fetch(descriptor).first
+    }
+
+    static func goal(_ id: UUID, context: ModelContext) -> SavingsGoal? {
+        let descriptor = FetchDescriptor<SavingsGoal>(predicate: #Predicate { $0.id == id })
         return try? context.fetch(descriptor).first
     }
 
@@ -297,31 +337,34 @@ enum Ledger {
     // MARK: Budget alerts
 
     static func checkBudgetAlerts(for category: SpendCategory, context: ModelContext) -> [String] {
-        let raw = category.rawValue
-        let budgets = (try? context.fetch(FetchDescriptor<Budget>(predicate: #Predicate { $0.categoryRaw == raw }))) ?? []
-        guard let budget = budgets.first, budget.limit > 0 else { return [] }
+        let allBudgets = (try? context.fetch(FetchDescriptor<Budget>())) ?? []
+        let matchingBudgets = allBudgets.filter { $0.limit > 0 && $0.includes(category) }
+        guard !matchingBudgets.isEmpty else { return [] }
         let interval = Cycle.interval(containing: .now)
         let start = interval.start, end = interval.end
         let txs = (try? context.fetch(FetchDescriptor<MoneyTransaction>(predicate: #Predicate {
-            $0.date >= start && $0.date < end && $0.categoryRaw == raw && !$0.isIncome && !$0.isPending
+            $0.date >= start && $0.date < end && !$0.isIncome && !$0.isPending
         }))) ?? []
-        let spent = txs.reduce(0) { $0 + $1.amount }
-        let ratio = spent / budget.limit
         let code = AppSettings.currency
         var messages: [String] = []
-        for threshold in [1.0, 0.8] where ratio >= threshold {
-            let key = "alert-\(raw)-\(DateKeys.month(.now))-\(Int(threshold * 100))"
-            guard !UserDefaults.standard.bool(forKey: key) else { break }
-            UserDefaults.standard.set(true, forKey: key)
-            let left = budget.limit - spent
-            let message = threshold >= 1
-                ? "\(category.title) budget exceeded by \(Money.format(-left, code).replacingOccurrences(of: "−", with: ""))"
-                : "\(category.title) is at \(Int(ratio * 100))% of budget. \(Money.format(left, code)) left."
-            messages.append(message)
-            if AppSettings.budgetAlerts {
-                Notifier.post(title: threshold >= 1 ? "Budget exceeded" : "Approaching your limit", body: message, id: key)
+        for budget in matchingBudgets {
+            let keys = Set(budget.categories.map(\.rawValue))
+            let spent = txs.filter { $0.isSpending && keys.contains($0.categoryRaw) }.reduce(0) { $0 + $1.amount }
+            let ratio = spent / budget.limit
+            for threshold in [1.0, 0.8] where ratio >= threshold {
+                let key = "alert-\(budget.id.uuidString)-\(DateKeys.month(.now))-\(Int(threshold * 100))"
+                guard !UserDefaults.standard.bool(forKey: key) else { break }
+                UserDefaults.standard.set(true, forKey: key)
+                let left = budget.limit - spent
+                let message = threshold >= 1
+                    ? "\(budget.displayName) budget exceeded by \(Money.format(-left, code).replacingOccurrences(of: "−", with: ""))"
+                    : "\(budget.displayName) is at \(Int(ratio * 100))% of budget. \(Money.format(left, code)) left."
+                messages.append(message)
+                if AppSettings.budgetAlerts {
+                    Notifier.post(title: threshold >= 1 ? "Budget exceeded" : "Approaching your limit", body: message, id: key)
+                }
+                break
             }
-            break
         }
         return messages
     }
@@ -340,18 +383,22 @@ enum Ledger {
     }
 
     static func contribute(to goal: SavingsGoal, amount: Double, fromAccountID: UUID?, context: ModelContext) {
-        let key = DateKeys.month(.now)
-        if goal.monthKey != key {
-            goal.monthKey = key
-            goal.monthContributed = 0
-        }
-        goal.monthContributed += amount
-        goal.saved += amount
         if let fromAccountID {
             let tx = MoneyTransaction(amount: amount, isIncome: false, merchant: "Saved to \(goal.name)",
-                                      category: .transfers, source: .transfer, accountID: fromAccountID)
+                                      category: .internalTransfer, source: .transfer, accountID: fromAccountID)
+            tx.goalID = goal.id
+            if let linkedAcc = goal.linkedAccountID, linkedAcc != fromAccountID {
+                tx.toAccountID = linkedAcc
+            }
             add(tx, context: context, checkDuplicates: false)
         } else {
+            let key = DateKeys.month(.now)
+            if goal.monthKey != key {
+                goal.monthKey = key
+                goal.monthContributed = 0
+            }
+            goal.monthContributed += amount
+            goal.saved += amount
             try? context.save()
         }
     }

@@ -92,7 +92,12 @@ struct Finance {
     }
 
     func spent(_ category: SpendCategory, in interval: DateInterval) -> Double {
-        transactions(in: interval).filter { $0.isSpending && ($0.category == category || $0.subcategory == category) }.reduce(0) { $0 + $1.amount }
+        transactions(in: interval).filter { $0.isSpending && $0.category == category }.reduce(0) { $0 + $1.amount }
+    }
+
+    func spent(for budget: Budget, in interval: DateInterval) -> Double {
+        let keys = Set(budget.categories.map(\.rawValue))
+        return transactions(in: interval).filter { $0.isSpending && keys.contains($0.categoryRaw) }.reduce(0) { $0 + $1.amount }
     }
 
     var monthIncome: Double { income(in: thisMonth) }
@@ -114,7 +119,7 @@ struct Finance {
     var totalBudget: Double { budgets.reduce(0) { $0 + $1.limit } }
 
     func budgetSpent(in interval: DateInterval) -> Double {
-        let cats = Set(budgets.map(\.category))
+        let cats = Set(budgets.flatMap(\.categories))
         return transactions(in: interval).filter { $0.isSpending && cats.contains($0.category) }.reduce(0) { $0 + $1.amount }
     }
 
@@ -135,8 +140,8 @@ struct Finance {
     // MARK: Safe to spend
 
     var essentialsRemaining: Double {
-        budgets.filter { $0.category.isEssential }.reduce(0) { total, b in
-            total + max(0, b.limit - spent(b.category, in: thisMonth))
+        budgets.filter { $0.categories.contains(where: \.isEssential) }.reduce(0) { total, b in
+            total + max(0, b.limit - spent(for: b, in: thisMonth))
         }
     }
 

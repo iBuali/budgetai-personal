@@ -41,7 +41,8 @@ extension View {
     }
 
     func canvasBackground() -> some View {
-        background(Theme.canvas.ignoresSafeArea())
+        scrollDismissesKeyboard(.immediately)
+            .background(Theme.canvas.ignoresSafeArea())
     }
 }
 

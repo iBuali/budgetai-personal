@@ -15,6 +15,8 @@ struct BudgetAITests {
         for a in accs { context.delete(a) }
         let budgets = (try? context.fetch(FetchDescriptor<Budget>())) ?? []
         for b in budgets { context.delete(b) }
+        let goals = (try? context.fetch(FetchDescriptor<SavingsGoal>())) ?? []
+        for g in goals { context.delete(g) }
         let cats = (try? context.fetch(FetchDescriptor<CustomCategory>())) ?? []
         for c in cats { context.delete(c) }
         try? context.save()
@@ -59,22 +61,17 @@ struct BudgetAITests {
         #expect(comps.hour == 15)
         #expect(comps.minute == 26)
 
-        // Import into ledger and verify it does NOT inflate income or ordinary expenses
+        // When imported without a prior user rule, Transfer Out is added as an Expense
         let outcome = await SMSImporter.importText(sms, context: context, forceApprove: true)
         let tx = try #require(outcome.transaction)
-        #expect(tx.smsTransactionType == .transferOut)
+        #expect(tx.smsTransactionType == .expense)
         #expect(tx.smsBank == "BisB")
         #expect(tx.smsReference == "BIB103KAK000KZUM")
         #expect(tx.smsRecipientSuffix == "0846")
         #expect(tx.isIncome == false)
-        #expect(tx.isSpending == false)
+        #expect(tx.isSpending == true)
         #expect(tx.isOrdinaryIncome == false)
-        #expect(tx.isTransfer == true)
         #expect(abs(bisbAccount.balance - 263.195) < 0.0001)
-
-        let finance = Finance(transactions: [tx], accounts: [bisbAccount], now: parsedDate)
-        #expect(finance.income(in: finance.monthInterval(parsedDate)) == 0)
-        #expect(finance.expenses(in: finance.monthInterval(parsedDate)) == 0)
     }
 
     // MARK: - 2. Incoming Transfers, Outgoing Transfers, Internal Transfers & Net Worth
@@ -97,16 +94,13 @@ struct BudgetAITests {
         #expect(parsed.isOrdinaryExpense == false)
         #expect(parsed.category == .transfers)
 
+        // When imported without a prior user rule, Transfer In is added as Income
         let outcome = await SMSImporter.importText(sms, context: context, forceApprove: true)
         let tx = try #require(outcome.transaction)
-        #expect(tx.smsTransactionType == .transferIn)
-        #expect(tx.isOrdinaryIncome == false)
+        #expect(tx.smsTransactionType == .income)
+        #expect(tx.isOrdinaryIncome == true)
         #expect(tx.isSpending == false)
         #expect(abs(nbb.balance - 145.500) < 0.0001)
-
-        let finance = Finance(transactions: [tx], accounts: [nbb], now: tx.date)
-        #expect(finance.income(in: finance.monthInterval(tx.date)) == 0)
-        #expect(finance.expenses(in: finance.monthInterval(tx.date)) == 0)
     }
 
     @Test func internalTransferBetweenOwnAccountsPreservesNetWorth() async throws {
@@ -328,5 +322,48 @@ struct BudgetAITests {
         let parsedUnrelated = try #require(SMSParser.parse(unrelated, sender: "OTHER_SENDER", context: context))
         #expect(parsedUnrelated.detectedBank == nil)
         #expect(parsedUnrelated.transactionType == .unknown)
+    }
+
+    // MARK: - 7. Auto-Contribute to Linked Savings Goal on SMS Transfer
+
+    @Test func smsTransferAutoContributesToLinkedSavingsGoal() async throws {
+        let context = makeCleanContext()
+        let bisb = Account(name: "BisB Current", kind: .bank, institution: "BisB", balance: 266.195)
+        let ilaSavings = Account(name: "ila Hassala", kind: .bank, institution: "ila", balance: 100.000)
+        ilaSavings.smsMatch = "0846"
+        context.insert(bisb)
+        context.insert(ilaSavings)
+
+        let emergencyGoal = SavingsGoal(
+            name: "Emergency Fund",
+            symbol: "shield.lefthalf.filled",
+            target: 1000.000,
+            saved: 100.000,
+            targetDate: Calendar.current.date(byAdding: .month, value: 6, to: .now) ?? .now,
+            monthlyCommitment: 50.000,
+            linkedAccountID: ilaSavings.id,
+            smsMatch: "0846"
+        )
+        context.insert(emergencyGoal)
+        try context.save()
+
+        let sms = "Fawri+ payment BHD3.000, ref: BIB103KAK000KZUM was credited to IBAN ending 0846 on 2026/10/27 15:26. Balance BHD263.195. Tel: 17515151"
+        let outcome = await SMSImporter.importText(sms, context: context, forceApprove: true)
+        let tx = try #require(outcome.transaction)
+
+        #expect(tx.category == .internalTransfer)
+        #expect(tx.smsTransactionType == .internalTransfer)
+        #expect(tx.toAccountID == ilaSavings.id)
+        #expect(tx.goalID == emergencyGoal.id)
+        #expect(abs(bisb.balance - 263.195) < 0.0001)
+        #expect(abs(ilaSavings.balance - 103.000) < 0.0001)
+        #expect(abs(emergencyGoal.saved - 103.000) < 0.0001)
+
+        // Editing the transfer amount updates both the linked account and the linked SavingsGoal
+        Ledger.edit(tx, context: context) { target in
+            target.amount = 10.000
+        }
+        #expect(abs(ilaSavings.balance - 110.000) < 0.0001)
+        #expect(abs(emergencyGoal.saved - 110.000) < 0.0001)
     }
 }

@@ -35,7 +35,7 @@ enum AIService {
         lines.append("Spending by category this month: \(thisCats.isEmpty ? "none" : thisCats).")
         lines.append("Spending by category last month: \(lastCats.isEmpty ? "none" : lastCats).")
         if !f.budgets.isEmpty {
-            lines.append("Budgets: " + f.budgets.map { "\($0.category.title) \(m(f.spent($0.category, in: f.thisMonth))) of \(m($0.limit))" }.joined(separator: "; "))
+            lines.append("Budgets: " + f.budgets.map { "\($0.displayName) \(m(f.spent(for: $0, in: f.thisMonth))) of \(m($0.limit))" }.joined(separator: "; "))
         }
         if !f.bills.isEmpty {
             lines.append("Bills & subscriptions: " + f.bills.map { "\($0.name) \(m($0.amount)) \($0.frequency.title.lowercased())\($0.isSubscription ? " (subscription)" : ""), next due \(df.string(from: $0.nextDueDate))" }.joined(separator: "; "))
@@ -188,7 +188,8 @@ enum AIService {
             recipientSuffix: suffixes.recipientSuffix ?? (obj["recipientSuffix"] as? String),
             timeString: fallbackTime,
             sender: sender,
-            toAccountID: fallbackParsed?.toAccountID
+            toAccountID: fallbackParsed?.toAccountID,
+            goalID: fallbackParsed?.goalID
         )
     }
 
@@ -445,14 +446,6 @@ enum SMSImporter {
             return SMSImportOutcome(usedAI: usedAI, message: "No transaction found in this message.")
         }
 
-        var learnedMerchant = false
-        if !p.matchedUserRule && !p.transactionType.isTransferType && p.transactionType != .unknown,
-           let learned = Categorizer.learnedMatch(for: p.merchant, in: context, isIncome: p.isIncome) {
-            p.category = learned.category
-            if learned.subcategory != nil { p.subcategory = learned.subcategory }
-            learnedMerchant = true
-        }
-
         let cleanManualBank = manualBank?.trimmingCharacters(in: .whitespacesAndNewlines)
         let resolvedSMSBank = (cleanManualBank?.isEmpty == false ? cleanManualBank : nil) ?? p.detectedBank
 
@@ -469,6 +462,54 @@ enum SMSImporter {
             return ruleAccID
         }()
         let target = accountID ?? savedRuleAccount ?? Ledger.smsAccountID(context: context, digits: matchingDigits, hint: resolvedSMSBank)
+
+        // Check if a transfer recipient suffix or destination account matches a linked SavingsGoal
+        if p.goalID == nil,
+           (p.transactionType.isTransferType || p.category == .internalTransfer || p.category == .transfers),
+           let matchedGoal = SMSParser.findMatchingGoal(suffix: p.recipientSuffix, accountID: p.toAccountID, in: context),
+           matchedGoal.linkedAccountID == nil || matchedGoal.linkedAccountID != target {
+            p.goalID = matchedGoal.id
+            p.transactionType = .internalTransfer
+            p.category = .internalTransfer
+            p.isIncome = false
+            if p.toAccountID == nil, let linkedAcc = matchedGoal.linkedAccountID, linkedAcc != target {
+                p.toAccountID = linkedAcc
+            }
+            if !p.matchedUserRule {
+                p.merchant = "Saved to \(matchedGoal.name)"
+            }
+        }
+
+        // If the SMS was not previously recognized by a saved user rule:
+        // - Any Transfer Out is added as an Expense
+        // - Any Transfer In is added as Income
+        if !p.matchedUserRule {
+            if p.transactionType == .transferOut {
+                p.transactionType = .expense
+                p.isIncome = false
+                if p.category == .transfers {
+                    if let guessed = Categorizer.guess(p.merchant), guessed != .income, guessed != .transfers, guessed != .internalTransfer {
+                        p.category = guessed
+                    } else {
+                        p.category = .other
+                    }
+                }
+            } else if p.transactionType == .transferIn {
+                p.transactionType = .income
+                p.isIncome = true
+                if p.category == .transfers || !p.category.isIncomeCategory {
+                    p.category = .income
+                }
+            }
+        }
+
+        var learnedMerchant = false
+        if !p.matchedUserRule && !p.transactionType.isTransferType && p.transactionType != .unknown,
+           let learned = Categorizer.learnedMatch(for: p.merchant, in: context, isIncome: p.isIncome) {
+            p.category = learned.category
+            if learned.subcategory != nil { p.subcategory = learned.subcategory }
+            learnedMerchant = true
+        }
 
         let tx = MoneyTransaction(
             amount: p.amount,
@@ -492,6 +533,7 @@ enum SMSImporter {
         tx.smsAccountSuffix = p.accountSuffix
         tx.smsRecipientSuffix = p.recipientSuffix
         tx.toAccountID = p.toAccountID
+        tx.goalID = p.goalID
 
         // Uncertain transactions are ALWAYS marked pending for user review rather than silently applied
         if p.requiresReview {
@@ -520,6 +562,9 @@ enum SMSImporter {
             summary = "Waiting for approval: " + summary
         }
         if result.flaggedDuplicate { summary += " (possible duplicate)" }
+        if let goalID = tx.goalID, let linkedGoal = Ledger.goal(goalID, context: context) {
+            summary += " · Goal: \(linkedGoal.name) (\(Money.format(linkedGoal.saved, code))/\(Money.format(linkedGoal.target, code)))"
+        }
         if let synced = result.balanceSynced { summary += ". Balance matched to bank: \(Money.format(synced, code))" }
         return SMSImportOutcome(
             transaction: tx,

@@ -23,6 +23,7 @@ enum SMSUserRules {
         var bank: String? = nil
         var accountIDString: String? = nil
         var toAccountIDString: String? = nil
+        var goalIDString: String? = nil
         var updatedAt: Date
     }
 
@@ -100,6 +101,7 @@ enum SMSUserRules {
         bank: String?,
         accountID: UUID? = nil,
         toAccountID: UUID? = nil,
+        goalID: UUID? = nil,
         forRawSMS rawSMS: String,
         sender: String? = nil,
         counterparty: String? = nil
@@ -138,6 +140,7 @@ enum SMSUserRules {
                 bank: bank,
                 accountIDString: accountID?.uuidString,
                 toAccountIDString: toAccountID?.uuidString,
+                goalIDString: goalID?.uuidString,
                 updatedAt: .now
             )
         )
@@ -146,7 +149,7 @@ enum SMSUserRules {
         }
     }
 
-    /// Saves all user-selected options on an SMS transaction (type, category, subcategory, name/merchant, bank, source account, and destination account)
+    /// Saves all user-selected options on an SMS transaction (type, category, subcategory, name/merchant, bank, source account, destination account, and goal)
     /// so future matching SMS messages automatically receive the same options.
     static func rememberTransactionRule(for tx: MoneyTransaction) {
         if let bank = tx.smsBank, !bank.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -164,6 +167,7 @@ enum SMSUserRules {
             bank: tx.smsBank,
             accountID: tx.accountID,
             toAccountID: tx.toAccountID,
+            goalID: tx.goalID,
             forRawSMS: raw,
             sender: tx.smsSender,
             counterparty: SMSParser.extractRecipientOrMerchantKey(in: raw)
@@ -444,6 +448,7 @@ struct ParsedSMS {
     var sender: String? = nil
     var accountID: UUID? = nil
     var toAccountID: UUID? = nil
+    var goalID: UUID? = nil
     var matchedUserRule: Bool = false
 
     var requiresReview: Bool {
@@ -732,6 +737,7 @@ enum SMSParser {
                 sender: sender,
                 accountID: userRule.accountIDString.flatMap(UUID.init(uuidString:)),
                 toAccountID: userRule.toAccountIDString.flatMap(UUID.init(uuidString:)),
+                goalID: userRule.goalIDString.flatMap(UUID.init(uuidString:)),
                 matchedUserRule: true
             )
         }
@@ -757,7 +763,9 @@ enum SMSParser {
         var subcategory: SpendCategory? = nil
 
         switch txType {
-        case .transferIn, .transferOut, .internalTransfer:
+        case .internalTransfer:
+            category = .internalTransfer
+        case .transferIn, .transferOut:
             category = .transfers
         case .income:
             if let context, let learned = Categorizer.learnedMatch(for: extractedMerchant, in: context, isIncome: true) {
@@ -815,7 +823,8 @@ enum SMSParser {
             recipientSuffix: suffixes.recipientSuffix,
             timeString: parsedTime,
             sender: sender,
-            toAccountID: classification.toAccountID
+            toAccountID: classification.toAccountID,
+            goalID: classification.goalID
         )
     }
 
@@ -873,6 +882,9 @@ enum SMSParser {
             let ruleCat = SpendCategory(rawValue: userRule.categoryRaw) ?? (ruleType.isTransferType ? .transfers : .other)
             let ruleSubcat = userRule.subcategoryRaw.flatMap(SpendCategory.init(rawValue:))
             let merch = (userRule.merchant?.isEmpty == false) ? userRule.merchant! : "IBAN ending \(recipientIBANSuffix)"
+            let ruleToAcc = userRule.toAccountIDString.flatMap(UUID.init(uuidString:))
+            let ruleGoal = userRule.goalIDString.flatMap(UUID.init(uuidString:))
+                ?? (context.flatMap { findMatchingGoal(suffix: recipientIBANSuffix, accountID: ruleToAcc, in: $0)?.id })
             return ParsedSMS(
                 amount: amount,
                 currency: currency ?? "BHD",
@@ -896,22 +908,36 @@ enum SMSParser {
                 timeString: timeString,
                 sender: sender,
                 accountID: userRule.accountIDString.flatMap(UUID.init(uuidString:)),
-                toAccountID: userRule.toAccountIDString.flatMap(UUID.init(uuidString:)),
+                toAccountID: ruleToAcc,
+                goalID: ruleGoal,
                 matchedUserRule: true
             )
         }
 
-        // Check if recipient IBAN suffix (e.g. 0846) belongs to one of the user's own accounts in SwiftData
+        // Check if recipient IBAN suffix (e.g. 0846) belongs to one of the user's own accounts or a linked SavingsGoal in SwiftData
         var txType: SMSTransactionType = .transferOut
         var toAccID: UUID? = nil
+        var matchedGoalID: UUID? = nil
+        var merch = "IBAN ending \(recipientIBANSuffix)"
         var reason = "Verified \(bankInfo.bank ?? "Bahrain bank") \(serviceName) outgoing payment format (payment credited to recipient IBAN ending \(recipientIBANSuffix); reported balance is sender's balance after transfer)"
 
-        if let context, let ownDest = findMatchingAccount(suffix: recipientIBANSuffix, in: context) {
-            let sourceID = Ledger.defaultAccountID(context: context, hint: bankInfo.bank)
-            if sourceID == nil || sourceID != ownDest.id {
+        if let context {
+            if let ownDest = findMatchingAccount(suffix: recipientIBANSuffix, in: context) {
+                let sourceID = Ledger.defaultAccountID(context: context, hint: bankInfo.bank)
+                if sourceID == nil || sourceID != ownDest.id {
+                    txType = .internalTransfer
+                    toAccID = ownDest.id
+                    reason = "Verified \(serviceName) transfer to user's own account (\(ownDest.name), ending \(recipientIBANSuffix))"
+                }
+            }
+            if let goal = findMatchingGoal(suffix: recipientIBANSuffix, accountID: toAccID, in: context) {
                 txType = .internalTransfer
-                toAccID = ownDest.id
-                reason = "Verified \(serviceName) transfer to user's own account (\(ownDest.name), ending \(recipientIBANSuffix))"
+                matchedGoalID = goal.id
+                if toAccID == nil, let linkedAcc = goal.linkedAccountID {
+                    toAccID = linkedAcc
+                }
+                merch = "Saved to \(goal.name)"
+                reason = "Verified \(serviceName) transfer to linked savings goal '\(goal.name)' (IBAN/account ending \(recipientIBANSuffix))"
             }
         }
 
@@ -919,8 +945,8 @@ enum SMSParser {
             amount: amount,
             currency: currency ?? "BHD",
             isIncome: false,
-            merchant: "IBAN ending \(recipientIBANSuffix)",
-            category: .transfers,
+            merchant: merch,
+            category: txType == .internalTransfer ? .internalTransfer : .transfers,
             subcategory: nil,
             date: date,
             accountHint: bankInfo.bank,
@@ -937,7 +963,8 @@ enum SMSParser {
             recipientSuffix: recipientIBANSuffix,
             timeString: timeString,
             sender: sender,
-            toAccountID: toAccID
+            toAccountID: toAccID,
+            goalID: matchedGoalID
         )
     }
 
@@ -949,6 +976,7 @@ enum SMSParser {
         var reason: String
         var counterparty: String? = nil
         var toAccountID: UUID? = nil
+        var goalID: UUID? = nil
     }
 
     private static func classifyTransaction(
@@ -1146,19 +1174,32 @@ enum SMSParser {
         let isIncoming = incomingPatterns.contains(where: { lower.range(of: $0, options: .regularExpression) != nil })
 
         if isOutgoing && !isIncoming {
-            // Check if the destination suffix matches one of the user's own accounts -> Internal Transfer
-            if let context, let recipSuffix = suffixes.recipientSuffix,
-               let ownDest = findMatchingAccount(suffix: recipSuffix, in: context) {
-                let sourceID = suffixes.accountSuffix.flatMap { findMatchingAccount(suffix: $0, in: context)?.id }
-                    ?? Ledger.defaultAccountID(context: context, hint: bank)
-                if sourceID == nil || sourceID != ownDest.id {
+            // Check if the destination suffix matches one of the user's own accounts or a linked SavingsGoal -> Internal Transfer
+            if let context, let recipSuffix = suffixes.recipientSuffix {
+                let ownDest = findMatchingAccount(suffix: recipSuffix, in: context)
+                let matchedGoal = findMatchingGoal(suffix: recipSuffix, accountID: ownDest?.id, in: context)
+                if let matchedGoal {
                     return ClassificationOutcome(
                         type: .internalTransfer,
                         confidence: .high,
-                        reason: "Outgoing transfer to user's own account (\(ownDest.name), ending \(recipSuffix))",
-                        counterparty: "Transfer to \(ownDest.name)",
-                        toAccountID: ownDest.id
+                        reason: "Outgoing transfer to linked savings goal '\(matchedGoal.name)' (ending \(recipSuffix))",
+                        counterparty: "Saved to \(matchedGoal.name)",
+                        toAccountID: ownDest?.id ?? matchedGoal.linkedAccountID,
+                        goalID: matchedGoal.id
                     )
+                }
+                if let ownDest {
+                    let sourceID = suffixes.accountSuffix.flatMap { findMatchingAccount(suffix: $0, in: context)?.id }
+                        ?? Ledger.defaultAccountID(context: context, hint: bank)
+                    if sourceID == nil || sourceID != ownDest.id {
+                        return ClassificationOutcome(
+                            type: .internalTransfer,
+                            confidence: .high,
+                            reason: "Outgoing transfer to user's own account (\(ownDest.name), ending \(recipSuffix))",
+                            counterparty: "Transfer to \(ownDest.name)",
+                            toAccountID: ownDest.id
+                        )
+                    }
                 }
             }
             return ClassificationOutcome(
@@ -1169,17 +1210,31 @@ enum SMSParser {
         }
 
         if isIncoming && !isOutgoing {
-            // Check if the sender suffix matches one of the user's own accounts -> Internal Transfer
-            if let context, let srcSuffix = suffixes.accountSuffix,
-               let recipSuffix = suffixes.recipientSuffix,
-               srcSuffix != recipSuffix,
-               let ownSrc = findMatchingAccount(suffix: srcSuffix, in: context) {
-                return ClassificationOutcome(
-                    type: .internalTransfer,
-                    confidence: .high,
-                    reason: "Incoming transfer from user's own account (\(ownSrc.name), ending \(srcSuffix))",
-                    counterparty: "Transfer from \(ownSrc.name)"
-                )
+            if let context {
+                // If an incoming transfer lands in an account/IBAN suffix linked to a SavingsGoal, link the goal
+                let creditSuffix = suffixes.accountSuffix ?? suffixes.recipientSuffix
+                if let matchedGoal = findMatchingGoal(suffix: creditSuffix, in: context) {
+                    return ClassificationOutcome(
+                        type: .internalTransfer,
+                        confidence: .high,
+                        reason: "Incoming transfer to linked savings goal '\(matchedGoal.name)'",
+                        counterparty: "Saved to \(matchedGoal.name)",
+                        toAccountID: matchedGoal.linkedAccountID,
+                        goalID: matchedGoal.id
+                    )
+                }
+                // Check if the sender suffix matches one of the user's own accounts -> Internal Transfer
+                if let srcSuffix = suffixes.accountSuffix,
+                   let recipSuffix = suffixes.recipientSuffix,
+                   srcSuffix != recipSuffix,
+                   let ownSrc = findMatchingAccount(suffix: srcSuffix, in: context) {
+                    return ClassificationOutcome(
+                        type: .internalTransfer,
+                        confidence: .high,
+                        reason: "Incoming transfer from user's own account (\(ownSrc.name), ending \(srcSuffix))",
+                        counterparty: "Transfer from \(ownSrc.name)"
+                    )
+                }
             }
             return ClassificationOutcome(
                 type: .transferIn,
@@ -1196,7 +1251,7 @@ enum SMSParser {
         )
     }
 
-    private static func findMatchingAccount(suffix: String, in context: ModelContext) -> Account? {
+    static func findMatchingAccount(suffix: String, in context: ModelContext) -> Account? {
         let clean = suffix.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return nil }
         let accounts = (try? context.fetch(FetchDescriptor<Account>(sortBy: [SortDescriptor(\.createdAt)]))) ?? []
@@ -1205,6 +1260,30 @@ enum SMSParser {
             guard !m.isEmpty else { return false }
             return clean.hasSuffix(m) || m.hasSuffix(clean)
         }
+    }
+
+    static func findMatchingGoal(suffix: String? = nil, accountID: UUID? = nil, in context: ModelContext) -> SavingsGoal? {
+        let goals = (try? context.fetch(FetchDescriptor<SavingsGoal>(sortBy: [SortDescriptor(\.createdAt)]))) ?? []
+        if let accountID, let matchByAccount = goals.first(where: { $0.linkedAccountID == accountID }) {
+            return matchByAccount
+        }
+        if let suffix {
+            let clean = suffix.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !clean.isEmpty {
+                if let matchBySuffix = goals.first(where: { goal in
+                    let m = goal.smsMatch.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !m.isEmpty else { return false }
+                    return clean.hasSuffix(m) || m.hasSuffix(clean)
+                }) {
+                    return matchBySuffix
+                }
+                if let acc = findMatchingAccount(suffix: clean, in: context),
+                   let matchByLinkedAcc = goals.first(where: { $0.linkedAccountID == acc.id }) {
+                    return matchByLinkedAcc
+                }
+            }
+        }
+        return nil
     }
 
     // MARK: - Field Extractors (Reference, Suffixes, Balance, Date/Time, Amount, Merchant)

@@ -221,29 +221,10 @@ struct TransactionRow: View {
     }
 
     private var subtitle: String {
-        var base: String
-        if let smsType = tx.smsTransactionType {
-            switch smsType {
-            case .transferIn, .transferOut, .internalTransfer, .fee, .refund, .unknown:
-                base = smsType.title
-            case .income, .expense:
-                if let sub = tx.subcategory {
-                    base = "\(tx.category.title) · \(sub.title)"
-                } else {
-                    base = tx.category.title
-                }
-            }
-        } else if tx.isTransfer && tx.toAccountID != nil {
-            base = "Transfer"
-        } else if let sub = tx.subcategory {
-            base = "\(tx.category.title) · \(sub.title)"
-        } else {
-            base = tx.category.title
+        if tx.category == .internalTransfer || tx.effectiveTransactionType == .internalTransfer {
+            return SpendCategory.internalTransfer.title
         }
-        if let bank = tx.smsBank, !bank.isEmpty {
-            return "\(base) · \(bank)"
-        }
-        return base
+        return tx.category.title
     }
 }
 
