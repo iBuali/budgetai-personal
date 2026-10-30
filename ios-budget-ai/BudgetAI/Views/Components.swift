@@ -106,6 +106,15 @@ struct EmojiPicker: View {
     }
 }
 
+extension View {
+    /// Smoothly rolls digits upward when `value` increases and downward when `value` decreases.
+    func animatedNumber(_ value: Double) -> some View {
+        self
+            .contentTransition(.numericText(value: value))
+            .animation(.spring(response: 0.42, dampingFraction: 0.86), value: value)
+    }
+}
+
 struct RingView: View {
     let progress: Double
     var lineWidth: CGFloat = 12
@@ -120,8 +129,8 @@ struct RingView: View {
                 .stroke(color, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
                 .rotationEffect(.degrees(-90))
         }
-        .onAppear { withAnimation(.spring(response: 0.9, dampingFraction: 0.85).delay(0.1)) { shown = progress } }
-        .onChange(of: progress) { _, v in withAnimation(.spring(response: 0.6, dampingFraction: 0.85)) { shown = v } }
+        .onAppear { withAnimation(.spring(response: 0.85, dampingFraction: 0.82).delay(0.08)) { shown = progress } }
+        .onChange(of: progress) { _, v in withAnimation(.spring(response: 0.55, dampingFraction: 0.84)) { shown = v } }
     }
 }
 
@@ -129,18 +138,40 @@ struct ProgressBar: View {
     let progress: Double
     var color: Color = Theme.cobalt
     var height: CGFloat = 7
+    var delay: Double = 0.04
+    var trackColor: Color = Theme.track
     @State private var shown: Double = 0
 
     var body: some View {
         GeometryReader { geo in
+            let clamped = min(max(shown, 0), 1)
+            let fillWidth = clamped <= 0.001 ? 0 : max(height, geo.size.width * clamped)
             ZStack(alignment: .leading) {
-                Capsule().fill(Theme.track)
-                Capsule().fill(color).frame(width: max(height, geo.size.width * min(max(shown, 0), 1)))
+                Capsule().fill(trackColor)
+                Capsule()
+                    .fill(
+                        LinearGradient(
+                            colors: [color.opacity(0.86), color],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+                    .frame(width: fillWidth)
+                    .shadow(color: color.opacity(clamped > 0.02 ? 0.22 : 0), radius: 3, y: 1)
+                    .opacity(clamped <= 0.001 ? 0 : 1)
             }
         }
         .frame(height: height)
-        .onAppear { withAnimation(.spring(response: 0.8, dampingFraction: 0.85).delay(0.05)) { shown = progress } }
-        .onChange(of: progress) { _, v in withAnimation(.spring(response: 0.5)) { shown = v } }
+        .onAppear {
+            withAnimation(.spring(response: 0.62, dampingFraction: 0.82).delay(delay)) {
+                shown = progress
+            }
+        }
+        .onChange(of: progress) { _, v in
+            withAnimation(.spring(response: 0.5, dampingFraction: 0.84)) {
+                shown = v
+            }
+        }
         .accessibilityElement()
         .accessibilityValue("\(Int(progress * 100)) percent")
     }
@@ -215,6 +246,7 @@ struct TransactionRow: View {
             Text(tx.effectiveTransactionType == .internalTransfer ? Money.format(tx.amount, currency) : Money.format(tx.signedAmount, currency, signed: true))
                 .font(.body.weight(.semibold).monospacedDigit())
                 .foregroundStyle(tx.isPending ? Theme.secondaryInk : (tx.isIncome ? Theme.positive : (tx.isTransfer ? Theme.secondaryInk : Theme.negative)))
+                .animatedNumber(tx.effectiveTransactionType == .internalTransfer ? tx.amount : tx.signedAmount)
         }
         .padding(.vertical, 4)
         .accessibilityElement(children: .combine)

@@ -41,7 +41,9 @@ struct ProfileView: View {
                                 Text(userName.isEmpty ? "Your profile" : userName)
                                     .font(.title3.weight(.semibold)).foregroundStyle(Theme.ink)
                                 Text("Net worth \(Money.format(netWorth, currency))")
-                                    .font(.subheadline.monospacedDigit()).foregroundStyle(Theme.secondaryInk)
+                                    .font(.subheadline.monospacedDigit())
+                                    .foregroundStyle(Theme.secondaryInk)
+                                    .animatedNumber(netWorth)
                             }
                         }
                         .padding(.vertical, 4)

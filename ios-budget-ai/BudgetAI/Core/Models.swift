@@ -218,8 +218,10 @@ final class Account {
     var emoji: String = ""
     /// Last digits of the card/account as they appear in bank SMS, used to route imports.
     var smsMatch: String = ""
+    /// Whether this account's balance is included in Net Worth calculations.
+    var includeInNetWorth: Bool = true
 
-    init(name: String, kind: AccountKind, institution: String = "", balance: Double, emoji: String = "") {
+    init(name: String, kind: AccountKind, institution: String = "", balance: Double, emoji: String = "", includeInNetWorth: Bool = true) {
         self.id = UUID()
         self.name = name
         self.kindRaw = kind.rawValue
@@ -227,6 +229,7 @@ final class Account {
         self.balance = balance
         self.createdAt = Date()
         self.emoji = emoji
+        self.includeInNetWorth = includeInNetWorth
     }
 
     var kind: AccountKind {

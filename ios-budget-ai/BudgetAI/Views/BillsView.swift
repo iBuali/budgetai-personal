@@ -60,7 +60,10 @@ struct BillsView: View {
     private func summary(_ title: String, _ value: Double) -> some View {
         VStack(spacing: 4) {
             Text(title).font(.caption).foregroundStyle(Theme.secondaryInk)
-            Text(Money.format(value, currency)).font(.headline.monospacedDigit()).foregroundStyle(Theme.ink)
+            Text(Money.format(value, currency))
+                .font(.headline.monospacedDigit())
+                .foregroundStyle(Theme.ink)
+                .animatedNumber(value)
             Text("per month").font(.caption2).foregroundStyle(Theme.secondaryInk)
         }
         .frame(maxWidth: .infinity)

@@ -366,4 +366,20 @@ struct BudgetAITests {
         #expect(abs(ilaSavings.balance - 110.000) < 0.0001)
         #expect(abs(emergencyGoal.saved - 110.000) < 0.0001)
     }
+
+    // MARK: - 8. Account Include/Exclude in Net Worth vs Cash & Bank
+
+    @Test func accountIncludeInNetWorthToggle() throws {
+        let checking = Account(name: "NBB Current", kind: .bank, institution: "NBB", balance: 400.000, includeInNetWorth: true)
+        let hiddenSavings = Account(name: "Side Vault", kind: .bank, institution: "ila", balance: 600.000, includeInNetWorth: false)
+        let carLoan = Account(name: "Car Loan", kind: .loan, institution: "BBK", balance: 150.000, includeInNetWorth: false)
+
+        let finance = Finance(transactions: [], accounts: [checking, hiddenSavings, carLoan])
+        // Liquid balance (Cash & bank) still counts all liquid cash & bank accounts (400 + 600 = 1000)
+        #expect(abs(finance.liquidBalance - 1000.000) < 0.0001)
+        // Net worth only counts accounts with includeInNetWorth == true (400)
+        #expect(abs(finance.totalAssets - 400.000) < 0.0001)
+        #expect(abs(finance.totalLiabilities - 0.000) < 0.0001)
+        #expect(abs(finance.netWorth - 400.000) < 0.0001)
+    }
 }

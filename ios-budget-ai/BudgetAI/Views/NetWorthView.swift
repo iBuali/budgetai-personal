@@ -29,16 +29,18 @@ struct NetWorthView: View {
         List {
             Section {
                 VStack(alignment: .leading, spacing: 6) {
+                    let heroValue = selected?.value ?? f.netWorth
                     Text(selected.map { $0.date.formatted(date: .abbreviated, time: .omitted) } ?? "Net worth")
                         .font(.subheadline).foregroundStyle(Theme.secondaryInk)
-                    Text(Money.format(selected?.value ?? f.netWorth, currency))
+                    Text(Money.format(heroValue, currency))
                         .font(.system(size: 36, weight: .bold).monospacedDigit())
                         .foregroundStyle(Theme.ink)
-                        .contentTransition(.numericText())
                         .minimumScaleFactor(0.6).lineLimit(1)
+                        .animatedNumber(heroValue)
                     Text("\(Money.format(change, currency, signed: true)) in \(ranges[range].label == "All" ? "total" : ranges[range].label)")
-                        .font(.subheadline.weight(.medium))
+                        .font(.subheadline.weight(.medium).monospacedDigit())
                         .foregroundStyle(change >= 0 ? Theme.positive : Theme.negative)
+                        .animatedNumber(change)
                     Chart(pts) { p in
                         AreaMark(x: .value("Date", p.date), y: .value("Net worth", p.value))
                             .interpolationMethod(.catmullRom)
@@ -77,8 +79,18 @@ struct NetWorthView: View {
             }
 
             Section {
-                LabeledContent("Assets") { Text(Money.format(f.totalAssets, currency)).monospacedDigit().foregroundStyle(Theme.positive) }
-                LabeledContent("Liabilities") { Text(Money.format(f.totalLiabilities, currency)).monospacedDigit().foregroundStyle(Theme.negative) }
+                LabeledContent("Assets") {
+                    Text(Money.format(f.totalAssets, currency))
+                        .monospacedDigit()
+                        .foregroundStyle(Theme.positive)
+                        .animatedNumber(f.totalAssets)
+                }
+                LabeledContent("Liabilities") {
+                    Text(Money.format(f.totalLiabilities, currency))
+                        .monospacedDigit()
+                        .foregroundStyle(Theme.negative)
+                        .animatedNumber(f.totalLiabilities)
+                }
             }
 
             let assets = accounts.filter { !$0.kind.isLiability }
@@ -108,16 +120,35 @@ struct NetWorthView: View {
                 AccountIcon(account: account, size: 40)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(account.name).foregroundStyle(Theme.ink)
-                    Text(account.institution.isEmpty ? account.kind.title : "\(account.kind.title) · \(account.institution)")
-                        .font(.caption).foregroundStyle(Theme.secondaryInk)
+                    let baseSubtitle = account.institution.isEmpty ? account.kind.title : "\(account.kind.title) · \(account.institution)"
+                    Text(account.includeInNetWorth ? baseSubtitle : "\(baseSubtitle) · Excluded from net worth")
+                        .font(.caption)
+                        .foregroundStyle(Theme.secondaryInk)
                 }
                 Spacer()
-                Text(Money.format(account.kind.isLiability ? -account.balance : account.balance, currency))
+                let signedBalance = account.kind.isLiability ? -account.balance : account.balance
+                Text(Money.format(signedBalance, currency))
                     .font(.body.weight(.medium).monospacedDigit())
-                    .foregroundStyle(account.kind.isLiability ? Theme.negative : Theme.ink)
+                    .foregroundStyle(!account.includeInNetWorth ? Theme.secondaryInk : (account.kind.isLiability ? Theme.negative : Theme.ink))
+                    .animatedNumber(signedBalance)
             }
         }
         .buttonStyle(.plain)
+        .swipeActions(edge: .leading) {
+            Button {
+                withAnimation(.spring(response: 0.42, dampingFraction: 0.86)) {
+                    account.includeInNetWorth.toggle()
+                    Ledger.recordSnapshot(context: context)
+                    try? context.save()
+                }
+            } label: {
+                Label(
+                    account.includeInNetWorth ? "Exclude" : "Include",
+                    systemImage: account.includeInNetWorth ? "eye.slash" : "eye"
+                )
+            }
+            .tint(Theme.cobalt)
+        }
         .swipeActions {
             Button(role: .destructive) {
                 context.delete(account)
@@ -139,6 +170,7 @@ struct AccountEditor: View {
     @State private var balanceText = ""
     @State private var emoji = ""
     @State private var smsMatch = ""
+    @State private var includeInNetWorth = true
 
     var body: some View {
         NavigationStack {
@@ -162,8 +194,13 @@ struct AccountEditor: View {
                             .multilineTextAlignment(.trailing)
                             .monospacedDigit()
                     }
+                    Toggle("Include in net worth", isOn: $includeInNetWorth)
                 } footer: {
-                    Text(kind.isLiquid ? "Counts toward your total balance and Safe to Spend." : (kind.isLiability ? "Subtracted from your net worth." : "Counts toward your net worth."))
+                    if !includeInNetWorth {
+                        Text("Excluded from your net worth total.")
+                    } else {
+                        Text(kind.isLiquid ? "Counts toward your cash & bank balance, net worth, and Safe to Spend." : (kind.isLiability ? "Subtracted from your net worth." : "Counts toward your net worth."))
+                    }
                 }
                 if kind == .bank || kind == .creditCard || kind == .cash {
                     Section {
@@ -205,6 +242,7 @@ struct AccountEditor: View {
                 institution = account.institution
                 emoji = account.emoji
                 smsMatch = account.smsMatch
+                includeInNetWorth = account.includeInNetWorth
                 balanceText = Money.number(account.balance, decimals: Money.digits(currency)).replacingOccurrences(of: ",", with: "")
                 if account.balance < 0 { balanceText = "-" + balanceText }
             }
@@ -220,8 +258,9 @@ struct AccountEditor: View {
             account.balance = balance
             account.emoji = emoji
             account.smsMatch = smsMatch
+            account.includeInNetWorth = includeInNetWorth
         } else {
-            let new = Account(name: name.trimmingCharacters(in: .whitespaces), kind: kind, institution: institution, balance: balance, emoji: emoji)
+            let new = Account(name: name.trimmingCharacters(in: .whitespaces), kind: kind, institution: institution, balance: balance, emoji: emoji, includeInNetWorth: includeInNetWorth)
             new.smsMatch = smsMatch
             context.insert(new)
         }

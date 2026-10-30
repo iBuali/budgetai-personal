@@ -63,8 +63,8 @@ struct Finance {
     // MARK: Balances
 
     var liquidBalance: Double { accounts.filter { $0.kind.isLiquid }.reduce(0) { $0 + $1.balance } }
-    var totalAssets: Double { accounts.filter { !$0.kind.isLiability }.reduce(0) { $0 + $1.balance } }
-    var totalLiabilities: Double { accounts.filter { $0.kind.isLiability }.reduce(0) { $0 + $1.balance } }
+    var totalAssets: Double { accounts.filter { $0.includeInNetWorth && !$0.kind.isLiability }.reduce(0) { $0 + $1.balance } }
+    var totalLiabilities: Double { accounts.filter { $0.includeInNetWorth && $0.kind.isLiability }.reduce(0) { $0 + $1.balance } }
     var netWorth: Double { totalAssets - totalLiabilities }
 
     // MARK: Periods

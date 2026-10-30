@@ -80,9 +80,11 @@ struct InsightsView: View {
                 .foregroundStyle(Theme.ink)
                 .minimumScaleFactor(0.6)
                 .lineLimit(1)
+                .animatedNumber(f.forecastEndOfMonth)
             Text(f.projectedSavings >= 0 ? "On track to save \(Money.format(f.projectedSavings, currency))" : "Projected to overspend by \(Money.format(-f.projectedSavings, currency))")
-                .font(.subheadline.weight(.medium))
+                .font(.subheadline.weight(.medium).monospacedDigit())
                 .foregroundStyle(f.projectedSavings >= 0 ? Theme.positive : Theme.negative)
+                .animatedNumber(f.projectedSavings)
             Chart {
                 ForEach(series.actual) { p in
                     AreaMark(x: .value("Day", p.date, unit: .day), y: .value("Balance", p.value), series: .value("Kind", "Actual"))
@@ -220,17 +222,21 @@ struct InsightsView: View {
             if items.isEmpty {
                 Text("No spending yet in this period.").font(.subheadline).foregroundStyle(Theme.secondaryInk)
             }
-            ForEach(items, id: \.category) { item in
+            ForEach(Array(items.enumerated()), id: \.element.category) { index, item in
                 HStack(spacing: 12) {
                     CategoryIcon(category: item.category, size: 30)
                     Text(item.category.shortTitle).font(.subheadline).foregroundStyle(Theme.ink).frame(width: 96, alignment: .leading)
-                    ProgressBar(progress: item.amount / maxValue, color: Theme.cobalt, height: 9)
-                    Text(Money.short(item.amount)).font(.subheadline.weight(.medium).monospacedDigit()).foregroundStyle(Theme.ink)
+                    ProgressBar(progress: item.amount / maxValue, color: Theme.cobalt, height: 9, delay: 0.04 + Double(index) * 0.04)
+                    Text(Money.short(item.amount))
+                        .font(.subheadline.weight(.medium).monospacedDigit())
+                        .foregroundStyle(Theme.ink)
                         .frame(width: 48, alignment: .trailing)
+                        .animatedNumber(item.amount)
                 }
             }
         }
         .card()
+        .animation(.spring(response: 0.44, dampingFraction: 0.84), value: lastMonthView)
     }
 
     private func trendCard(_ f: Finance) -> some View {
@@ -270,7 +276,9 @@ struct InsightsView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Bills & subscriptions").font(.subheadline.weight(.semibold)).foregroundStyle(Theme.ink)
                     Text("\(Money.format(f.billsMonthly, currency))/mo · subscriptions \(Money.format(f.subscriptionsMonthly, currency))/mo")
-                        .font(.caption.monospacedDigit()).foregroundStyle(Theme.secondaryInk)
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(Theme.secondaryInk)
+                        .animatedNumber(f.billsMonthly + f.subscriptionsMonthly)
                 }
                 Spacer()
                 Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(.tertiary)

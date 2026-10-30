@@ -75,7 +75,7 @@ struct HomeView: View {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(greeting).font(.title2.bold()).foregroundStyle(Theme.ink)
-                    Text("Net worth").font(.body).foregroundStyle(Theme.secondaryInk)
+                    Text("Cash & bank").font(.body).foregroundStyle(Theme.secondaryInk)
                 }
                 Spacer()
                 Button { appState.tab = .profile } label: {
@@ -87,16 +87,16 @@ struct HomeView: View {
                 }
                 .accessibilityLabel("Profile")
             }
-            Text(Money.format(f.netWorth, currency))
+            Text(Money.format(f.liquidBalance, currency))
                 .font(.system(size: 42, weight: .bold).monospacedDigit())
-                .foregroundStyle(f.netWorth < 0 ? Theme.negative : Theme.ink)
+                .foregroundStyle(f.liquidBalance < 0 ? Theme.negative : Theme.ink)
                 .minimumScaleFactor(0.6)
                 .lineLimit(1)
-                .contentTransition(.numericText(value: f.netWorth))
-                .animation(.snappy, value: f.netWorth)
+                .animatedNumber(f.liquidBalance)
             Text("\(Money.format(f.monthNet, currency, signed: true)) \(Cycle.startDay == 1 ? "this month" : "this cycle")")
-                .font(.subheadline.weight(.medium))
+                .font(.subheadline.weight(.medium).monospacedDigit())
                 .foregroundStyle(f.monthNet >= 0 ? Theme.positive : Theme.negative)
+                .animatedNumber(f.monthNet)
         }
         .padding(.top, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -116,11 +116,17 @@ struct HomeView: View {
                 if let selected {
                     Text(selected.date, format: range == .year ? .dateTime.month(.wide) : .dateTime.month(.abbreviated).day())
                         .foregroundStyle(Theme.secondaryInk)
-                    Text(Money.format(selected.value, currency)).fontWeight(.bold).foregroundStyle(Theme.ink)
+                    Text(Money.format(selected.value, currency))
+                        .fontWeight(.bold)
+                        .foregroundStyle(Theme.ink)
+                        .animatedNumber(selected.value)
                 } else {
+                    let total = f.spendingTotal(range)
                     Text("Spent").foregroundStyle(Theme.secondaryInk)
-                    Text(Money.format(f.spendingTotal(range), currency)).fontWeight(.bold).foregroundStyle(Theme.ink)
-                        .contentTransition(.numericText())
+                    Text(Money.format(total, currency))
+                        .fontWeight(.bold)
+                        .foregroundStyle(Theme.ink)
+                        .animatedNumber(total)
                 }
             }
             .font(.title3.monospacedDigit())
@@ -173,13 +179,15 @@ struct HomeView: View {
 
     private func safeCard(_ f: Finance) -> some View {
         let safe = f.safeToSpend
+        let pct = Int(f.budgetUsed * 100)
         return NavigationLink(value: HomeRoute.safe) {
             HStack(spacing: 18) {
                 ZStack {
                     RingView(progress: f.budgetUsed, lineWidth: 11, color: f.budgetUsed > 0.95 ? Theme.negative : Theme.cobalt)
-                    Text(f.totalBudget > 0 ? "\(Int(f.budgetUsed * 100))%" : "—")
+                    Text(f.totalBudget > 0 ? "\(pct)%" : "—")
                         .font(.headline.monospacedDigit())
                         .foregroundStyle(Theme.ink)
+                        .animatedNumber(Double(pct))
                 }
                 .frame(width: 86, height: 86)
                 VStack(alignment: .leading, spacing: 4) {
@@ -187,11 +195,12 @@ struct HomeView: View {
                     Text(Money.format(safe.daily, currency))
                         .font(.title2.bold().monospacedDigit())
                         .foregroundStyle(safe.isShort ? Theme.negative : Theme.cobalt)
-                        .contentTransition(.numericText(value: safe.daily))
+                        .animatedNumber(safe.daily)
                     if f.totalBudget > 0 {
                         Text("Budget left \(Money.format(f.budgetLeft, currency)) of \(Money.number(f.totalBudget, decimals: Money.digits(currency)))")
-                            .font(.subheadline)
+                            .font(.subheadline.monospacedDigit())
                             .foregroundStyle(Theme.secondaryInk)
+                            .animatedNumber(f.budgetLeft)
                     } else {
                         Text("Set budgets to protect essentials").font(.subheadline).foregroundStyle(Theme.secondaryInk)
                     }
@@ -243,13 +252,22 @@ struct HomeView: View {
             HStack(spacing: 12) {
                 IconBadge(symbol: "building.columns.fill", color: Theme.cobalt)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Cash & bank").font(.subheadline).foregroundStyle(Theme.secondaryInk)
-                    Text(Money.format(f.liquidBalance, currency)).font(.headline.monospacedDigit()).foregroundStyle(Theme.ink)
+                    Text("Net worth").font(.subheadline).foregroundStyle(Theme.secondaryInk)
+                    Text(Money.format(f.netWorth, currency))
+                        .font(.headline.monospacedDigit())
+                        .foregroundStyle(f.netWorth < 0 ? Theme.negative : Theme.ink)
+                        .animatedNumber(f.netWorth)
                 }
                 Spacer()
                 VStack(alignment: .trailing, spacing: 2) {
-                    Text("Assets \(Money.short(f.totalAssets))").font(.caption).foregroundStyle(Theme.positive)
-                    Text("Debts \(Money.short(f.totalLiabilities))").font(.caption).foregroundStyle(Theme.negative)
+                    Text("Assets \(Money.short(f.totalAssets))")
+                        .font(.caption)
+                        .foregroundStyle(Theme.positive)
+                        .animatedNumber(f.totalAssets)
+                    Text("Debts \(Money.short(f.totalLiabilities))")
+                        .font(.caption)
+                        .foregroundStyle(Theme.negative)
+                        .animatedNumber(f.totalLiabilities)
                 }
                 .monospacedDigit()
                 Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(.tertiary)
@@ -326,6 +344,7 @@ struct StatTile: View {
                 .foregroundStyle(Theme.ink)
                 .lineLimit(1)
                 .minimumScaleFactor(0.6)
+                .animatedNumber(value)
         }
         .card(padding: 12)
         .accessibilityElement(children: .combine)
@@ -344,7 +363,10 @@ struct BillRow: View {
                 Text(dueText).font(.subheadline).foregroundStyle(isOverdue ? Theme.negative : Theme.secondaryInk)
             }
             Spacer()
-            Text(Money.format(bill.amount, currency)).font(.body.weight(.semibold).monospacedDigit()).foregroundStyle(Theme.ink)
+            Text(Money.format(bill.amount, currency))
+                .font(.body.weight(.semibold).monospacedDigit())
+                .foregroundStyle(Theme.ink)
+                .animatedNumber(bill.amount)
             Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(.tertiary)
         }
         .contentShape(Rectangle())

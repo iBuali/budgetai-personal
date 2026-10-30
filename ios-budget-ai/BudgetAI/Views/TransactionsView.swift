@@ -310,15 +310,22 @@ struct TransactionsView: View {
         let t = filteredTotals
         return HStack {
             VStack(alignment: .leading, spacing: 2) {
-                Text("\(filtered.count) transaction\(filtered.count == 1 ? "" : "s")").font(.caption).foregroundStyle(Theme.secondaryInk)
+                Text("\(filtered.count) transaction\(filtered.count == 1 ? "" : "s")")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(Theme.secondaryInk)
+                    .animatedNumber(Double(filtered.count))
                 Text(filters.rangeLabel).font(.subheadline.weight(.semibold)).foregroundStyle(Theme.ink)
             }
             Spacer()
             VStack(alignment: .trailing, spacing: 2) {
                 if t.income > 0 {
-                    Text(Money.format(t.income, currency, signed: true)).foregroundStyle(Theme.positive)
+                    Text(Money.format(t.income, currency, signed: true))
+                        .foregroundStyle(Theme.positive)
+                        .animatedNumber(t.income)
                 }
-                Text(Money.format(-t.spent, currency, signed: true)).foregroundStyle(Theme.ink)
+                Text(Money.format(-t.spent, currency, signed: true))
+                    .foregroundStyle(Theme.ink)
+                    .animatedNumber(-t.spent)
             }
             .font(.subheadline.weight(.semibold).monospacedDigit())
         }
@@ -492,7 +499,9 @@ struct TransactionCalendar: View {
                     Text(month.formatted(.dateTime.month(.wide).year()))
                         .font(.headline).foregroundStyle(Theme.ink)
                     Text("Spent \(Money.format(monthSpent, currency))")
-                        .font(.subheadline.monospacedDigit()).foregroundStyle(Theme.secondaryInk)
+                        .font(.subheadline.monospacedDigit())
+                        .foregroundStyle(Theme.secondaryInk)
+                        .animatedNumber(monthSpent)
                 }
                 Spacer()
                 Button { shift(-1) } label: { Image(systemName: "chevron.left").frame(width: 34, height: 34) }
@@ -720,9 +729,11 @@ struct TransactionDetailView: View {
                         CategoryIcon(category: tx.isIncome && tx.category == .other ? .income : tx.displayCategory, size: 64)
                     }
                     Text(tx.merchant).font(.title3.weight(.semibold)).foregroundStyle(Theme.ink).multilineTextAlignment(.center)
+                    let heroAmount = isAccountTransfer ? tx.amount : tx.signedAmount
                     Text(isAccountTransfer ? Money.format(tx.amount, currency) : Money.format(tx.signedAmount, currency, signed: true))
                         .font(.system(size: 34, weight: .bold).monospacedDigit())
                         .foregroundStyle(tx.isPending ? Theme.secondaryInk : (tx.isIncome ? Theme.positive : Theme.ink))
+                        .animatedNumber(heroAmount)
                     Text(tx.date.formatted(date: .complete, time: .shortened)).font(.subheadline).foregroundStyle(Theme.secondaryInk)
                 }
                 .frame(maxWidth: .infinity)
@@ -993,6 +1004,7 @@ struct TransactionDetailView: View {
                         if let account {
                             Text("\(account.name) (\(Money.format(account.balance, currency)))")
                                 .monospacedDigit()
+                                .animatedNumber(account.balance)
                         } else {
                             Text("None").foregroundStyle(Theme.secondaryInk)
                         }

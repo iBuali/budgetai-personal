@@ -67,6 +67,8 @@ struct BudgetsView: View {
             .sheet(isPresented: $showNewBudget) { BudgetEditor(budget: nil) }
             .sheet(item: $editingGoal) { GoalSheet(goal: $0) }
             .sheet(isPresented: $showNewGoal) { GoalSheet(goal: nil) }
+            .sensoryFeedback(.selection, trigger: expandedBudgets)
+            .sensoryFeedback(.selection, trigger: monthOffset)
         }
     }
 
@@ -74,11 +76,15 @@ struct BudgetsView: View {
         let spent = f.budgetSpent(in: interval)
         let total = f.totalBudget
         let used = total > 0 ? spent / total : 0
+        let pct = Int(used * 100)
         return HStack(spacing: 20) {
             ZStack {
                 RingView(progress: used, lineWidth: 16, color: used > 1 ? Theme.negative : Theme.cobalt)
                 VStack(spacing: 0) {
-                    Text(total > 0 ? "\(Int(used * 100))%" : "—").font(.title2.bold().monospacedDigit()).foregroundStyle(Theme.ink)
+                    Text(total > 0 ? "\(pct)%" : "—")
+                        .font(.title2.bold().monospacedDigit())
+                        .foregroundStyle(Theme.ink)
+                        .animatedNumber(Double(pct))
                     Text("used").font(.caption).foregroundStyle(Theme.secondaryInk)
                 }
             }
@@ -90,10 +96,15 @@ struct BudgetsView: View {
                     .foregroundStyle(Theme.ink)
                     .minimumScaleFactor(0.6)
                     .lineLimit(1)
-                Text("of \(Money.number(total, decimals: Money.digits(currency)))").font(.title3).foregroundStyle(Theme.secondaryInk)
-                Text(monthOffset == 0 ? "\(Int(used * 100))% used · \(f.daysLeftInMonth) days left" : (spent <= total ? "Finished under budget" : "Went over budget"))
+                    .animatedNumber(spent)
+                Text("of \(Money.number(total, decimals: Money.digits(currency)))")
+                    .font(.title3.monospacedDigit())
+                    .foregroundStyle(Theme.secondaryInk)
+                    .animatedNumber(total)
+                Text(monthOffset == 0 ? "\(pct)% used · \(f.daysLeftInMonth) days left" : (spent <= total ? "Finished under budget" : "Went over budget"))
                     .font(.footnote)
                     .foregroundStyle(Theme.secondaryInk)
+                    .animatedNumber(Double(pct))
             }
             Spacer(minLength: 0)
         }
@@ -114,13 +125,14 @@ struct BudgetsView: View {
             ForEach(budgets) { budget in
                 let spent = f.spent(for: budget, in: interval)
                 let ratio = budget.limit > 0 ? spent / budget.limit : 0
+                let pct = Int(ratio * 100)
                 let isExpanded = expandedBudgets.contains(budget.id)
                 let cats = budget.categories
 
                 VStack(alignment: .leading, spacing: 10) {
                     HStack(spacing: 12) {
                         Button {
-                            withAnimation(.snappy) {
+                            withAnimation(.spring(response: 0.42, dampingFraction: 0.82, blendDuration: 0.12)) {
                                 if isExpanded {
                                     expandedBudgets.remove(budget.id)
                                 } else {
@@ -130,6 +142,8 @@ struct BudgetsView: View {
                         } label: {
                             HStack(spacing: 12) {
                                 CategoryIcon(category: budget.category)
+                                    .scaleEffect(isExpanded ? 1.04 : 1.0)
+                                    .animation(.spring(response: 0.35, dampingFraction: 0.7), value: isExpanded)
                                 VStack(alignment: .leading, spacing: 6) {
                                     HStack {
                                         VStack(alignment: .leading, spacing: 2) {
@@ -141,21 +155,33 @@ struct BudgetsView: View {
                                                 .foregroundStyle(Theme.secondaryInk)
                                         }
                                         Spacer()
-                                        (Text(Money.format(spent, currency, decimals: 0)).fontWeight(.semibold).foregroundStyle(Theme.ink)
-                                         + Text(" / \(Money.number(budget.limit, decimals: 0))").foregroundStyle(Theme.secondaryInk)
-                                         + Text(ratio >= 0.8 ? " · \(Int(ratio * 100))%" : "").foregroundStyle(ratio >= 1 ? Theme.negative : Theme.secondaryInk))
-                                            .font(.footnote.monospacedDigit())
+                                        HStack(spacing: 0) {
+                                            Text(Money.format(spent, currency, decimals: 0))
+                                                .fontWeight(.semibold)
+                                                .foregroundStyle(Theme.ink)
+                                                .animatedNumber(spent)
+                                            Text(" / \(Money.number(budget.limit, decimals: 0))")
+                                                .foregroundStyle(Theme.secondaryInk)
+                                                .animatedNumber(budget.limit)
+                                            if ratio >= 0.8 {
+                                                Text(" · \(pct)%")
+                                                    .foregroundStyle(ratio >= 1 ? Theme.negative : Theme.secondaryInk)
+                                                    .animatedNumber(Double(pct))
+                                            }
+                                        }
+                                        .font(.footnote.monospacedDigit())
                                     }
                                     ProgressBar(progress: ratio, color: ratio >= 0.9 ? Theme.negative : (ratio >= 0.8 ? Theme.warning : Theme.cobalt))
                                 }
                                 Image(systemName: "chevron.down")
                                     .font(.footnote.weight(.semibold))
-                                    .foregroundStyle(.tertiary)
+                                    .foregroundStyle(isExpanded ? Theme.cobalt : Color(uiColor: .tertiaryLabel))
                                     .rotationEffect(.degrees(isExpanded ? 180 : 0))
+                                    .animation(.spring(response: 0.38, dampingFraction: 0.72), value: isExpanded)
                             }
                             .contentShape(Rectangle())
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(PressableStyle())
 
                         Button {
                             editingBudget = budget
@@ -166,39 +192,50 @@ struct BudgetsView: View {
                                 .frame(width: 30, height: 30)
                                 .background(Theme.cobaltSoft, in: Circle())
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(PressableStyle())
                         .accessibilityLabel("Edit \(budget.displayName)")
                     }
+                    .zIndex(1)
 
                     if isExpanded {
-                        VStack(alignment: .leading, spacing: 10) {
-                            ForEach(cats) { cat in
+                        VStack(alignment: .leading, spacing: 11) {
+                            ForEach(Array(cats.enumerated()), id: \.element.id) { index, cat in
                                 let catSpent = f.spent(cat, in: interval)
                                 let catRatio = budget.limit > 0 ? catSpent / budget.limit : (spent > 0 ? catSpent / spent : 0)
-                                HStack(spacing: 10) {
-                                    CategoryIcon(category: cat, size: 28)
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        HStack {
-                                            Text(cat.title)
-                                                .font(.subheadline)
-                                                .foregroundStyle(Theme.ink)
-                                            Spacer()
-                                            Text(Money.format(catSpent, currency))
-                                                .font(.caption.weight(.semibold).monospacedDigit())
-                                                .foregroundStyle(Theme.ink)
-                                        }
-                                        ProgressBar(progress: catRatio, color: cat.color, height: 6)
-                                    }
-                                }
+                                MiniCategorySpendRow(
+                                    category: cat,
+                                    spent: catSpent,
+                                    ratio: catRatio,
+                                    currency: currency,
+                                    index: index
+                                )
                             }
                         }
-                        .padding(.leading, 12)
-                        .padding(.vertical, 8)
-                        .padding(.horizontal, 10)
-                        .background(Theme.track.opacity(0.35), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                        .transition(.opacity.combined(with: .move(edge: .top)))
+                        .padding(.vertical, 10)
+                        .padding(.horizontal, 12)
+                        .background(
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .fill(Theme.track.opacity(0.38))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                        .stroke(Theme.cobalt.opacity(0.12), lineWidth: 1)
+                                )
+                        )
+                        .clipped()
+                        .zIndex(0)
+                        .transition(
+                            .asymmetric(
+                                insertion: .opacity
+                                    .combined(with: .scale(scale: 0.96, anchor: .top))
+                                    .combined(with: .offset(y: -6)),
+                                removal: .opacity
+                                    .combined(with: .scale(scale: 0.97, anchor: .top))
+                                    .combined(with: .offset(y: -4))
+                            )
+                        )
                     }
                 }
+                .padding(.vertical, 2)
             }
         }
         .card()
@@ -238,9 +275,15 @@ struct BudgetsView: View {
                                     .background(Theme.cobalt.opacity(0.12), in: Capsule())
                                 }
                             }
-                            Text("\(Money.format(goal.saved, currency, decimals: 0)) / \(Money.number(goal.target, decimals: 0)) · \(goal.targetDate.formatted(.dateTime.month(.abbreviated).year()))")
-                                .font(.footnote.monospacedDigit())
-                                .foregroundStyle(Theme.secondaryInk)
+                            HStack(spacing: 0) {
+                                Text(Money.format(goal.saved, currency, decimals: 0))
+                                    .animatedNumber(goal.saved)
+                                Text(" / \(Money.number(goal.target, decimals: 0))")
+                                    .animatedNumber(goal.target)
+                                Text(" · \(goal.targetDate.formatted(.dateTime.month(.abbreviated).year()))")
+                            }
+                            .font(.footnote.monospacedDigit())
+                            .foregroundStyle(Theme.secondaryInk)
                             ProgressBar(progress: goal.progress, color: goal.progress >= 0.5 ? Theme.positive : Theme.cobalt)
                         }
                         Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(.tertiary)
@@ -251,6 +294,73 @@ struct BudgetsView: View {
             }
         }
         .card()
+    }
+}
+
+private struct MiniCategorySpendRow: View {
+    let category: SpendCategory
+    let spent: Double
+    let ratio: Double
+    let currency: String
+    let index: Int
+    @State private var appeared = false
+    @State private var displayedSpent: Double = 0
+    @State private var displayedRatio: Double = 0
+
+    var body: some View {
+        let targetPct = Int(min(max(ratio, 0), 9.99) * 100)
+        let shownPct = Int(min(max(displayedRatio, 0), 9.99) * 100)
+        HStack(spacing: 10) {
+            CategoryIcon(category: category, size: 28)
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 6) {
+                    Text(category.title)
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(Theme.ink)
+                    Spacer()
+                    if targetPct > 0 || shownPct > 0 {
+                        Text("\(shownPct)%")
+                            .font(.caption2.weight(.medium).monospacedDigit())
+                            .foregroundStyle(Theme.secondaryInk)
+                            .animatedNumber(Double(shownPct))
+                    }
+                    Text(Money.format(displayedSpent, currency))
+                        .font(.caption.weight(.semibold).monospacedDigit())
+                        .foregroundStyle(Theme.ink)
+                        .animatedNumber(displayedSpent)
+                }
+                ProgressBar(
+                    progress: ratio,
+                    color: category.color,
+                    height: 6.5,
+                    delay: 0.06 + Double(index) * 0.055,
+                    trackColor: Theme.surface
+                )
+            }
+        }
+        .opacity(appeared ? 1 : 0)
+        .offset(y: appeared ? 0 : 6)
+        .scaleEffect(appeared ? 1 : 0.985, anchor: .leading)
+        .onAppear {
+            let rowDelay = Double(index) * 0.045
+            withAnimation(.spring(response: 0.44, dampingFraction: 0.84).delay(rowDelay)) {
+                appeared = true
+            }
+            withAnimation(.spring(response: 0.52, dampingFraction: 0.85).delay(rowDelay + 0.04)) {
+                displayedSpent = spent
+                displayedRatio = ratio
+            }
+        }
+        .onChange(of: spent) { _, newValue in
+            withAnimation(.spring(response: 0.42, dampingFraction: 0.86)) {
+                displayedSpent = newValue
+            }
+        }
+        .onChange(of: ratio) { _, newValue in
+            withAnimation(.spring(response: 0.42, dampingFraction: 0.86)) {
+                displayedRatio = newValue
+            }
+        }
     }
 }
 
@@ -398,8 +508,13 @@ struct GoalSheet: View {
                 if let goal {
                     Section {
                         VStack(alignment: .leading, spacing: 10) {
-                            Text("\(Money.format(goal.saved, currency)) of \(Money.format(goal.target, currency))")
-                                .font(.headline.monospacedDigit())
+                            HStack(spacing: 0) {
+                                Text(Money.format(goal.saved, currency))
+                                    .animatedNumber(goal.saved)
+                                Text(" of \(Money.format(goal.target, currency))")
+                                    .animatedNumber(goal.target)
+                            }
+                            .font(.headline.monospacedDigit())
                             ProgressBar(progress: goal.progress, color: Theme.positive, height: 9)
                             Text(suggestion(goal)).font(.footnote).foregroundStyle(Theme.secondaryInk)
                         }
@@ -576,10 +691,11 @@ struct SafeToSpendView: View {
                     Text(Money.format(s.daily, currency))
                         .font(.system(size: 46, weight: .bold).monospacedDigit())
                         .foregroundStyle(s.isShort ? Theme.negative : Theme.cobalt)
-                        .contentTransition(.numericText(value: s.daily))
+                        .animatedNumber(s.daily)
                     Text("\(Money.format(s.monthly, currency)) for the next \(s.daysLeft) day\(s.daysLeft == 1 ? "" : "s")")
                         .font(.subheadline.monospacedDigit())
                         .foregroundStyle(Theme.secondaryInk)
+                        .animatedNumber(s.monthly)
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 12)
@@ -592,7 +708,10 @@ struct SafeToSpendView: View {
                 row("Essential spending", "Left in essential budgets", s.essentials, symbol: "cart.fill", color: Color(hex: 0x22A565), sign: -1)
                 row("Savings commitments", "Still to set aside this month", s.savings, symbol: "banknote.fill", color: Color(hex: 0x8B5CF6), sign: -1)
                 LabeledContent {
-                    Text(Money.format(s.monthly, currency)).font(.headline.monospacedDigit()).foregroundStyle(Theme.ink)
+                    Text(Money.format(s.monthly, currency))
+                        .font(.headline.monospacedDigit())
+                        .foregroundStyle(Theme.ink)
+                        .animatedNumber(s.monthly)
                 } label: {
                     Text("Safe this month").font(.headline)
                 }
@@ -632,6 +751,7 @@ struct SafeToSpendView: View {
             Text(Money.format(value * sign, currency, signed: sign > 0))
                 .font(.body.weight(.medium).monospacedDigit())
                 .foregroundStyle(sign > 0 ? Theme.positive : Theme.ink)
+                .animatedNumber(value * sign)
         }
     }
 }
