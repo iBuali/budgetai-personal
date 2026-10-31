@@ -382,4 +382,127 @@ struct BudgetAITests {
         #expect(abs(finance.totalLiabilities - 0.000) < 0.0001)
         #expect(abs(finance.netWorth - 400.000) < 0.0001)
     }
+
+    // MARK: - 9. Visa Credit Card Payment SMS
+
+    @Test func visaCardPaymentPaysDownCardAndKeepsBankBalance() async throws {
+        let context = makeCleanContext()
+        let bisb = Account(name: "BisB Current", kind: .bank, institution: "BisB", balance: 1000.000)
+        let visa = Account(name: "Visa Infinite", kind: .creditCard, institution: "BisB", balance: 457.558)
+        context.insert(bisb)
+        context.insert(visa)
+        try context.save()
+
+        let sms = "Dear ISA, Thank you for paying BHD 457.558 on 24/10 for your VISA INFINITE card. Available Bal BHD 5000. Tel 17515151"
+        let parsed = try #require(SMSParser.parse(sms, context: context))
+        #expect(parsed.category == .visaTransfer)
+        #expect(parsed.transactionType == .internalTransfer)
+        #expect(abs(parsed.amount - 457.558) < 0.0001)
+        #expect(abs((parsed.balance ?? 0) - 5000) < 0.0001)
+        #expect(parsed.balanceIsCardLimit == true)
+        #expect(parsed.toAccountID == visa.id)
+        #expect(parsed.requiresReview == false)
+
+        let outcome = await SMSImporter.importText(sms, context: context, forceApprove: true)
+        let tx = try #require(outcome.transaction)
+        #expect(tx.category == .visaTransfer)
+        #expect(tx.accountID == bisb.id)
+        #expect(tx.toAccountID == visa.id)
+        #expect(tx.isSpending == false)
+        #expect(tx.isOrdinaryIncome == false)
+        #expect(tx.smsBalanceIsCardLimit == true)
+        #expect(tx.balanceAdjustment == 0)
+        // Bank is debited by the payment and NOT synced to the card's 5000 available limit
+        #expect(abs(bisb.balance - 542.442) < 0.0001)
+        // Visa balance owed is paid off
+        #expect(abs(visa.balance - 0) < 0.0001)
+
+        let comps = Calendar.current.dateComponents([.month, .day], from: tx.date)
+        #expect(comps.month == 10)
+        #expect(comps.day == 24)
+
+        // Deleting the payment restores both balances
+        Ledger.delete(tx, context: context)
+        #expect(abs(bisb.balance - 1000.000) < 0.0001)
+        #expect(abs(visa.balance - 457.558) < 0.0001)
+    }
+
+    @Test func creditCardDueDateRollsMonthly() throws {
+        let cal = Calendar.current
+        let card = Account(name: "Visa", kind: .creditCard, balance: 0)
+        card.paymentDueReminder = true
+        let now = cal.date(from: DateComponents(year: 2026, month: 10, day: 31, hour: 10))!
+        card.paymentDueDate = cal.date(from: DateComponents(year: 2026, month: 9, day: 25))!
+        let next = card.nextUpcomingDueDate(from: now)
+        let c = cal.dateComponents([.year, .month, .day], from: next)
+        #expect(c.year == 2026)
+        #expect(c.month == 11)
+        #expect(c.day == 25)
+        #expect(card.upcomingDueDates(count: 3, from: now).count == 3)
+    }
+
+    // MARK: - 9. Auto-Marking Bills/Subscriptions from SMS & Quarantining Uncertain SMS
+
+    @Test func autoMarkBillPaidFromSMSAndHoldCycle() throws {
+        let context = makeCleanContext()
+        let cal = Calendar.current
+        let dueDate = cal.date(from: DateComponents(year: 2026, month: 10, day: 25))!
+        let bill = Bill(name: "Batelco Fiber", amount: 15.000, category: .bills, nextDueDate: dueDate, frequency: .monthly)
+        context.insert(bill)
+        try context.save()
+
+        #expect(bill.isPaidForCurrentCycle() == false)
+
+        // Incoming expense matching keyword "Batelco" and amount 15.000
+        let tx = MoneyTransaction(amount: 15.000, isIncome: false, merchant: "Batelco Online", category: .bills, date: .now, source: .sms)
+        tx.rawText = "Dear customer, BD 15.000 paid to Batelco for ref 998811. Available bal BD 120."
+
+        let matched = Ledger.matchAndPayBillFromSMS(tx, context: context)
+        #expect(matched != nil)
+        #expect(matched?.id == bill.id)
+        #expect(bill.isPaidForCurrentCycle() == true)
+        #expect(bill.lastPaidMethod == .autoSMS)
+        #expect(bill.lastPaidAmount == 15.000)
+
+        // nextDueDate advanced to November
+        let nextMonth = cal.component(.month, from: bill.nextDueDate)
+        #expect(nextMonth == 11)
+
+        // Finance upcomingBills excludes this paid bill during the current month
+        let f = Finance(transactions: [tx], accounts: [], budgets: [], goals: [], bills: [bill], now: .now)
+        #expect(f.upcomingBills.isEmpty)
+        #expect(f.billsDueRestOfMonth == 0)
+
+        // When evaluating next month (November 1), it becomes due again
+        let novDate = cal.date(from: DateComponents(year: 2026, month: 11, day: 1))!
+        #expect(bill.isPaidForCurrentCycle(now: novDate) == false)
+        let fNov = Finance(transactions: [], accounts: [], budgets: [], goals: [], bills: [bill], now: novDate)
+        #expect(fNov.upcomingBills.count == 1)
+        #expect(fNov.upcomingBills.first?.id == bill.id)
+    }
+
+    @Test func smsNoteFieldIsEmptyAndUncertainQuarantined() async throws {
+        let context = makeCleanContext()
+        let acc = Account(name: "My Bank", kind: .bank, balance: 200.000)
+        context.insert(acc)
+        try context.save()
+
+        // SMS with unknown bank sender and low confidence -> must be quarantined (isPending)
+        let unknownSMS = "Paid BHD 12.500 at UNKNOWN_VENDOR. Ref: REF991188. Bal BHD 187.500"
+        let outcome = await SMSImporter.importText(unknownSMS, context: context)
+        let tx = try #require(outcome.transaction)
+
+        // Note field MUST be empty (SMS reference preserved in smsReference)
+        #expect(tx.note.isEmpty)
+        #expect(tx.smsReference == "REF991188")
+
+        // Must be quarantined (isPending = true) and NOT deduct from account balance yet
+        #expect(tx.isPending == true)
+        #expect(abs(acc.balance - 200.000) < 0.0001)
+
+        // When approved, balance is deducted
+        Ledger.approve(tx, context: context)
+        #expect(tx.isPending == false)
+        #expect(abs(acc.balance - 187.500) < 0.0001)
+    }
 }

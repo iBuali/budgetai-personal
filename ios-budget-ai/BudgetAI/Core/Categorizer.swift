@@ -450,6 +450,8 @@ struct ParsedSMS {
     var toAccountID: UUID? = nil
     var goalID: UUID? = nil
     var matchedUserRule: Bool = false
+    /// True when `balance` is a credit card's available limit (e.g. "Available Bal" in a Visa payment SMS), not a bank balance.
+    var balanceIsCardLimit: Bool = false
 
     var requiresReview: Bool {
         confidence == .low || transactionType == .unknown
@@ -742,6 +744,25 @@ enum SMSParser {
             )
         }
 
+        // 2b. Credit card (Visa) payment confirmation, e.g.
+        // "Dear ISA, Thank you for paying BHD 457.558 on 24/10 for your VISA INFINITE card. Available Bal BHD 5000. Tel 17515151"
+        // The money left the user's bank account and paid down the card; "Available Bal" is the card's available limit.
+        if let cardPayment = parseCreditCardPayment(
+            singleLine: singleLine,
+            lower: lower,
+            amount: amt,
+            currency: currency,
+            reference: ref,
+            balance: bal,
+            date: parsedDate,
+            timeString: parsedTime,
+            bankInfo: bankInfo,
+            sender: sender,
+            context: context
+        ) {
+            return cardPayment
+        }
+
         // 3. Classify the transaction using complete message structure and account context
         let classification = classifyTransaction(
             normalized: normalized,
@@ -966,6 +987,118 @@ enum SMSParser {
             toAccountID: toAccID,
             goalID: matchedGoalID
         )
+    }
+
+    // MARK: - Credit Card (Visa) Payment Rule
+
+    private static func parseCreditCardPayment(
+        singleLine: String,
+        lower: String,
+        amount: Double,
+        currency: String?,
+        reference: String?,
+        balance: Double?,
+        date: Date?,
+        timeString: String?,
+        bankInfo: (bank: String?, confidence: SMSConfidence, reason: String?),
+        sender: String?,
+        context: ModelContext?
+    ) -> ParsedSMS? {
+        let patterns = [
+            // "Thank you for paying BHD 457.558 on 24/10 for your VISA INFINITE card"
+            "(?i)\\bthank\\s+you\\s+for\\s+(?:paying|your\\s+payment\\s+of)\\b.*?\\bfor\\s+your\\s+(.+?)\\s+(?:credit\\s+)?card\\b",
+            // "Payment of BHD 100.000 received towards your VISA PLATINUM card"
+            "(?i)\\bpayment\\s+(?:of\\s+)?.*?\\b(?:received|credited)\\s+(?:towards|to|for)\\s+your\\s+(.+?)\\s+(?:credit\\s+)?card\\b",
+            // Arabic: "شكراً لسدادك ... لبطاقة فيزا"
+            "(?:شكرا|شكراً)\\s+(?:لسدادك|لسداد|لدفعك).*?(?:بطاقة|لبطاقة|بطاقتك)\\s*([^\\.،,]{0,30})"
+        ]
+        var matched = false
+        var cardName: String?
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern),
+                  let m = regex.firstMatch(in: singleLine, range: NSRange(singleLine.startIndex..., in: singleLine)) else { continue }
+            matched = true
+            if m.numberOfRanges > 1, let r = Range(m.range(at: 1), in: singleLine) {
+                let raw = String(singleLine[r]).trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
+                if !raw.isEmpty && raw.count <= 30 { cardName = raw }
+            }
+            break
+        }
+        guard matched else { return nil }
+
+        // Payment date such as "on 24/10" (day/month without a year)
+        var resolvedDate = date
+        if resolvedDate == nil,
+           let regex = try? NSRegularExpression(pattern: "\\b([0-3]?[0-9])/([01]?[0-9])\\b(?!/)"),
+           let m = regex.firstMatch(in: singleLine, range: NSRange(singleLine.startIndex..., in: singleLine)),
+           let dr = Range(m.range(at: 1), in: singleLine), let mr = Range(m.range(at: 2), in: singleLine),
+           let day = Int(singleLine[dr]), let month = Int(singleLine[mr]), (1...31).contains(day), (1...12).contains(month) {
+            let cal = Calendar.current
+            var comps = DateComponents()
+            comps.year = cal.component(.year, from: .now)
+            comps.month = month
+            comps.day = day
+            comps.hour = 12
+            if var d = cal.date(from: comps) {
+                if d > Date.now.addingTimeInterval(86_400), let prev = cal.date(byAdding: .year, value: -1, to: d) { d = prev }
+                resolvedDate = d
+            }
+        }
+
+        let card = context.flatMap { findCreditCardAccount(cardName: cardName, in: $0) }
+        let displayCard = card?.name ?? cardName.map { $0.capitalized } ?? "Visa card"
+        let reason = card != nil
+            ? "Credit card payment confirmation: paid \(displayCard) from your bank account. 'Available Bal' is the card's available limit, not the bank balance."
+            : "Credit card payment confirmation. Add your Visa card as a Credit card account so its balance is paid down automatically. 'Available Bal' is the card's available limit."
+
+        return ParsedSMS(
+            amount: amount,
+            currency: currency ?? "BHD",
+            isIncome: false,
+            merchant: "Payment to \(displayCard)",
+            category: .visaTransfer,
+            subcategory: nil,
+            date: resolvedDate,
+            accountHint: bankInfo.bank,
+            cardDigits: nil,
+            balance: balance,
+            note: buildNote(rail: "Card payment", reference: reference),
+            transactionType: .internalTransfer,
+            detectedBank: bankInfo.bank,
+            bankConfidence: bankInfo.confidence,
+            confidence: .high,
+            classificationReason: reason,
+            referenceNumber: reference,
+            accountSuffix: nil,
+            recipientSuffix: nil,
+            timeString: timeString,
+            sender: sender,
+            toAccountID: card?.id,
+            goalID: nil,
+            balanceIsCardLimit: true
+        )
+    }
+
+    /// Finds the user's credit card account that best matches a card name from an SMS (e.g. "VISA INFINITE").
+    static func findCreditCardAccount(cardName: String?, in context: ModelContext) -> Account? {
+        let cards = ((try? context.fetch(FetchDescriptor<Account>(sortBy: [SortDescriptor(\.createdAt)]))) ?? [])
+            .filter { $0.kind == .creditCard }
+        guard !cards.isEmpty else { return nil }
+        if let cardName {
+            let tokens = cardName.lowercased()
+                .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+                .map(String.init)
+                .filter { $0.count >= 3 && $0 != "card" && $0 != "your" }
+            if !tokens.isEmpty {
+                let scored = cards.map { acc -> (Account, Int) in
+                    let hay = "\(acc.name) \(acc.institution)".lowercased()
+                    return (acc, tokens.filter { hay.contains($0) }.count)
+                }
+                if let best = scored.max(by: { $0.1 < $1.1 }), best.1 > 0 { return best.0 }
+            }
+        }
+        if cards.count == 1 { return cards[0] }
+        return cards.first(where: { $0.name.lowercased().contains("visa") }) ?? cards.first
     }
 
     // MARK: - Complete Message Classification

@@ -2,7 +2,7 @@ import SwiftUI
 import SwiftData
 
 enum TxFilter: String, CaseIterable, Identifiable {
-    case all = "All", income = "Income", expenses = "Expenses", transfers = "Transfers"
+    case all = "All", review = "Needs Review", income = "Income", expenses = "Expenses", transfers = "Transfers"
     var id: String { rawValue }
 }
 
@@ -54,6 +54,7 @@ struct TxFilterState: Equatable {
     func matches(_ tx: MoneyTransaction, ignoringDates: Bool = false) -> Bool {
         switch kind {
         case .all: break
+        case .review: if !tx.isPending { return false }
         case .income: if !tx.isOrdinaryIncome { return false }
         case .expenses: if !tx.isSpending { return false }
         case .transfers: if !tx.isTransfer { return false }
@@ -99,7 +100,10 @@ struct TransactionsView: View {
     }
 
     private var filtered: [MoneyTransaction] {
-        transactions.filter { !$0.isPending && filters.matches($0, ignoringDates: mode == .calendar) && matchesSearch($0) }
+        if filters.kind == .review {
+            return transactions.filter { $0.isPending && filters.matches($0, ignoringDates: mode == .calendar) && matchesSearch($0) }
+        }
+        return transactions.filter { !$0.isPending && filters.matches($0, ignoringDates: mode == .calendar) && matchesSearch($0) }
     }
 
     private var grouped: [(day: Date, items: [MoneyTransaction])] {
@@ -130,8 +134,27 @@ struct TransactionsView: View {
                     }
                 }
 
-                if !pending.isEmpty && query.isEmpty {
+                if !pending.isEmpty && query.isEmpty && filters.kind != .review {
                     pendingSection
+                }
+
+                if filters.kind == .review {
+                    Section {
+                        HStack(spacing: 12) {
+                            Image(systemName: "shield.lefthalf.filled.badge.checkmark")
+                                .font(.title2)
+                                .foregroundStyle(Theme.warning)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("Quarantined for Review")
+                                    .font(.headline)
+                                    .foregroundStyle(Theme.ink)
+                                Text("These transactions have an unmatched balance, unknown bank sender, or need your review. They are NOT included in any account balances until approved.")
+                                    .font(.caption)
+                                    .foregroundStyle(Theme.secondaryInk)
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    }
                 }
 
                 if mode == .list {
@@ -296,7 +319,12 @@ struct TransactionsView: View {
             } label: { Label("Delete", systemImage: "trash") }
         }
         .swipeActions(edge: .leading) {
-            if tx.isPossibleDuplicate {
+            if tx.isPending {
+                Button {
+                    approve(tx)
+                } label: { Label("Approve", systemImage: "checkmark") }
+                .tint(Theme.positive)
+            } else if tx.isPossibleDuplicate {
                 Button {
                     tx.isPossibleDuplicate = false
                     try? context.save()
@@ -376,12 +404,22 @@ struct TransactionsView: View {
                     Button {
                         withAnimation(.snappy) { filters.kind = f }
                     } label: {
-                        Text(f.rawValue)
-                            .font(.subheadline.weight(.medium))
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 9)
-                            .foregroundStyle(filters.kind == f ? .white : Theme.ink)
-                            .background(filters.kind == f ? Theme.cobalt : Theme.track.opacity(0.8), in: Capsule())
+                        HStack(spacing: 6) {
+                            Text(f.rawValue)
+                            if f == .review && !pending.isEmpty {
+                                Text("\(pending.count)")
+                                    .font(.caption2.bold().monospacedDigit())
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(filters.kind == f ? .white.opacity(0.3) : Theme.warning, in: Capsule())
+                                    .foregroundStyle(.white)
+                            }
+                        }
+                        .font(.subheadline.weight(.medium))
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 9)
+                        .foregroundStyle(filters.kind == f ? .white : Theme.ink)
+                        .background(filters.kind == f ? (f == .review ? Theme.warning : Theme.cobalt) : Theme.track.opacity(0.8), in: Capsule())
                     }
                     .buttonStyle(PressableStyle())
                 }
@@ -743,8 +781,21 @@ struct TransactionDetailView: View {
 
             if tx.isPending {
                 Section {
-                    Label("Imported from SMS and waiting for your approval. It doesn't affect balances or budgets yet.", systemImage: "clock.fill")
-                        .foregroundStyle(Theme.warning)
+                    let reasons = tx.reviewReasons(accounts: accounts)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Label("Waiting for approval — not included in any account balances.", systemImage: "shield.lefthalf.filled.badge.checkmark")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(Theme.warning)
+                        if !reasons.isEmpty {
+                            ForEach(reasons, id: \.self) { r in
+                                Text("• \(r)")
+                                    .font(.caption)
+                                    .foregroundStyle(Theme.secondaryInk)
+                            }
+                        }
+                    }
+                    .padding(.vertical, 2)
+
                     Button {
                         commitPendingEdits(silent: true)
                         let result = Ledger.approve(tx, context: context)
@@ -753,7 +804,7 @@ struct TransactionDetailView: View {
                         }
                         appState.report(result, base: "Approved \(Money.format(tx.amount, currency))")
                     } label: {
-                        Label("Approve", systemImage: "checkmark.circle.fill").fontWeight(.semibold)
+                        Label("Approve and update accounts", systemImage: "checkmark.circle.fill").fontWeight(.semibold)
                     }
                     .foregroundStyle(Theme.positive)
                     Button("Reject", role: .destructive) {
@@ -850,7 +901,25 @@ struct TransactionDetailView: View {
                     CategoryPickerGrid(
                         category: Binding(get: { tx.category }, set: { new in
                             commitPendingEdits(silent: true)
-                            if new == .internalTransfer {
+                            if new == .visaTransfer {
+                                let cards = accounts.filter { $0.kind == .creditCard }
+                                Ledger.edit(tx, context: context) { target in
+                                    target.subcategory = nil
+                                    target.category = .visaTransfer
+                                    target.isIncome = false
+                                    target.smsTransactionType = .internalTransfer
+                                    target.aiCategorized = false
+                                    target.goalID = nil
+                                    target.smsBalanceIsCardLimit = true
+                                    let currentDestIsCard = target.toAccountID.flatMap { id in cards.first { $0.id == id } } != nil
+                                    if !currentDestIsCard {
+                                        target.toAccountID = cards.first(where: { $0.id != target.accountID })?.id
+                                    }
+                                }
+                                if cards.isEmpty {
+                                    appState.show("Add your Visa card as a Credit card account to pay it down", warning: true)
+                                }
+                            } else if new == .internalTransfer {
                                 Ledger.edit(tx, context: context) { target in
                                     target.subcategory = nil
                                     target.category = .internalTransfer
@@ -866,12 +935,13 @@ struct TransactionDetailView: View {
                                         }
                                     }
                                 }
-                            } else if tx.category == .internalTransfer || tx.smsTransactionType == .internalTransfer || tx.isIncome != new.isIncomeCategory {
+                            } else if tx.category == .internalTransfer || tx.category == .visaTransfer || tx.smsTransactionType == .internalTransfer || tx.isIncome != new.isIncomeCategory {
                                 Ledger.edit(tx, context: context) { target in
                                     target.subcategory = nil
                                     target.category = new
                                     target.toAccountID = nil
                                     target.goalID = nil
+                                    target.smsBalanceIsCardLimit = false
                                     target.isIncome = new.isIncomeCategory
                                     if isSMSTransaction {
                                         target.smsTransactionType = new.isIncomeCategory ? .income : (new == .transfers ? .transferOut : .expense)
@@ -910,7 +980,33 @@ struct TransactionDetailView: View {
                     ForEach(accounts) { a in Text(a.menuTitle).tag(UUID?.some(a.id)) }
                 }
 
-                if tx.category == .internalTransfer || tx.effectiveTransactionType == .internalTransfer || tx.toAccountID != nil {
+                if tx.category == .visaTransfer {
+                    Picker("Visa card", selection: Binding(get: { tx.toAccountID }, set: { newID in
+                        guard newID != tx.accountID else { return }
+                        Ledger.edit(tx, context: context) { $0.toAccountID = newID }
+                        if isSMSTransaction {
+                            SMSUserRules.rememberTransactionRule(for: tx)
+                        }
+                    })) {
+                        Text("Select card").tag(UUID?.none)
+                        ForEach(accounts.filter { $0.kind == .creditCard }) { a in
+                            Text(a.menuTitle).tag(UUID?.some(a.id))
+                        }
+                    }
+                    if let card = toAccount, card.kind == .creditCard {
+                        LabeledContent("Card balance owed") {
+                            Text(Money.format(card.balance, currency))
+                                .monospacedDigit()
+                                .foregroundStyle(card.balance > 0.0005 ? Theme.negative : Theme.positive)
+                                .animatedNumber(card.balance)
+                        }
+                        if card.paymentDueReminder {
+                            LabeledContent("Next payment due") {
+                                Text(card.nextUpcomingDueDate().formatted(.dateTime.day().month(.abbreviated).year()))
+                            }
+                        }
+                    }
+                } else if tx.category == .internalTransfer || tx.effectiveTransactionType == .internalTransfer || tx.toAccountID != nil {
                     Picker("To account", selection: Binding(get: { tx.toAccountID }, set: { newID in
                         guard newID != tx.accountID else { return }
                         Ledger.edit(tx, context: context) { target in
@@ -930,7 +1026,7 @@ struct TransactionDetailView: View {
                     }
                 }
 
-                if !goals.isEmpty && (tx.category == .internalTransfer || tx.effectiveTransactionType == .internalTransfer || tx.goalID != nil) {
+                if !goals.isEmpty && tx.category != .visaTransfer && (tx.category == .internalTransfer || tx.effectiveTransactionType == .internalTransfer || tx.goalID != nil) {
                     Picker("Savings goal", selection: Binding(get: { tx.goalID }, set: { newGoalID in
                         Ledger.edit(tx, context: context) { target in
                             target.goalID = newGoalID
@@ -995,7 +1091,7 @@ struct TransactionDetailView: View {
                             .foregroundStyle(Theme.ink)
                     }
 
-                    LabeledContent("Balance in SMS") {
+                    LabeledContent(tx.isCardLimitBalance ? "Card available limit in SMS" : "Balance in SMS") {
                         Text(tx.smsBalance.map { Money.format($0, currency) } ?? "—")
                             .monospacedDigit()
                     }
@@ -1010,7 +1106,7 @@ struct TransactionDetailView: View {
                         }
                     }
 
-                    if let bank = tx.smsBalance, let account, !account.kind.isLiability {
+                    if let bank = tx.smsBalance, let account, !account.kind.isLiability, !tx.isCardLimitBalance {
                         if abs(account.balance - bank) >= 0.0005 && !tx.isPending {
                             Button {
                                 if let synced = Ledger.syncBalanceFromSMS(tx, context: context, force: true) {

@@ -72,6 +72,7 @@ struct RootView: View {
         .onAppear {
             if faceID { authenticate() } else { locked = false }
             Ledger.recordSnapshot(context: context)
+            Ledger.refreshCardReminders(context: context)
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .background && faceID { locked = true }

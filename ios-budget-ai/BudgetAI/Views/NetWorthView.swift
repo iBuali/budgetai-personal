@@ -121,7 +121,10 @@ struct NetWorthView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(account.name).foregroundStyle(Theme.ink)
                     let baseSubtitle = account.institution.isEmpty ? account.kind.title : "\(account.kind.title) · \(account.institution)"
-                    Text(account.includeInNetWorth ? baseSubtitle : "\(baseSubtitle) · Excluded from net worth")
+                    let dueSubtitle = account.kind == .creditCard && account.paymentDueReminder
+                        ? "\(baseSubtitle) · Due \(account.nextUpcomingDueDate().formatted(.dateTime.day().month(.abbreviated)))"
+                        : baseSubtitle
+                    Text(account.includeInNetWorth ? dueSubtitle : "\(dueSubtitle) · Excluded from net worth")
                         .font(.caption)
                         .foregroundStyle(Theme.secondaryInk)
                 }
@@ -171,6 +174,9 @@ struct AccountEditor: View {
     @State private var emoji = ""
     @State private var smsMatch = ""
     @State private var includeInNetWorth = true
+    @State private var paymentDueReminder = false
+    @State private var paymentDueDate = Calendar.current.date(byAdding: .day, value: 14, to: .now) ?? .now
+    @State private var reminderDaysBefore = 3
 
     var body: some View {
         NavigationStack {
@@ -216,12 +222,38 @@ struct AccountEditor: View {
                         Text("Bank messages mentioning these digits are filed to this account automatically.")
                     }
                 }
+                if kind == .creditCard {
+                    Section {
+                        Toggle(isOn: $paymentDueReminder.animation(.snappy)) {
+                            Label("Payment due reminder", systemImage: "bell.badge.fill")
+                        }
+                        if paymentDueReminder {
+                            DatePicker("Payment due date", selection: $paymentDueDate, displayedComponents: .date)
+                            Stepper(value: $reminderDaysBefore, in: 0...14) {
+                                HStack {
+                                    Text("Remind me")
+                                    Spacer()
+                                    Text(reminderDaysBefore == 0 ? "On the due date" : "\(reminderDaysBefore) day\(reminderDaysBefore == 1 ? "" : "s") before")
+                                        .foregroundStyle(Theme.secondaryInk)
+                                        .monospacedDigit()
+                                }
+                            }
+                        }
+                    } header: {
+                        Text("Visa payment")
+                    } footer: {
+                        Text(paymentDueReminder
+                             ? "You'll get a notification at 9:00 AM \(reminderDaysBefore == 0 ? "on the due date" : "\(reminderDaysBefore) day\(reminderDaysBefore == 1 ? "" : "s") before it and again on the due date") every month, so you can pay before the bank deducts late fees. Paying the card in full moves the reminder to next month."
+                             : "Turn on to get a monthly reminder before your card payment is due.")
+                    }
+                }
                 if let account {
                     Section {
                         Button("Delete", role: .destructive) {
                             context.delete(account)
                             Ledger.recordSnapshot(context: context)
                             try? context.save()
+                            Notifier.rescheduleCreditCards((try? context.fetch(FetchDescriptor<Account>())) ?? [])
                             dismiss()
                         }
                     }
@@ -243,6 +275,9 @@ struct AccountEditor: View {
                 emoji = account.emoji
                 smsMatch = account.smsMatch
                 includeInNetWorth = account.includeInNetWorth
+                paymentDueReminder = account.paymentDueReminder
+                paymentDueDate = account.paymentDueDate
+                reminderDaysBefore = account.paymentReminderDaysBefore
                 balanceText = Money.number(account.balance, decimals: Money.digits(currency)).replacingOccurrences(of: ",", with: "")
                 if account.balance < 0 { balanceText = "-" + balanceText }
             }
@@ -251,7 +286,9 @@ struct AccountEditor: View {
 
     private func save() {
         let balance = Money.parse(balanceText) ?? 0
+        let target: Account
         if let account {
+            target = account
             account.name = name.trimmingCharacters(in: .whitespaces)
             account.kind = kind
             account.institution = institution
@@ -263,9 +300,22 @@ struct AccountEditor: View {
             let new = Account(name: name.trimmingCharacters(in: .whitespaces), kind: kind, institution: institution, balance: balance, emoji: emoji, includeInNetWorth: includeInNetWorth)
             new.smsMatch = smsMatch
             context.insert(new)
+            target = new
         }
+        target.paymentDueReminder = kind == .creditCard && paymentDueReminder
+        target.paymentDueDate = paymentDueDate
+        target.paymentReminderDaysBefore = reminderDaysBefore
         Ledger.recordSnapshot(context: context)
         try? context.save()
+        let all = (try? context.fetch(FetchDescriptor<Account>())) ?? []
+        if target.paymentDueReminder {
+            Task {
+                _ = await Notifier.requestAuthorization()
+                Notifier.rescheduleCreditCards(all)
+            }
+        } else {
+            Notifier.rescheduleCreditCards(all)
+        }
         dismiss()
     }
 }

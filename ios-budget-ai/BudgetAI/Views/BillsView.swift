@@ -9,8 +9,9 @@ struct BillsView: View {
     @State private var editing: Bill?
     @State private var showNew = false
 
-    private var subscriptions: [Bill] { bills.filter(\.isSubscription) }
-    private var regular: [Bill] { bills.filter { !$0.isSubscription } }
+    private var unpaidRegular: [Bill] { bills.filter { !$0.isSubscription && !$0.isPaidForCurrentCycle() } }
+    private var unpaidSubscriptions: [Bill] { bills.filter { $0.isSubscription && !$0.isPaidForCurrentCycle() } }
+    private var paidThisMonth: [Bill] { bills.filter { $0.isPaidForCurrentCycle() } }
 
     var body: some View {
         List {
@@ -18,18 +19,58 @@ struct BillsView: View {
                 HStack(spacing: 0) {
                     summary("Bills", bills.reduce(0) { $0 + $1.monthlyCost })
                     Divider().frame(height: 40)
-                    summary("Subscriptions", subscriptions.reduce(0) { $0 + $1.monthlyCost })
+                    summary("Subscriptions", bills.filter(\.isSubscription).reduce(0) { $0 + $1.monthlyCost })
                 }
                 .padding(.vertical, 6)
             } footer: {
-                Text("Swipe right on a bill to mark it paid. It's recorded as a transaction and the next due date moves forward.")
+                Text("Swipe right on a bill to mark it paid. When paid via SMS or manually, it remains marked as paid for this month.")
             }
 
-            if !regular.isEmpty {
-                Section("Bills") { ForEach(regular, content: row) }
+            if !unpaidRegular.isEmpty {
+                Section("Due Bills") { ForEach(unpaidRegular, content: row) }
             }
-            if !subscriptions.isEmpty {
-                Section("Subscriptions") { ForEach(subscriptions, content: row) }
+            if !unpaidSubscriptions.isEmpty {
+                Section("Due Subscriptions") { ForEach(unpaidSubscriptions, content: row) }
+            }
+            if !paidThisMonth.isEmpty {
+                Section {
+                    ForEach(paidThisMonth) { bill in
+                        Button { editing = bill } label: {
+                            BillRow(bill: bill, currency: currency)
+                        }
+                        .buttonStyle(.plain)
+                        .swipeActions(edge: .leading) {
+                            Button {
+                                withAnimation(.spring(response: 0.45, dampingFraction: 0.7)) {
+                                    bill.unmarkPaid()
+                                    try? context.save()
+                                    Notifier.rescheduleBills(bills)
+                                    appState.show("\(bill.name) marked as unpaid")
+                                }
+                            } label: { Label("Unmark", systemImage: "arrow.uturn.backward") }
+                            .tint(Theme.warning)
+                        }
+                        .swipeActions(edge: .trailing) {
+                            Button(role: .destructive) {
+                                withAnimation {
+                                    context.delete(bill)
+                                    try? context.save()
+                                    Notifier.rescheduleBills(bills.filter { $0.id != bill.id })
+                                }
+                            } label: { Label("Delete", systemImage: "trash") }
+                        }
+                    }
+                } header: {
+                    HStack {
+                        Label("Paid this month · \(paidThisMonth.count)", systemImage: "checkmark.seal.fill")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(Theme.positive)
+                        Spacer()
+                    }
+                    .textCase(nil)
+                } footer: {
+                    Text("Paid for this month. Next cycle's due dates will appear automatically next month.")
+                }
             }
         }
         .scrollContentBackground(.hidden)
@@ -76,17 +117,21 @@ struct BillsView: View {
         .buttonStyle(.plain)
         .swipeActions(edge: .leading) {
             Button {
-                Ledger.payBill(bill, accountID: Ledger.defaultAccountID(context: context), context: context)
-                Notifier.rescheduleBills(bills)
-                appState.show("\(bill.name) marked as paid")
+                withAnimation(.spring(response: 0.45, dampingFraction: 0.7)) {
+                    Ledger.payBill(bill, accountID: Ledger.defaultAccountID(context: context), context: context)
+                    Notifier.rescheduleBills(bills)
+                    appState.show("\(bill.name) marked as paid")
+                }
             } label: { Label("Paid", systemImage: "checkmark") }
             .tint(Theme.positive)
         }
         .swipeActions(edge: .trailing) {
             Button(role: .destructive) {
-                context.delete(bill)
-                try? context.save()
-                Notifier.rescheduleBills(bills.filter { $0.id != bill.id })
+                withAnimation {
+                    context.delete(bill)
+                    try? context.save()
+                    Notifier.rescheduleBills(bills.filter { $0.id != bill.id })
+                }
             } label: { Label("Delete", systemImage: "trash") }
         }
     }

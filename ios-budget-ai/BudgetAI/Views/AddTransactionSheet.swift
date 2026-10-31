@@ -278,6 +278,10 @@ struct PasteSMSSheet: View {
                             sender = "BBK"
                             text = "BBK: Salary of BHD 1,250.000 has been credited to your account ending 8801. Avl Bal: BHD 1,628.850"
                         }
+                        Button("BisB · Visa Card Payment (EN)") {
+                            sender = "BisB"
+                            text = "Dear ISA, Thank you for paying BHD 457.558 on 24/10 for your VISA INFINITE card. Available Bal BHD 5000. Tel 17515151"
+                        }
                     } label: {
                         Label("Try sample SMS (EN / عربي)", systemImage: "text.bubble")
                     }
@@ -436,7 +440,7 @@ struct PasteSMSSheet: View {
                 }
                 if let bal = p.balance {
                     HStack {
-                        Text("Bank balance in SMS")
+                        Text(p.balanceIsCardLimit ? "Card available limit in SMS" : "Bank balance in SMS")
                             .font(.caption)
                             .foregroundStyle(Theme.secondaryInk)
                         Spacer()

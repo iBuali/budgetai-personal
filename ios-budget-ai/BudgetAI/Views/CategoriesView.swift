@@ -265,7 +265,7 @@ struct CategoryPickerGrid: View {
             }
             return income
                 ? (SpendCategory.incomeCases + [.internalTransfer])
-                : SpendCategory.expenseCases.filter { $0 != .transfers }
+                : SpendCategory.expenseCases.filter { $0 != .transfers && $0 != .visaTransfer }
         }()
         VStack(alignment: .leading, spacing: 14) {
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 4), spacing: 12) {

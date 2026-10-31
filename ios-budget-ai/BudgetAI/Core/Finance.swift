@@ -128,10 +128,12 @@ struct Finance {
 
     // MARK: Bills
 
-    var upcomingBills: [Bill] { bills.sorted { $0.nextDueDate < $1.nextDueDate } }
+    var upcomingBills: [Bill] {
+        bills.filter { !$0.isPaidForCurrentCycle(now: now) }.sorted { $0.nextDueDate < $1.nextDueDate }
+    }
 
     var billsDueRestOfMonth: Double {
-        bills.filter { $0.nextDueDate < thisMonth.end }.reduce(0) { $0 + $1.amount }
+        bills.filter { !$0.isPaidForCurrentCycle(now: now) && $0.nextDueDate < thisMonth.end }.reduce(0) { $0 + $1.amount }
     }
 
     var subscriptionsMonthly: Double { bills.filter(\.isSubscription).reduce(0) { $0 + $1.monthlyCost } }
@@ -168,7 +170,7 @@ struct Finance {
         let liquidIDs = Set(accounts.filter { $0.kind.isLiquid }.map(\.id))
         func liquidEffect(_ tx: MoneyTransaction) -> Double {
             if tx.smsTransactionType == .unknown { return 0 }
-            if tx.smsTransactionType == .internalTransfer && tx.toAccountID == nil { return 0 }
+            if tx.smsTransactionType == .internalTransfer && tx.toAccountID == nil && tx.category != .visaTransfer { return 0 }
             var effect = 0.0
             if let id = tx.accountID { if liquidIDs.contains(id) { effect += tx.signedAmount } } else if !tx.isTransfer { effect += tx.signedAmount }
             if let to = tx.toAccountID, liquidIDs.contains(to) { effect += tx.amount }

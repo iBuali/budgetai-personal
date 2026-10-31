@@ -376,7 +376,7 @@ struct BudgetEditor: View {
     @State private var limitText = ""
 
     private var availableCategories: [SpendCategory] {
-        SpendCategory.expenseCases.filter { $0 != .transfers && $0 != .internalTransfer }
+        SpendCategory.expenseCases.filter { $0 != .transfers && $0 != .internalTransfer && $0 != .visaTransfer }
     }
 
     var body: some View {

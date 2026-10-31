@@ -225,7 +225,20 @@ struct TransactionRow: View {
                     .foregroundStyle(Theme.ink)
                     .lineLimit(1)
                 if tx.isPending {
-                    Label(tx.smsTransactionType == .unknown || tx.smsConfidence == .low ? "Needs review" : "Waiting for approval", systemImage: "clock.fill")
+                    let pendingLabel: (text: String, icon: String) = {
+                        let bankClean = tx.smsBank?.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if bankClean == nil || bankClean?.isEmpty == true || bankClean?.lowercased().contains("unknown") == true {
+                            return ("Unknown bank sender", "building.columns")
+                        }
+                        if tx.accountID == nil {
+                            return ("Unmatched account", "creditcard.trianglebadge.exclamationmark")
+                        }
+                        if tx.smsConfidence == .low || tx.category == .other || tx.smsTransactionType == .unknown {
+                            return ("Needs review", "questionmark.circle")
+                        }
+                        return ("Waiting for approval", "clock.fill")
+                    }()
+                    Label(pendingLabel.text, systemImage: pendingLabel.icon)
                         .font(.subheadline)
                         .foregroundStyle(Theme.warning)
                 } else if tx.isPossibleDuplicate {

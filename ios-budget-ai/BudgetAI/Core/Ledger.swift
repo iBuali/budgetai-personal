@@ -27,8 +27,12 @@ enum Ledger {
         if tx.isSpending {
             result.alerts = checkBudgetAlerts(for: tx.category, context: context)
         }
+        if !tx.isIncome && (tx.source == .sms || tx.source == .manual) {
+            _ = matchAndPayBillFromSMS(tx, context: context)
+        }
         recordSnapshot(context: context)
         try? context.save()
+        if tx.category == .visaTransfer { refreshCardReminders(context: context) }
         return result
     }
 
@@ -42,8 +46,12 @@ enum Ledger {
         result.balanceSynced = syncBalanceFromSMS(tx, context: context)
         result.flaggedDuplicate = tx.isPossibleDuplicate
         if tx.isSpending { result.alerts = checkBudgetAlerts(for: tx.category, context: context) }
+        if !tx.isIncome {
+            _ = matchAndPayBillFromSMS(tx, context: context)
+        }
         recordSnapshot(context: context)
         try? context.save()
+        if tx.category == .visaTransfer { refreshCardReminders(context: context) }
         return result
     }
 
@@ -76,14 +84,17 @@ enum Ledger {
         applyBalance(tx, sign: 1, context: context)
         recordSnapshot(context: context)
         try? context.save()
+        if tx.category == .visaTransfer { refreshCardReminders(context: context) }
     }
 
     static func applyBalance(_ tx: MoneyTransaction, sign: Double, context: ModelContext) {
         if tx.smsTransactionType == .unknown {
             return
         }
-        if sign > 0, tx.goalID == nil,
-           (tx.smsTransactionType == .internalTransfer || tx.category == .internalTransfer || tx.isTransfer) {
+        let isCardPayment = tx.category == .visaTransfer
+        let isInternal = tx.smsTransactionType == .internalTransfer || tx.category == .internalTransfer || isCardPayment
+        if sign > 0, !isCardPayment, tx.goalID == nil,
+           (isInternal || tx.isTransfer) {
             if let matchedGoal = SMSParser.findMatchingGoal(suffix: tx.smsRecipientSuffix, accountID: tx.toAccountID, in: context),
                matchedGoal.linkedAccountID == nil || matchedGoal.linkedAccountID != tx.accountID {
                 tx.goalID = matchedGoal.id
@@ -92,8 +103,9 @@ enum Ledger {
                 }
             }
         }
-        if (tx.smsTransactionType == .internalTransfer || tx.category == .internalTransfer) && tx.toAccountID == nil && tx.goalID == nil {
+        if isInternal && !isCardPayment && tx.toAccountID == nil && tx.goalID == nil {
             // Do not change net worth on an internal transfer without a destination account or linked savings goal.
+            // (Card payments still debit the paying bank account even before a card account is linked.)
             return
         }
         if let id = tx.accountID, let account = account(id, context: context) {
@@ -104,9 +116,13 @@ enum Ledger {
             }
         }
         // Internal transfers credit the destination account (paying down a loan or card reduces what's owed).
-        if (tx.smsTransactionType == .internalTransfer || tx.category == .internalTransfer || (tx.smsTransactionType == nil && tx.isTransfer)),
-           let to = tx.toAccountID, let dest = account(to, context: context) {
+        if (isInternal || (tx.smsTransactionType == nil && tx.isTransfer)),
+           let to = tx.toAccountID, to != tx.accountID, let dest = account(to, context: context) {
             dest.balance += (dest.kind.isLiability ? -tx.amount : tx.amount) * sign
+            if sign > 0 && dest.kind == .creditCard {
+                // Paid in full shortly before the due date → move the reminder to next month's due date.
+                dest.advanceDueDateIfPaid(on: tx.date)
+            }
         }
         // Automatically update the linked savings goal when a transfer contributes to it.
         if let goalID = tx.goalID, let targetGoal = goal(goalID, context: context) {
@@ -234,7 +250,7 @@ enum Ledger {
     /// When the bank SMS includes the available balance, make the app's account match it.
     /// Only applied for cash/bank accounts and only when this is the newest transaction on that account.
     static func syncBalanceFromSMS(_ tx: MoneyTransaction, context: ModelContext, force: Bool = false) -> Double? {
-        guard force || AppSettings.smsSyncBalance, !tx.isPending, let bankBalance = tx.smsBalance, let id = tx.accountID,
+        guard force || AppSettings.smsSyncBalance, !tx.isPending, !tx.isCardLimitBalance, let bankBalance = tx.smsBalance, let id = tx.accountID,
               let account = account(id, context: context), !account.kind.isLiability else { return nil }
         let date = tx.date
         let txID = tx.id
@@ -283,6 +299,27 @@ enum Ledger {
             }
         }
         return accounts.first(where: { $0.kind == .bank })?.id ?? accounts.first(where: { $0.kind == .cash })?.id
+    }
+
+    /// Cash/bank account used to pay a credit card (never a card or loan), matched by bank name when possible.
+    static func defaultLiquidAccountID(context: ModelContext, hint: String? = nil) -> UUID? {
+        let accounts = ((try? context.fetch(FetchDescriptor<Account>(sortBy: [SortDescriptor(\.createdAt)]))) ?? [])
+            .filter { $0.kind.isLiquid }
+        if let fixed = AppSettings.smsAccountID, accounts.contains(where: { $0.id == fixed }) { return fixed }
+        if let hint, !hint.isEmpty {
+            let h = hint.lowercased()
+            if let match = accounts.first(where: { $0.name.lowercased().contains(h) || (!$0.institution.isEmpty && (h.contains($0.institution.lowercased()) || $0.institution.lowercased().contains(h))) }) {
+                return match.id
+            }
+        }
+        return accounts.first(where: { $0.kind == .bank })?.id ?? accounts.first?.id
+    }
+
+    /// Re-schedules Visa / credit card payment-due reminders (e.g. after a payment moved the due date).
+    static func refreshCardReminders(context: ModelContext) {
+        let accounts = (try? context.fetch(FetchDescriptor<Account>())) ?? []
+        guard accounts.contains(where: { $0.kind == .creditCard && $0.paymentDueReminder }) else { return }
+        Notifier.rescheduleCreditCards(accounts)
     }
 
     // MARK: Duplicates
@@ -375,11 +412,62 @@ enum Ledger {
         let tx = MoneyTransaction(amount: bill.amount, isIncome: false, merchant: bill.name, category: bill.category,
                                   date: .now, source: .bill, accountID: accountID)
         add(tx, context: context, checkDuplicates: false)
-        bill.lastPaidAt = .now
-        var next = bill.frequency.next(after: bill.nextDueDate)
-        while next < Calendar.current.startOfDay(for: .now) { next = bill.frequency.next(after: next) }
-        bill.nextDueDate = next
+        bill.markPaid(date: .now, method: .manual, amount: bill.amount, txID: tx.id)
         try? context.save()
+        let bills = (try? context.fetch(FetchDescriptor<Bill>())) ?? []
+        Notifier.rescheduleBills(bills)
+    }
+
+    /// Automatically matches an incoming expense or SMS payment to an active bill or subscription.
+    /// Matches keywords in SMS (name) and amounts near the bill's amount.
+    @discardableResult
+    static func matchAndPayBillFromSMS(_ tx: MoneyTransaction, context: ModelContext) -> Bill? {
+        guard !tx.isIncome, tx.amount > 0 else { return nil }
+        let bills = (try? context.fetch(FetchDescriptor<Bill>())) ?? []
+        guard !bills.isEmpty else { return nil }
+
+        let merchant = tx.merchant.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let raw = (tx.rawText ?? "").lowercased()
+
+        for bill in bills {
+            if bill.isPaidForCurrentCycle(now: tx.date) { continue }
+
+            let billName = bill.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard !billName.isEmpty else { continue }
+
+            let isNameInMerchant = merchant.contains(billName) || billName.contains(merchant)
+            let isNameInRaw = !raw.isEmpty && raw.contains(billName)
+
+            let ignoredWords: Set<String> = ["the", "bill", "subscription", "monthly", "payment", "fee", "plan", "card", "pay", "services", "bh", "bhd", "app"]
+            let billKeywords = billName.components(separatedBy: CharacterSet.alphanumerics.inverted)
+                .filter { $0.count >= 3 && !ignoredWords.contains($0) }
+
+            let keywordMatch: Bool = {
+                if isNameInMerchant || isNameInRaw { return true }
+                guard !billKeywords.isEmpty else { return false }
+                return billKeywords.contains { kw in
+                    merchant.contains(kw) || (!raw.isEmpty && raw.contains(kw))
+                }
+            }()
+
+            guard keywordMatch else { continue }
+
+            // Amount proximity check: exact or within ±15% (or ±2.0 currency units)
+            let diff = abs(tx.amount - bill.amount)
+            let maxAllowedDiff = max(2.0, bill.amount * 0.15)
+            let isNearAmount = bill.amount <= 0 || diff <= maxAllowedDiff
+
+            guard isNearAmount else { continue }
+
+            bill.markPaid(date: tx.date, method: .autoSMS, amount: tx.amount, txID: tx.id)
+            if tx.category == .bills || tx.category == .other || tx.category == .subscriptions {
+                tx.category = bill.category
+            }
+            try? context.save()
+            Notifier.rescheduleBills(bills)
+            return bill
+        }
+        return nil
     }
 
     static func contribute(to goal: SavingsGoal, amount: Double, fromAccountID: UUID?, context: ModelContext) {

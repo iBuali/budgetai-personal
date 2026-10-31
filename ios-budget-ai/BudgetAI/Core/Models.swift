@@ -31,13 +31,14 @@ struct SpendCategory: Hashable, Identifiable {
     static let subscriptions = SpendCategory(key: "subscriptions")
     static let education = SpendCategory(key: "education")
     static let travel = SpendCategory(key: "travel")
+    static let visaTransfer = SpendCategory(key: "visa_transfer")
     static let internalTransfer = SpendCategory(key: "internal_transfer")
     static let transfers = SpendCategory(key: "transfers")
     static let income = SpendCategory(key: "income")
     static let other = SpendCategory(key: "other")
 
     static let builtIns: [SpendCategory] = [.groceries, .dining, .transport, .shopping, .bills, .housing, .health,
-                                            .entertainment, .subscriptions, .education, .travel, .internalTransfer, .transfers, .income, .other]
+                                            .entertainment, .subscriptions, .education, .travel, .visaTransfer, .internalTransfer, .transfers, .income, .other]
 
     struct Info {
         var title: String
@@ -62,6 +63,7 @@ struct SpendCategory: Hashable, Identifiable {
         "subscriptions": Info(title: "Subscriptions", shortTitle: "Subscriptions", symbol: "play.rectangle.fill", emoji: "", color: Color(hex: 0xF05252), isEssential: false, isIncome: false, parentKey: ""),
         "education": Info(title: "Education", shortTitle: "Education", symbol: "graduationcap.fill", emoji: "", color: Color(hex: 0x0891B2), isEssential: true, isIncome: false, parentKey: ""),
         "travel": Info(title: "Travel", shortTitle: "Travel", symbol: "airplane", emoji: "", color: Color(hex: 0x0EA5E9), isEssential: false, isIncome: false, parentKey: ""),
+        "visa_transfer": Info(title: "Transfer to Visa Card", shortTitle: "Visa Card", symbol: "creditcard.fill", emoji: "", color: Color(hex: 0xF08A24), isEssential: false, isIncome: false, parentKey: ""),
         "internal_transfer": Info(title: "Internal Transfer", shortTitle: "Internal", symbol: "arrow.left.arrow.right.circle.fill", emoji: "", color: Theme.cobalt, isEssential: false, isIncome: false, parentKey: ""),
         "transfers": Info(title: "Transfers", shortTitle: "Transfers", symbol: "arrow.left.arrow.right", emoji: "", color: Color(hex: 0x6B7385), isEssential: false, isIncome: false, parentKey: ""),
         "income": Info(title: "Income", shortTitle: "Income", symbol: "arrow.down", emoji: "", color: Color(hex: 0x2BB673), isEssential: false, isIncome: true, parentKey: ""),
@@ -220,6 +222,12 @@ final class Account {
     var smsMatch: String = ""
     /// Whether this account's balance is included in Net Worth calculations.
     var includeInNetWorth: Bool = true
+    /// Whether to notify the user before the credit card payment due date so they can pay before bank fees apply.
+    var paymentDueReminder: Bool = false
+    /// Next payment due date for a credit card (repeats monthly).
+    var paymentDueDate: Date = Calendar.current.date(byAdding: .day, value: 14, to: .now) ?? .now
+    /// How many days before `paymentDueDate` to send the payment reminder notification.
+    var paymentReminderDaysBefore: Int = 3
 
     init(name: String, kind: AccountKind, institution: String = "", balance: Double, emoji: String = "", includeInNetWorth: Bool = true) {
         self.id = UUID()
@@ -230,11 +238,72 @@ final class Account {
         self.createdAt = Date()
         self.emoji = emoji
         self.includeInNetWorth = includeInNetWorth
+        self.paymentDueDate = Calendar.current.date(byAdding: .day, value: 14, to: .now) ?? .now
     }
 
     var kind: AccountKind {
         get { AccountKind(rawValue: kindRaw) ?? .bank }
         set { kindRaw = newValue.rawValue }
+    }
+
+    /// Returns the next upcoming monthly due date on or after `now` (preserving the chosen day of month).
+    func nextUpcomingDueDate(from now: Date = .now, calendar: Calendar = .current) -> Date {
+        let today = calendar.startOfDay(for: now)
+        let anchorDay = calendar.component(.day, from: paymentDueDate)
+        var candidate = calendar.startOfDay(for: paymentDueDate)
+        if candidate >= today {
+            return candidate
+        }
+        var monthCursor = calendar.date(from: calendar.dateComponents([.year, .month], from: today)) ?? today
+        for _ in 0..<24 {
+            let maxDay = calendar.range(of: .day, in: .month, for: monthCursor)?.upperBound.advanced(by: -1) ?? 28
+            var comps = calendar.dateComponents([.year, .month], from: monthCursor)
+            comps.day = min(max(1, anchorDay), maxDay)
+            if let d = calendar.date(from: comps), d >= today {
+                candidate = d
+                break
+            }
+            monthCursor = calendar.date(byAdding: .month, value: 1, to: monthCursor) ?? monthCursor
+        }
+        return candidate
+    }
+
+    /// Upcoming monthly due dates starting from `nextUpcomingDueDate`, used to schedule notifications across variable-length months.
+    func upcomingDueDates(count: Int = 6, from now: Date = .now, calendar: Calendar = .current) -> [Date] {
+        guard count > 0 else { return [] }
+        let first = nextUpcomingDueDate(from: now, calendar: calendar)
+        let anchorDay = max(calendar.component(.day, from: paymentDueDate), calendar.component(.day, from: first))
+        let baseMonth = calendar.date(from: calendar.dateComponents([.year, .month], from: first)) ?? first
+        var dates: [Date] = []
+        for offset in 0..<count {
+            guard let targetMonth = calendar.date(byAdding: .month, value: offset, to: baseMonth) else { continue }
+            let maxDay = calendar.range(of: .day, in: .month, for: targetMonth)?.upperBound.advanced(by: -1) ?? 28
+            var comps = calendar.dateComponents([.year, .month], from: targetMonth)
+            comps.day = min(max(1, anchorDay), maxDay)
+            if let d = calendar.date(from: comps) {
+                dates.append(d)
+            }
+        }
+        return dates
+    }
+
+    /// When a credit card's balance is paid in full within 20 days before its upcoming due date, move the due date to next month.
+    func advanceDueDateIfPaid(on paymentDate: Date = .now, calendar: Calendar = .current) {
+        guard kind == .creditCard, paymentDueReminder, balance <= 0.0005 else { return }
+        let payDay = calendar.startOfDay(for: paymentDate)
+        let upcoming = nextUpcomingDueDate(from: payDay, calendar: calendar)
+        let daysUntilDue = calendar.dateComponents([.day], from: payDay, to: upcoming).day ?? 99
+        if daysUntilDue >= 0 && daysUntilDue <= 20 {
+            let anchorDay = calendar.component(.day, from: paymentDueDate)
+            if let nextMonth = calendar.date(byAdding: .month, value: 1, to: upcoming) {
+                let maxDay = calendar.range(of: .day, in: .month, for: nextMonth)?.upperBound.advanced(by: -1) ?? 28
+                var comps = calendar.dateComponents([.year, .month], from: nextMonth)
+                comps.day = min(max(1, anchorDay), maxDay)
+                if let advanced = calendar.date(from: comps) {
+                    paymentDueDate = advanced
+                }
+            }
+        }
     }
 }
 
@@ -370,6 +439,8 @@ final class MoneyTransaction {
     var smsRecipientSuffix: String?
     /// Linked savings goal that receives this transfer's amount automatically.
     var goalID: UUID?
+    /// True when `smsBalance` in the SMS represents a credit card's available credit limit rather than a bank deposit balance.
+    var smsBalanceIsCardLimit: Bool = false
 
     init(amount: Double, isIncome: Bool, merchant: String, category: SpendCategory, date: Date = .now,
          note: String = "", source: TxSource = .manual, accountID: UUID? = nil) {
@@ -405,7 +476,7 @@ final class MoneyTransaction {
     }
 
     var effectiveTransactionType: SMSTransactionType {
-        if category == .internalTransfer { return .internalTransfer }
+        if category == .internalTransfer || category == .visaTransfer { return .internalTransfer }
         if let t = smsTransactionType { return t }
         if category == .transfers {
             if toAccountID != nil { return .internalTransfer }
@@ -417,8 +488,12 @@ final class MoneyTransaction {
     /// Most specific category for display (sub-category if set).
     var displayCategory: SpendCategory { subcategory ?? category }
 
+    var isCardLimitBalance: Bool {
+        smsBalanceIsCardLimit || category == .visaTransfer
+    }
+
     var isTransfer: Bool {
-        if category == .internalTransfer || category == .transfers { return true }
+        if category == .internalTransfer || category == .visaTransfer || category == .transfers { return true }
         if let t = smsTransactionType { return t.isTransferType }
         return false
     }
@@ -431,15 +506,60 @@ final class MoneyTransaction {
     var signedAmount: Double { isIncome ? amount : -amount }
 
     var isSpending: Bool {
-        if category == .internalTransfer || category == .transfers { return false }
+        if category == .internalTransfer || category == .visaTransfer || category == .transfers { return false }
         if let t = smsTransactionType { return t.countsAsExpense }
         return !isIncome
     }
 
     var isOrdinaryIncome: Bool {
-        if category == .internalTransfer || category == .transfers { return false }
+        if category == .internalTransfer || category == .visaTransfer || category == .transfers { return false }
         if let t = smsTransactionType { return t.countsAsIncome }
         return isIncome
+    }
+
+    /// Specific review reasons if this SMS transaction needs attention before approval.
+    func reviewReasons(accounts: [Account]) -> [String] {
+        guard source == .sms else { return isPending ? ["Waiting for approval"] : [] }
+        var reasons: [String] = []
+
+        // Unknown bank sender
+        let bankClean = smsBank?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if bankClean == nil || bankClean?.isEmpty == true || bankClean?.lowercased().contains("unknown") == true {
+            reasons.append("Unknown sender bank")
+        }
+
+        // Unmatched account or balance
+        if accountID == nil {
+            reasons.append("Unmatched account")
+        } else if let matchedAcc = accounts.first(where: { $0.id == accountID }) {
+            if let bal = smsBalance, !isCardLimitBalance, !matchedAcc.kind.isLiability {
+                let matchesDirect = abs(matchedAcc.balance - bal) < 0.05
+                let matchesDelta = abs((matchedAcc.balance + (isIncome ? amount : -amount)) - bal) < 0.05
+                if !matchesDirect && !matchesDelta {
+                    reasons.append("Unmatched balance")
+                }
+            }
+        }
+
+        // Uncertain classification
+        if smsConfidence == .low || category == .other || smsTransactionType == .unknown {
+            reasons.append("Uncertain categorization")
+        }
+
+        if reasons.isEmpty && isPending {
+            reasons.append("Waiting for approval")
+        }
+        return reasons
+    }
+
+    /// True if this transaction meets the quarantine criteria (unknown bank, unmatched account/balance, or uncertain).
+    var isUnmatchedOrUncertain: Bool {
+        guard source == .sms else { return isPending }
+        let bankClean = smsBank?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let bankUnknown = bankClean == nil || bankClean?.isEmpty == true || bankClean?.lowercased().contains("unknown") == true
+        let accountUnmatched = accountID == nil
+        let uncertain = smsConfidence == .low || category == .other || smsTransactionType == .unknown
+        return bankUnknown || accountUnmatched || uncertain || isPending
     }
 }
 
@@ -581,6 +701,32 @@ enum BillFrequency: String, CaseIterable, Identifiable {
     }
 }
 
+enum BillPaymentMethod: String, Codable {
+    case autoSMS = "auto_sms"
+    case manual = "manual"
+
+    var title: String {
+        switch self {
+        case .autoSMS: return "Auto-paid via SMS"
+        case .manual: return "Manually paid"
+        }
+    }
+
+    var badgeText: String {
+        switch self {
+        case .autoSMS: return "Auto-paid via SMS"
+        case .manual: return "Manually paid"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .autoSMS: return "sparkles"
+        case .manual: return "checkmark.circle.fill"
+        }
+    }
+}
+
 @Model
 final class Bill {
     var id: UUID = UUID()
@@ -592,6 +738,9 @@ final class Bill {
     var isSubscription: Bool = false
     var remindersOn: Bool = true
     var lastPaidAt: Date?
+    var lastPaidMethodRaw: String?
+    var lastPaidAmount: Double?
+    var lastPaidTxID: UUID?
 
     init(name: String, amount: Double, category: SpendCategory, nextDueDate: Date,
          frequency: BillFrequency = .monthly, isSubscription: Bool = false) {
@@ -615,6 +764,54 @@ final class Bill {
     }
 
     var monthlyCost: Double { amount * frequency.monthlyFactor }
+
+    var lastPaidMethod: BillPaymentMethod? {
+        get { lastPaidMethodRaw.flatMap(BillPaymentMethod.init(rawValue:)) }
+        set { lastPaidMethodRaw = newValue?.rawValue }
+    }
+
+    /// Returns true if this bill has already been paid for the current cycle / period.
+    func isPaidForCurrentCycle(now: Date = .now) -> Bool {
+        guard let lastPaidAt else { return false }
+        let calendar = Calendar.current
+        switch frequency {
+        case .weekly:
+            if let interval = calendar.dateInterval(of: .weekOfYear, for: now) {
+                return interval.contains(lastPaidAt)
+            }
+            return now.timeIntervalSince(lastPaidAt) < 7 * 86400
+        case .monthly:
+            let interval = Cycle.interval(containing: now)
+            return interval.contains(lastPaidAt)
+        case .quarterly:
+            if let interval = calendar.dateInterval(of: .quarter, for: now) {
+                return interval.contains(lastPaidAt)
+            }
+            return now.timeIntervalSince(lastPaidAt) < 90 * 86400
+        case .yearly:
+            if let interval = calendar.dateInterval(of: .year, for: now) {
+                return interval.contains(lastPaidAt)
+            }
+            return now.timeIntervalSince(lastPaidAt) < 365 * 86400
+        }
+    }
+
+    func markPaid(date: Date = .now, method: BillPaymentMethod, amount: Double? = nil, txID: UUID? = nil) {
+        lastPaidAt = date
+        lastPaidMethod = method
+        lastPaidAmount = amount ?? self.amount
+        lastPaidTxID = txID
+        var next = frequency.next(after: nextDueDate)
+        while next <= date { next = frequency.next(after: next) }
+        nextDueDate = next
+    }
+
+    func unmarkPaid() {
+        lastPaidAt = nil
+        lastPaidMethod = nil
+        lastPaidAmount = nil
+        lastPaidTxID = nil
+    }
 }
 
 // MARK: - Net worth history & chat

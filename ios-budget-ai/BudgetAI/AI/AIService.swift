@@ -109,6 +109,8 @@ enum AIService {
         2. Fawri+ is an interbank transfer service in Bahrain. Do NOT classify Fawri+ as ordinary income or ordinary expense. \
         Specifically, "Fawri+ payment BHD..., ref: BIB... was credited to IBAN ending XXXX ... Balance BHD..." is a sender notification \
         meaning the outgoing transfer was credited to the recipient's IBAN -> transactionType="transfer_out", isIncome=false, category="transfers".
+        2b. "Thank you for paying BHD ... for your VISA ... card. Available Bal BHD ..." is a credit card bill payment from the user's bank \
+        account -> transactionType="internal_transfer", isIncome=false, category="visa_transfer". The Available Bal is the card's available limit.
         3. Use transactionType="transfer_in" for incoming bank/Fawri+ transfers, "transfer_out" for outgoing bank/Fawri+ transfers, \
         "internal_transfer" for transfers between the user's own accounts, "fee" for bank fees/charges, "refund" for purchase refunds/reversals, \
         "income" for salary/payroll/dividends, "expense" for card/POS/bill purchases, and "unknown" (with confidence="low") when direction or type is ambiguous.
@@ -126,7 +128,9 @@ enum AIService {
         let isIncome = txType.isIncomeDirection
 
         var category = SpendCategory(rawValue: obj["category"] as? String ?? "") ?? .other
-        if txType.isTransferType {
+        if category == .visaTransfer {
+            // Keep the credit card payment category; it's handled as a transfer to the card.
+        } else if txType.isTransferType {
             category = .transfers
         } else if txType == .income && !category.isIncomeCategory {
             category = .income
@@ -461,10 +465,22 @@ enum SMSImporter {
             guard let ruleAccID = p.accountID, Ledger.account(ruleAccID, context: context) != nil else { return nil }
             return ruleAccID
         }()
-        let target = accountID ?? savedRuleAccount ?? Ledger.smsAccountID(context: context, digits: matchingDigits, hint: resolvedSMSBank)
+        var target = accountID ?? savedRuleAccount ?? Ledger.smsAccountID(context: context, digits: matchingDigits, hint: resolvedSMSBank)
+
+        // Visa / credit card payments come out of a bank account and pay down the card.
+        let isCardPayment = p.category == .visaTransfer
+        if isCardPayment {
+            if p.toAccountID == nil || Ledger.account(p.toAccountID!, context: context) == nil {
+                p.toAccountID = SMSParser.findCreditCardAccount(cardName: nil, in: context)?.id
+            }
+            let targetAccount = target.flatMap { Ledger.account($0, context: context) }
+            if accountID == nil, targetAccount == nil || targetAccount?.kind.isLiquid == false || target == p.toAccountID {
+                target = Ledger.defaultLiquidAccountID(context: context, hint: resolvedSMSBank)
+            }
+        }
 
         // Check if a transfer recipient suffix or destination account matches a linked SavingsGoal
-        if p.goalID == nil,
+        if p.goalID == nil, !isCardPayment,
            (p.transactionType.isTransferType || p.category == .internalTransfer || p.category == .transfers),
            let matchedGoal = SMSParser.findMatchingGoal(suffix: p.recipientSuffix, accountID: p.toAccountID, in: context),
            matchedGoal.linkedAccountID == nil || matchedGoal.linkedAccountID != target {
@@ -534,24 +550,39 @@ enum SMSImporter {
         tx.smsRecipientSuffix = p.recipientSuffix
         tx.toAccountID = p.toAccountID
         tx.goalID = p.goalID
+        tx.smsBalanceIsCardLimit = p.balanceIsCardLimit || isCardPayment
 
-        // Uncertain transactions are ALWAYS marked pending for user review rather than silently applied
-        if p.requiresReview {
+        // Quarantine check:
+        // If an SMS has:
+        // 1. Unknown sender bank
+        // 2. Unmatched account or unmatched account balance
+        // 3. Uncertain classification / low confidence / needs review
+        // -> Quarantine: Keep it in the Needs Review filter and DO NOT include in any accounts until approved!
+        let allAccounts = (try? context.fetch(FetchDescriptor<Account>())) ?? []
+        let bankUnknown = resolvedSMSBank == nil || resolvedSMSBank?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true || resolvedSMSBank?.lowercased().contains("unknown") == true
+        let accountUnmatched = target == nil || (p.accountSuffix != nil && matchingDigits != nil && allAccounts.first(where: { !$0.smsMatch.isEmpty && (matchingDigits!.hasSuffix($0.smsMatch) || $0.smsMatch.hasSuffix(matchingDigits!)) }) == nil)
+        let balanceUnmatched: Bool = {
+            guard let bal = p.balance, let targetID = target, let acc = Ledger.account(targetID, context: context), !p.balanceIsCardLimit, !acc.kind.isLiability else {
+                return target == nil && p.balance != nil
+            }
+            let matchDirect = abs(acc.balance - bal) < 0.05
+            let matchDelta = abs((acc.balance + (p.isIncome ? p.amount : -p.amount)) - bal) < 0.05
+            return !matchDirect && !matchDelta
+        }()
+        let isUncertain = p.confidence == .low || p.requiresReview || p.category == .other || p.transactionType == .unknown
+
+        let mustQuarantine = bankUnknown || accountUnmatched || balanceUnmatched || isUncertain
+
+        if mustQuarantine {
             tx.isPending = true
         } else {
             tx.isPending = !forceApprove && !AppSettings.smsAutoApprove
         }
 
         let code = AppSettings.currency
-        var notes: [String] = []
-        if let rail = p.note, !rail.isEmpty { notes.append(rail) }
-        if let c = p.currency, !c.isEmpty, c.uppercased() != code {
-            notes.append("Original currency: \(c.uppercased())")
-            tx.smsBalance = nil
-        }
-        if !notes.isEmpty {
-            tx.note = notes.joined(separator: " · ")
-        }
+        // Keep the user's note field empty for SMS transactions (do not put SMS reference in it).
+        // The SMS reference is preserved in tx.smsReference.
+        tx.note = ""
 
         let result = Ledger.add(tx, context: context)
         let typeLabel = p.transactionType.title
@@ -564,6 +595,9 @@ enum SMSImporter {
         if result.flaggedDuplicate { summary += " (possible duplicate)" }
         if let goalID = tx.goalID, let linkedGoal = Ledger.goal(goalID, context: context) {
             summary += " · Goal: \(linkedGoal.name) (\(Money.format(linkedGoal.saved, code))/\(Money.format(linkedGoal.target, code)))"
+        }
+        if isCardPayment, let cardID = tx.toAccountID, let card = Ledger.account(cardID, context: context), !tx.isPending {
+            summary += " · \(card.name) owed: \(Money.format(card.balance, code))"
         }
         if let synced = result.balanceSynced { summary += ". Balance matched to bank: \(Money.format(synced, code))" }
         return SMSImportOutcome(

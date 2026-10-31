@@ -287,10 +287,19 @@ struct HomeView: View {
                 let upcoming = Array(f.upcomingBills.prefix(3))
                 if upcoming.isEmpty {
                     NavigationLink(value: HomeRoute.bills) {
-                        HStack {
-                            IconBadge(symbol: "calendar.badge.plus", color: Theme.cobalt)
-                            Text("Add your first bill to get reminders").font(.subheadline).foregroundStyle(Theme.ink)
+                        HStack(spacing: 12) {
+                            if f.bills.isEmpty {
+                                IconBadge(symbol: "calendar.badge.plus", color: Theme.cobalt)
+                                Text("Add your first bill to get reminders").font(.subheadline).foregroundStyle(Theme.ink)
+                            } else {
+                                IconBadge(symbol: "checkmark.seal.fill", color: Theme.positive)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("All bills paid for this month 🎉").font(.subheadline.weight(.semibold)).foregroundStyle(Theme.ink)
+                                    Text("Next cycle starts next month").font(.caption).foregroundStyle(Theme.secondaryInk)
+                                }
+                            }
                             Spacer()
+                            Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(.tertiary)
                         }
                         .padding(14)
                     }
@@ -354,22 +363,84 @@ struct StatTile: View {
 struct BillRow: View {
     let bill: Bill
     let currency: String
+    @State private var animateCheck = false
+
+    private var isPaid: Bool { bill.isPaidForCurrentCycle() }
 
     var body: some View {
         HStack(spacing: 12) {
-            CategoryIcon(category: bill.category)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(bill.name).font(.body.weight(.medium)).foregroundStyle(Theme.ink).lineLimit(1)
-                Text(dueText).font(.subheadline).foregroundStyle(isOverdue ? Theme.negative : Theme.secondaryInk)
+            ZStack {
+                CategoryIcon(category: bill.category)
+                if isPaid {
+                    Circle()
+                        .strokeBorder(Theme.positive, lineWidth: 2)
+                        .background(Circle().fill(Theme.positive.opacity(0.12)))
+                }
             }
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(bill.name)
+                    .font(.body.weight(.medium))
+                    .foregroundStyle(isPaid ? Theme.secondaryInk : Theme.ink)
+                    .lineLimit(1)
+
+                if isPaid {
+                    HStack(spacing: 4) {
+                        Image(systemName: bill.lastPaidMethod == .autoSMS ? "sparkles" : "checkmark.circle.fill")
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(bill.lastPaidMethod == .autoSMS ? Theme.cobalt : Theme.positive)
+
+                        Text("Paid for this month")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Theme.positive)
+
+                        if let method = bill.lastPaidMethod {
+                            Text("· \(method.title)")
+                                .font(.caption2)
+                                .foregroundStyle(Theme.secondaryInk)
+                        }
+                    }
+                } else {
+                    Text(dueText)
+                        .font(.subheadline)
+                        .foregroundStyle(isOverdue ? Theme.negative : Theme.secondaryInk)
+                }
+            }
+
             Spacer()
-            Text(Money.format(bill.amount, currency))
-                .font(.body.weight(.semibold).monospacedDigit())
-                .foregroundStyle(Theme.ink)
-                .animatedNumber(bill.amount)
-            Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(.tertiary)
+
+            VStack(alignment: .trailing, spacing: 2) {
+                Text(Money.format(isPaid ? (bill.lastPaidAmount ?? bill.amount) : bill.amount, currency))
+                    .font(.body.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(isPaid ? Theme.secondaryInk : Theme.ink)
+                    .animatedNumber(bill.amount)
+
+                if isPaid {
+                    HStack(spacing: 3) {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 9, weight: .bold))
+                        Text(bill.lastPaidMethod == .autoSMS ? "Auto" : "Manual")
+                            .font(.system(size: 9, weight: .semibold))
+                    }
+                    .foregroundStyle(bill.lastPaidMethod == .autoSMS ? Theme.cobalt : Theme.positive)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background((bill.lastPaidMethod == .autoSMS ? Theme.cobalt : Theme.positive).opacity(0.12), in: Capsule())
+                    .scaleEffect(animateCheck ? 1.0 : 0.6)
+                    .animation(.spring(response: 0.45, dampingFraction: 0.6), value: animateCheck)
+                }
+            }
+
+            if !isPaid {
+                Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(.tertiary)
+            }
         }
         .contentShape(Rectangle())
+        .onAppear {
+            if isPaid {
+                animateCheck = true
+            }
+        }
     }
 
     private var isOverdue: Bool { bill.nextDueDate < Calendar.current.startOfDay(for: .now) }
