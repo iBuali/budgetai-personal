@@ -542,7 +542,7 @@ final class MoneyTransaction {
         }
 
         // Uncertain classification
-        if smsConfidence == .low || category == .other || smsTransactionType == .unknown {
+        if smsConfidence == .low || smsTransactionType == .unknown {
             reasons.append("Uncertain categorization")
         }
 
@@ -558,7 +558,7 @@ final class MoneyTransaction {
         let bankClean = smsBank?.trimmingCharacters(in: .whitespacesAndNewlines)
         let bankUnknown = bankClean == nil || bankClean?.isEmpty == true || bankClean?.lowercased().contains("unknown") == true
         let accountUnmatched = accountID == nil
-        let uncertain = smsConfidence == .low || category == .other || smsTransactionType == .unknown
+        let uncertain = smsConfidence == .low || smsTransactionType == .unknown
         return bankUnknown || accountUnmatched || uncertain || isPending
     }
 }

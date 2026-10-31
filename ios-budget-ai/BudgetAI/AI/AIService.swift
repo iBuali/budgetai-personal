@@ -569,14 +569,16 @@ enum SMSImporter {
             let matchDelta = abs((acc.balance + (p.isIncome ? p.amount : -p.amount)) - bal) < 0.05
             return !matchDirect && !matchDelta
         }()
-        let isUncertain = p.confidence == .low || p.requiresReview || p.category == .other || p.transactionType == .unknown
+        let isUncertain = p.confidence == .low || p.requiresReview || p.transactionType == .unknown
 
         let mustQuarantine = bankUnknown || accountUnmatched || balanceUnmatched || isUncertain
 
-        if mustQuarantine {
+        if forceApprove {
+            tx.isPending = false
+        } else if mustQuarantine {
             tx.isPending = true
         } else {
-            tx.isPending = !forceApprove && !AppSettings.smsAutoApprove
+            tx.isPending = !AppSettings.smsAutoApprove
         }
 
         let code = AppSettings.currency
