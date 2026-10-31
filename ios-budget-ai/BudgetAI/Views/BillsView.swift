@@ -143,6 +143,7 @@ struct BillEditor: View {
     @Environment(\.dismiss) private var dismiss
     @AppStorage(Keys.currency) private var currency = "BHD"
     @State private var name = ""
+    @State private var keywordsText = ""
     @State private var amountText = ""
     @State private var category: SpendCategory = .bills
     @State private var due = Date()
@@ -160,6 +161,7 @@ struct BillEditor: View {
                             category = g
                             isSubscription = g == .subscriptions
                         }
+                    TextField("SMS keywords (e.g. Batelco, SADAD)", text: $keywordsText)
                     HStack {
                         Text("Amount")
                         Spacer()
@@ -169,6 +171,8 @@ struct BillEditor: View {
                     Picker("Category", selection: $category) {
                         ForEach(SpendCategory.expenseCases) { Label($0.title, systemImage: $0.symbol).tag($0) }
                     }
+                } footer: {
+                    Text("Add keywords from your bank SMS (separated by commas). When an SMS arrives matching these keywords and the amount, the bill is automatically marked as paid.")
                 }
                 Section {
                     DatePicker("Next due", selection: $due, displayedComponents: .date)
@@ -201,6 +205,7 @@ struct BillEditor: View {
             .onAppear {
                 guard let bill else { return }
                 name = bill.name
+                keywordsText = bill.keywordsRaw
                 amountText = Money.number(bill.amount, decimals: Money.digits(currency)).replacingOccurrences(of: ",", with: "")
                 category = bill.category
                 due = bill.nextDueDate
@@ -219,6 +224,7 @@ struct BillEditor: View {
             return b
         }()
         target.name = name.trimmingCharacters(in: .whitespaces)
+        target.keywordsRaw = keywordsText.trimmingCharacters(in: .whitespacesAndNewlines)
         target.amount = amount
         target.category = category
         target.nextDueDate = due

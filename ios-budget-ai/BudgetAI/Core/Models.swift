@@ -741,9 +741,11 @@ final class Bill {
     var lastPaidMethodRaw: String?
     var lastPaidAmount: Double?
     var lastPaidTxID: UUID?
+    /// Comma-separated custom keywords to match in incoming bank SMS (e.g. "Batelco, Fiber, SADAD").
+    var keywordsRaw: String = ""
 
     init(name: String, amount: Double, category: SpendCategory, nextDueDate: Date,
-         frequency: BillFrequency = .monthly, isSubscription: Bool = false) {
+         frequency: BillFrequency = .monthly, isSubscription: Bool = false, keywords: String = "") {
         self.id = UUID()
         self.name = name
         self.amount = amount
@@ -751,6 +753,18 @@ final class Bill {
         self.nextDueDate = nextDueDate
         self.frequencyRaw = frequency.rawValue
         self.isSubscription = isSubscription
+        self.keywordsRaw = keywords
+    }
+
+    var keywords: [String] {
+        get {
+            keywordsRaw.split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+        }
+        set {
+            keywordsRaw = newValue.joined(separator: ", ")
+        }
     }
 
     var category: SpendCategory {

@@ -505,4 +505,27 @@ struct BudgetAITests {
         #expect(tx.isPending == false)
         #expect(abs(acc.balance - 187.500) < 0.0001)
     }
+
+    @Test func billCustomKeywordsMatching() throws {
+        let context = makeCleanContext()
+        let cal = Calendar.current
+        let dueDate = cal.date(from: DateComponents(year: 2026, month: 10, day: 25))!
+        // Bill named "Home Internet" with custom keywords "Fiber, Batelco, SADAD"
+        let bill = Bill(name: "Home Internet", amount: 16.500, category: .bills, nextDueDate: dueDate, frequency: .monthly, keywords: "Fiber, Batelco, SADAD")
+        context.insert(bill)
+        try context.save()
+
+        #expect(bill.keywords.count == 3)
+        #expect(bill.keywords.contains("Batelco"))
+
+        // SMS mentions "Fiber" and "SADAD" while bill name is "Home Internet"
+        let tx = MoneyTransaction(amount: 16.500, isIncome: false, merchant: "SADAD PAYMENT", category: .bills, date: .now, source: .sms)
+        tx.rawText = "Dear customer, payment of BD 16.500 via SADAD for Fiber bill was processed."
+
+        let matched = Ledger.matchAndPayBillFromSMS(tx, context: context)
+        #expect(matched != nil)
+        #expect(matched?.id == bill.id)
+        #expect(bill.isPaidForCurrentCycle() == true)
+        #expect(bill.lastPaidMethod == .autoSMS)
+    }
 }

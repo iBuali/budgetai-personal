@@ -435,6 +435,14 @@ enum Ledger {
             let billName = bill.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             guard !billName.isEmpty else { continue }
 
+            // 1. Check user's custom keywords (highest priority)
+            let customMatch = bill.keywords.contains { kw in
+                let cleanKw = kw.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !cleanKw.isEmpty else { return false }
+                return merchant.contains(cleanKw) || (!raw.isEmpty && raw.contains(cleanKw)) || (tx.smsReference?.lowercased().contains(cleanKw) ?? false)
+            }
+
+            // 2. Keyword matching on bill name
             let isNameInMerchant = merchant.contains(billName) || billName.contains(merchant)
             let isNameInRaw = !raw.isEmpty && raw.contains(billName)
 
@@ -443,6 +451,7 @@ enum Ledger {
                 .filter { $0.count >= 3 && !ignoredWords.contains($0) }
 
             let keywordMatch: Bool = {
+                if customMatch { return true }
                 if isNameInMerchant || isNameInRaw { return true }
                 guard !billKeywords.isEmpty else { return false }
                 return billKeywords.contains { kw in
