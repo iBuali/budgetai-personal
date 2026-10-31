@@ -573,12 +573,10 @@ enum SMSImporter {
 
         let mustQuarantine = bankUnknown || accountUnmatched || balanceUnmatched || isUncertain
 
-        if forceApprove {
-            tx.isPending = false
-        } else if mustQuarantine {
+        if mustQuarantine {
             tx.isPending = true
         } else {
-            tx.isPending = !AppSettings.smsAutoApprove
+            tx.isPending = !forceApprove && !AppSettings.smsAutoApprove
         }
 
         let code = AppSettings.currency
