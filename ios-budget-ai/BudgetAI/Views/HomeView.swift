@@ -29,8 +29,8 @@ struct HomeView: View {
                     spendingCard(f)
                     statTiles(f)
                     safeCard(f)
+                    cashAndBankCard(f)
                     duplicatesBanner
-                    netWorthCard(f)
                     billsSection(f)
                 }
                 .padding(.horizontal, 16)
@@ -75,7 +75,13 @@ struct HomeView: View {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(greeting).font(.title2.bold()).foregroundStyle(Theme.ink)
-                    Text("Net worth").font(.body).foregroundStyle(Theme.secondaryInk)
+                    NavigationLink(value: HomeRoute.netWorth) {
+                        HStack(spacing: 4) {
+                            Text("Net worth").font(.body).foregroundStyle(Theme.secondaryInk)
+                            Image(systemName: "chevron.right").font(.caption2.weight(.semibold)).foregroundStyle(Theme.secondaryInk)
+                        }
+                    }
+                    .buttonStyle(.plain)
                 }
                 Spacer()
                 Button { appState.tab = .profile } label: {
@@ -259,27 +265,30 @@ struct HomeView: View {
         }
     }
 
-    private func netWorthCard(_ f: Finance) -> some View {
+    private func cashAndBankCard(_ f: Finance) -> some View {
         NavigationLink(value: HomeRoute.netWorth) {
             HStack(spacing: 12) {
                 IconBadge(symbol: "building.columns.fill", color: Theme.cobalt)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Net worth").font(.subheadline).foregroundStyle(Theme.secondaryInk)
-                    Text(Money.format(f.netWorth, currency))
+                    Text("Cash and bank").font(.subheadline).foregroundStyle(Theme.secondaryInk)
+                    Text(Money.format(f.totalAssets, currency))
                         .font(.headline.monospacedDigit())
-                        .foregroundStyle(f.netWorth < 0 ? Theme.negative : Theme.ink)
-                        .animatedNumber(f.netWorth)
+                        .foregroundStyle(Theme.ink)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                        .animatedNumber(f.totalAssets)
                 }
                 Spacer()
                 VStack(alignment: .trailing, spacing: 2) {
-                    Text("Assets \(Money.short(f.totalAssets))")
+                    Text("Total assets")
                         .font(.caption)
-                        .foregroundStyle(Theme.positive)
-                        .animatedNumber(f.totalAssets)
-                    Text("Debts \(Money.short(f.totalLiabilities))")
-                        .font(.caption)
-                        .foregroundStyle(Theme.negative)
-                        .animatedNumber(f.totalLiabilities)
+                        .foregroundStyle(Theme.secondaryInk)
+                    if f.totalLiabilities > 0 {
+                        Text("Debts \(Money.short(f.totalLiabilities))")
+                            .font(.caption)
+                            .foregroundStyle(Theme.negative)
+                            .animatedNumber(f.totalLiabilities)
+                    }
                 }
                 .monospacedDigit()
                 Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(.tertiary)

@@ -545,4 +545,19 @@ struct BudgetAITests {
         #expect(tx.isPending == false)
         #expect(tx.smsBank == "BisB")
     }
+
+    @Test func safeToSpendSubtractsLiabilities() throws {
+        let bank = Account(name: "Checking", kind: .bank, balance: 1000.0)
+        let loan = Account(name: "Car Loan", kind: .loan, balance: 200.0)
+        let bill = Bill(name: "Internet", amount: 50.0, frequency: .monthly, nextDueDate: .now.addingTimeInterval(86400 * 2))
+        let f = Finance(transactions: [], accounts: [bank, loan], bills: [bill])
+
+        let safe = f.safeToSpend
+        #expect(safe.spendable == 1000.0)
+        #expect(safe.billsDue == 50.0)
+        #expect(safe.liabilities == 200.0)
+        // monthly = max(0, 1000 - 50 - 0 - 0 - 200) = 750.0
+        #expect(safe.monthly == 750.0)
+        #expect(safe.isShort == false)
+    }
 }

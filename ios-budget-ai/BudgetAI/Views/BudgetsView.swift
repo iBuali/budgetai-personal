@@ -786,6 +786,7 @@ struct SafeToSpendView: View {
                 row("Upcoming bills", "Due before month end", s.billsDue, symbol: "calendar", color: Theme.warning, sign: -1)
                 row("Essential spending", "Left in essential budgets", s.essentials, symbol: "cart.fill", color: Color(hex: 0x22A565), sign: -1)
                 row("Savings commitments", "Still to set aside this month", s.savings, symbol: "banknote.fill", color: Color(hex: 0x8B5CF6), sign: -1)
+                row("Loans & liabilities", "Outstanding debt and loans", s.liabilities, symbol: "creditcard.trianglebadge.exclamationmark", color: Theme.negative, sign: -1)
                 LabeledContent {
                     Text(Money.format(s.monthly, currency))
                         .font(.headline.monospacedDigit())
@@ -803,7 +804,7 @@ struct SafeToSpendView: View {
                 Text("How it's calculated")
             } footer: {
                 Text(s.isShort
-                     ? "Your commitments are higher than your spendable balance. Consider pausing a savings goal or moving money from savings."
+                     ? "Your commitments and liabilities are higher than your spendable balance. Consider pausing a savings goal or moving money from savings."
                      : "Divided evenly across the \(s.daysLeft) days left this month. Spend less today and tomorrow's amount grows.")
             }
 
@@ -825,7 +826,7 @@ struct SafeToSpendView: View {
                 }
             }
 
-            let liabilities = accounts.filter { $0.kind.isLiability && $0.balance > 0 }
+            let liabilities = accounts.filter { $0.includeInNetWorth && $0.kind.isLiability && $0.balance > 0 }
             if !liabilities.isEmpty {
                 Section("Loans & liabilities") {
                     ForEach(liabilities) { acc in

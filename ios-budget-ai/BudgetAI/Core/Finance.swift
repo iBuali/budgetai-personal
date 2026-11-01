@@ -11,11 +11,12 @@ struct SafeToSpend {
     let billsDue: Double
     let essentials: Double
     let savings: Double
+    var liabilities: Double = 0
     let daysLeft: Int
 
-    var monthly: Double { max(0, spendable - billsDue - essentials - savings) }
+    var monthly: Double { max(0, spendable - billsDue - essentials - savings - liabilities) }
     var daily: Double { daysLeft > 0 ? monthly / Double(daysLeft) : monthly }
-    var isShort: Bool { spendable - billsDue - essentials - savings < 0 }
+    var isShort: Bool { spendable - billsDue - essentials - savings - liabilities < 0 }
 }
 
 struct MonthTotal: Identifiable {
@@ -151,7 +152,7 @@ struct Finance {
 
     var safeToSpend: SafeToSpend {
         SafeToSpend(spendable: liquidBalance, billsDue: billsDueRestOfMonth, essentials: essentialsRemaining,
-                    savings: savingsRemaining, daysLeft: daysLeftInMonth)
+                    savings: savingsRemaining, liabilities: totalLiabilities, daysLeft: daysLeftInMonth)
     }
 
     // MARK: Forecast
