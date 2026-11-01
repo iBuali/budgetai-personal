@@ -119,7 +119,9 @@ struct CategoryEditor: View {
         case .editBuiltIn(let key):
             return key
         case .edit(let id):
-            return custom.first { $0.id == id }?.key.flatMap { SpendCategory.builtInInfo[$0] != nil ? $0 : nil }
+            guard let key = custom.first(where: { $0.id == id })?.key,
+                  SpendCategory.builtInInfo[key] != nil else { return nil }
+            return key
         case .new:
             return nil
         }
