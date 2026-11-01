@@ -191,18 +191,30 @@ struct HomeView: View {
                 }
                 .frame(width: 86, height: 86)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Safe to spend today").font(.headline).foregroundStyle(Theme.ink)
+                    Text("Safe to spend today")
+                        .font(.headline)
+                        .foregroundStyle(Theme.ink)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
                     Text(Money.format(safe.daily, currency))
                         .font(.title2.bold().monospacedDigit())
                         .foregroundStyle(safe.isShort ? Theme.negative : Theme.cobalt)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                        .layoutPriority(1)
                         .animatedNumber(safe.daily)
                     if f.totalBudget > 0 {
                         Text("Budget left \(Money.format(f.budgetLeft, currency)) of \(Money.number(f.totalBudget, decimals: Money.digits(currency)))")
                             .font(.subheadline.monospacedDigit())
                             .foregroundStyle(Theme.secondaryInk)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
                             .animatedNumber(f.budgetLeft)
                     } else {
-                        Text("Set budgets to protect essentials").font(.subheadline).foregroundStyle(Theme.secondaryInk)
+                        Text("Set budgets to protect essentials")
+                            .font(.subheadline)
+                            .foregroundStyle(Theme.secondaryInk)
+                            .lineLimit(1)
                     }
                 }
                 Spacer(minLength: 0)

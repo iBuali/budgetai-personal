@@ -79,17 +79,27 @@ struct NetWorthView: View {
             }
 
             Section {
-                LabeledContent("Assets") {
+                LabeledContent {
                     Text(Money.format(f.totalAssets, currency))
                         .monospacedDigit()
                         .foregroundStyle(Theme.positive)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                        .layoutPriority(1)
                         .animatedNumber(f.totalAssets)
+                } label: {
+                    Text("Assets")
                 }
-                LabeledContent("Liabilities") {
+                LabeledContent {
                     Text(Money.format(f.totalLiabilities, currency))
                         .monospacedDigit()
                         .foregroundStyle(Theme.negative)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                        .layoutPriority(1)
                         .animatedNumber(f.totalLiabilities)
+                } label: {
+                    Text("Liabilities")
                 }
             }
 
@@ -119,7 +129,10 @@ struct NetWorthView: View {
             HStack(spacing: 12) {
                 AccountIcon(account: account, size: 40)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(account.name).foregroundStyle(Theme.ink)
+                    Text(account.name)
+                        .foregroundStyle(Theme.ink)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
                     let baseSubtitle = account.institution.isEmpty ? account.kind.title : "\(account.kind.title) · \(account.institution)"
                     let dueSubtitle = account.kind == .creditCard && account.paymentDueReminder
                         ? "\(baseSubtitle) · Due \(account.nextUpcomingDueDate().formatted(.dateTime.day().month(.abbreviated)))"
@@ -127,12 +140,17 @@ struct NetWorthView: View {
                     Text(account.includeInNetWorth ? dueSubtitle : "\(dueSubtitle) · Excluded from net worth")
                         .font(.caption)
                         .foregroundStyle(Theme.secondaryInk)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
                 }
-                Spacer()
+                Spacer(minLength: 8)
                 let signedBalance = account.kind.isLiability ? -account.balance : account.balance
                 Text(Money.format(signedBalance, currency))
                     .font(.body.weight(.medium).monospacedDigit())
                     .foregroundStyle(!account.includeInNetWorth ? Theme.secondaryInk : (account.kind.isLiability ? Theme.negative : Theme.ink))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                    .layoutPriority(1)
                     .animatedNumber(signedBalance)
             }
         }

@@ -766,10 +766,14 @@ struct SafeToSpendView: View {
                     Text(Money.format(s.daily, currency))
                         .font(.system(size: 46, weight: .bold).monospacedDigit())
                         .foregroundStyle(s.isShort ? Theme.negative : Theme.cobalt)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.65)
                         .animatedNumber(s.daily)
                     Text("\(Money.format(s.monthly, currency)) for the next \(s.daysLeft) day\(s.daysLeft == 1 ? "" : "s")")
                         .font(.subheadline.monospacedDigit())
                         .foregroundStyle(Theme.secondaryInk)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
                         .animatedNumber(s.monthly)
                 }
                 .frame(maxWidth: .infinity)
@@ -786,9 +790,14 @@ struct SafeToSpendView: View {
                     Text(Money.format(s.monthly, currency))
                         .font(.headline.monospacedDigit())
                         .foregroundStyle(Theme.ink)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                        .layoutPriority(1)
                         .animatedNumber(s.monthly)
                 } label: {
                     Text("Safe this month").font(.headline)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
                 }
             } header: {
                 Text("How it's calculated")
@@ -801,8 +810,42 @@ struct SafeToSpendView: View {
             if !bills.isEmpty {
                 Section("Bills counted") {
                     ForEach(f.upcomingBills.filter { $0.nextDueDate < f.thisMonth.end }) { bill in
-                        LabeledContent(bill.name) {
-                            Text(Money.format(bill.amount, currency)).monospacedDigit()
+                        LabeledContent {
+                            Text(Money.format(bill.amount, currency))
+                                .monospacedDigit()
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.75)
+                                .layoutPriority(1)
+                        } label: {
+                            Text(bill.name)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.85)
+                        }
+                    }
+                }
+            }
+
+            let liabilities = accounts.filter { $0.kind.isLiability && $0.balance > 0 }
+            if !liabilities.isEmpty {
+                Section("Loans & liabilities") {
+                    ForEach(liabilities) { acc in
+                        LabeledContent {
+                            Text(Money.format(-acc.balance, currency, signed: true))
+                                .font(.body.monospacedDigit())
+                                .foregroundStyle(Theme.negative)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.75)
+                                .layoutPriority(1)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(acc.name)
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.85)
+                                Text(acc.institution.isEmpty ? acc.kind.title : "\(acc.kind.title) · \(acc.institution)")
+                                    .font(.caption2)
+                                    .foregroundStyle(Theme.secondaryInk)
+                                    .lineLimit(1)
+                            }
                         }
                     }
                 }
@@ -819,13 +862,23 @@ struct SafeToSpendView: View {
         HStack(spacing: 12) {
             IconBadge(symbol: symbol, color: color, size: 38)
             VStack(alignment: .leading, spacing: 2) {
-                Text(title).foregroundStyle(Theme.ink)
-                Text(subtitle).font(.caption).foregroundStyle(Theme.secondaryInk)
+                Text(title)
+                    .foregroundStyle(Theme.ink)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(Theme.secondaryInk)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
             }
-            Spacer()
+            Spacer(minLength: 8)
             Text(Money.format(value * sign, currency, signed: sign > 0))
                 .font(.body.weight(.medium).monospacedDigit())
                 .foregroundStyle(sign > 0 ? Theme.positive : Theme.ink)
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+                .layoutPriority(1)
                 .animatedNumber(value * sign)
         }
     }
