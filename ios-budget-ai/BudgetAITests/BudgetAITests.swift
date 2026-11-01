@@ -446,12 +446,13 @@ struct BudgetAITests {
     @Test func autoMarkBillPaidFromSMSAndHoldCycle() throws {
         let context = makeCleanContext()
         let cal = Calendar.current
-        let dueDate = cal.date(from: DateComponents(year: 2026, month: 10, day: 25))!
+        let currentCycle = Cycle.interval(containing: .now)
+        let dueDate = currentCycle.start.addingTimeInterval(86400 * 5)
         let bill = Bill(name: "Batelco Fiber", amount: 15.000, category: .bills, nextDueDate: dueDate, frequency: .monthly)
         context.insert(bill)
         try context.save()
 
-        #expect(bill.isPaidForCurrentCycle() == false)
+        #expect(bill.isPaidForCurrentCycle(now: .now) == false)
 
         // Incoming expense matching keyword "Batelco" and amount 15.000
         let tx = MoneyTransaction(amount: 15.000, isIncome: false, merchant: "Batelco Online", category: .bills, date: .now, source: .sms)
@@ -460,25 +461,26 @@ struct BudgetAITests {
         let matched = Ledger.matchAndPayBillFromSMS(tx, context: context)
         #expect(matched != nil)
         #expect(matched?.id == bill.id)
-        #expect(bill.isPaidForCurrentCycle() == true)
+        #expect(bill.isPaidForCurrentCycle(now: .now) == true)
         #expect(bill.lastPaidMethod == .autoSMS)
         #expect(bill.lastPaidAmount == 15.000)
 
-        // nextDueDate advanced to November
-        let nextMonth = cal.component(.month, from: bill.nextDueDate)
-        #expect(nextMonth == 11)
+        // nextDueDate advanced to next month cycle
+        let nextDueDateMonth = cal.component(.month, from: bill.nextDueDate)
+        let expectedNextMonth = cal.component(.month, from: cal.date(byAdding: .month, value: 1, to: dueDate) ?? dueDate)
+        #expect(nextDueDateMonth == expectedNextMonth)
 
-        // Finance upcomingBills excludes this paid bill during the current month
+        // Finance upcomingBills excludes this paid bill during the current cycle
         let f = Finance(transactions: [tx], accounts: [], budgets: [], goals: [], bills: [bill], now: .now)
         #expect(f.upcomingBills.isEmpty)
         #expect(f.billsDueRestOfMonth == 0)
 
-        // When evaluating next month (November 1), it becomes due again
-        let novDate = cal.date(from: DateComponents(year: 2026, month: 11, day: 1))!
-        #expect(bill.isPaidForCurrentCycle(now: novDate) == false)
-        let fNov = Finance(transactions: [], accounts: [], budgets: [], goals: [], bills: [bill], now: novDate)
-        #expect(fNov.upcomingBills.count == 1)
-        #expect(fNov.upcomingBills.first?.id == bill.id)
+        // When evaluating next cycle, it becomes due again
+        let nextCycleDate = currentCycle.end.addingTimeInterval(86400 * 2)
+        #expect(bill.isPaidForCurrentCycle(now: nextCycleDate) == false)
+        let fNext = Finance(transactions: [], accounts: [], budgets: [], goals: [], bills: [bill], now: nextCycleDate)
+        #expect(fNext.upcomingBills.count == 1)
+        #expect(fNext.upcomingBills.first?.id == bill.id)
     }
 
     @Test func smsNoteFieldIsEmptyAndUncertainQuarantined() async throws {
