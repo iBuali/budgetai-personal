@@ -2,7 +2,7 @@ import SwiftUI
 import SwiftData
 
 enum TxFilter: String, CaseIterable, Identifiable {
-    case all = "All", review = "Needs Review", income = "Income", expenses = "Expenses", transfers = "Transfers"
+    case all = "All", income = "Income", expenses = "Expenses", transfers = "Transfers", review = "Needs Review"
     var id: String { rawValue }
 }
 
@@ -134,26 +134,41 @@ struct TransactionsView: View {
                     }
                 }
 
-                if !pending.isEmpty && query.isEmpty && filters.kind != .review {
-                    pendingSection
-                }
-
                 if filters.kind == .review {
-                    Section {
-                        HStack(spacing: 12) {
-                            Image(systemName: "shield.lefthalf.filled.badge.checkmark")
-                                .font(.title2)
-                                .foregroundStyle(Theme.warning)
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text("Quarantined for Review")
-                                    .font(.headline)
-                                    .foregroundStyle(Theme.ink)
-                                Text("These transactions have an unmatched balance, unknown bank sender, or need your review. They are NOT included in any account balances until approved.")
-                                    .font(.caption)
+                    if filtered.isEmpty {
+                        Section {
+                            HStack(spacing: 12) {
+                                Image(systemName: "shield.lefthalf.filled.badge.checkmark")
+                                    .font(.title2)
+                                    .foregroundStyle(Theme.warning)
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text("Quarantined for Review")
+                                        .font(.headline)
+                                        .foregroundStyle(Theme.ink)
+                                    Text("Transactions needing review or with unknown bank senders appear here. Not included in balances until approved.")
+                                        .font(.caption)
+                                        .foregroundStyle(Theme.secondaryInk)
+                                }
+                            }
+                            .padding(.vertical, 4)
+                        }
+                    } else {
+                        Section {
+                            HStack {
+                                Text("\(filtered.count) pending approval")
+                                    .font(.subheadline)
                                     .foregroundStyle(Theme.secondaryInk)
+                                Spacer()
+                                Button("Approve all") {
+                                    let items = filtered
+                                    withAnimation { _ = Ledger.approveAll(items, context: context) }
+                                    approvedTick += 1
+                                    appState.show("Approved \(items.count) transaction\(items.count == 1 ? "" : "s")")
+                                }
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(Theme.cobalt)
                             }
                         }
-                        .padding(.vertical, 4)
                     }
                 }
 
@@ -177,7 +192,7 @@ struct TransactionsView: View {
                 }
             }
             .overlay {
-                if mode == .list && filtered.isEmpty && pending.isEmpty {
+                if mode == .list && filtered.isEmpty && filters.kind != .review {
                     if transactions.isEmpty {
                         ContentUnavailableView {
                             Label("No transactions yet", systemImage: "list.bullet.rectangle")
@@ -782,16 +797,18 @@ struct TransactionDetailView: View {
             if tx.isPending {
                 Section {
                     let reasons = tx.reviewReasons(accounts: accounts)
-                    VStack(alignment: .leading, spacing: 6) {
-                        Label("Waiting for approval — not included in any account balances.", systemImage: "shield.lefthalf.filled.badge.checkmark")
+                    VStack(alignment: .leading, spacing: 4) {
+                        Label("Waiting for approval", systemImage: "clock.fill")
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(Theme.warning)
                         if !reasons.isEmpty {
-                            ForEach(reasons, id: \.self) { r in
-                                Text("• \(r)")
-                                    .font(.caption)
-                                    .foregroundStyle(Theme.secondaryInk)
-                            }
+                            Text(reasons.joined(separator: " · "))
+                                .font(.caption)
+                                .foregroundStyle(Theme.secondaryInk)
+                        } else {
+                            Text("Not included in account balances until approved.")
+                                .font(.caption)
+                                .foregroundStyle(Theme.secondaryInk)
                         }
                     }
                     .padding(.vertical, 2)

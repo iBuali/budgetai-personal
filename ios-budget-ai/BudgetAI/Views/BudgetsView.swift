@@ -145,16 +145,18 @@ struct BudgetsView: View {
                                     .scaleEffect(isExpanded ? 1.04 : 1.0)
                                     .animation(.spring(response: 0.35, dampingFraction: 0.7), value: isExpanded)
                                 VStack(alignment: .leading, spacing: 6) {
-                                    HStack {
+                                    HStack(alignment: .top) {
                                         VStack(alignment: .leading, spacing: 2) {
                                             Text(budget.displayName)
                                                 .font(.body.weight(.semibold))
                                                 .foregroundStyle(Theme.ink)
+                                                .lineLimit(1)
+                                                .minimumScaleFactor(0.85)
                                             Text("\(cats.count) categor\(cats.count == 1 ? "y" : "ies")")
                                                 .font(.caption2)
                                                 .foregroundStyle(Theme.secondaryInk)
                                         }
-                                        Spacer()
+                                        Spacer(minLength: 8)
                                         HStack(spacing: 0) {
                                             Text(Money.format(spent, currency, decimals: 0))
                                                 .fontWeight(.semibold)
@@ -163,13 +165,14 @@ struct BudgetsView: View {
                                             Text(" / \(Money.number(budget.limit, decimals: 0))")
                                                 .foregroundStyle(Theme.secondaryInk)
                                                 .animatedNumber(budget.limit)
-                                            if ratio >= 0.8 {
-                                                Text(" · \(pct)%")
-                                                    .foregroundStyle(ratio >= 1 ? Theme.negative : Theme.secondaryInk)
-                                                    .animatedNumber(Double(pct))
-                                            }
+                                            Text(" · \(pct)%")
+                                                .foregroundStyle(ratio >= 1 ? Theme.negative : (ratio >= 0.8 ? Theme.warning : Theme.secondaryInk))
+                                                .animatedNumber(Double(pct))
                                         }
                                         .font(.footnote.monospacedDigit())
+                                        .lineLimit(1)
+                                        .minimumScaleFactor(0.75)
+                                        .layoutPriority(1)
                                     }
                                     ProgressBar(progress: ratio, color: ratio >= 0.9 ? Theme.negative : (ratio >= 0.8 ? Theme.warning : Theme.cobalt))
                                 }
@@ -257,34 +260,90 @@ struct BudgetsView: View {
                 let linkedSuffix = !goal.smsMatch.trimmingCharacters(in: .whitespaces).isEmpty
                     ? goal.smsMatch.trimmingCharacters(in: .whitespaces)
                     : (linkedAcc.flatMap { !$0.smsMatch.trimmingCharacters(in: .whitespaces).isEmpty ? $0.smsMatch.trimmingCharacters(in: .whitespaces) : nil })
+                let hasCommitment = goal.monthlyCommitment > 0
+                let monthlyPaid = goal.contributedThisMonth(now: .now)
+                let monthlyRatio = hasCommitment ? min(monthlyPaid / goal.monthlyCommitment, 1.0) : goal.progress
+                let monthlyPct = hasCommitment ? Int((monthlyPaid / goal.monthlyCommitment) * 100) : Int(goal.progress * 100)
+
                 Button { editingGoal = goal } label: {
                     HStack(spacing: 12) {
-                        IconBadge(symbol: goal.symbol, color: goal.isComplete ? Theme.positive : Theme.cobalt)
+                        IconBadge(symbol: goal.symbol, color: (hasCommitment && monthlyPaid >= goal.monthlyCommitment) || goal.isComplete ? Theme.positive : Theme.cobalt)
                         VStack(alignment: .leading, spacing: 6) {
-                            HStack(spacing: 6) {
-                                Text(goal.name).font(.body.weight(.medium)).foregroundStyle(Theme.ink)
-                                if linkedAcc != nil || linkedSuffix != nil {
-                                    Label(
-                                        linkedSuffix.map { "••\($0)" } ?? (linkedAcc?.name ?? "Linked"),
-                                        systemImage: "link"
-                                    )
-                                    .font(.caption2.weight(.semibold))
-                                    .foregroundStyle(Theme.cobalt)
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 2)
-                                    .background(Theme.cobalt.opacity(0.12), in: Capsule())
+                            HStack(alignment: .top) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    HStack(spacing: 6) {
+                                        Text(goal.name)
+                                            .font(.body.weight(.semibold))
+                                            .foregroundStyle(Theme.ink)
+                                            .lineLimit(1)
+                                            .minimumScaleFactor(0.85)
+                                        if linkedAcc != nil || linkedSuffix != nil {
+                                            Label(
+                                                linkedSuffix.map { "••\($0)" } ?? (linkedAcc?.name ?? "Linked"),
+                                                systemImage: "link"
+                                            )
+                                            .font(.caption2.weight(.semibold))
+                                            .foregroundStyle(Theme.cobalt)
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 2)
+                                            .background(Theme.cobalt.opacity(0.12), in: Capsule())
+                                        }
+                                    }
+                                    if hasCommitment {
+                                        Text("Total: \(Money.format(goal.saved, currency, decimals: 0)) / \(Money.number(goal.target, decimals: 0))")
+                                            .font(.caption2)
+                                            .foregroundStyle(Theme.secondaryInk)
+                                    } else {
+                                        Text("Target: \(goal.targetDate.formatted(.dateTime.month(.abbreviated).year()))")
+                                            .font(.caption2)
+                                            .foregroundStyle(Theme.secondaryInk)
+                                    }
+                                }
+                                Spacer(minLength: 8)
+                                HStack(spacing: 0) {
+                                    if hasCommitment {
+                                        Text(Money.format(monthlyPaid, currency, decimals: 0))
+                                            .fontWeight(.semibold)
+                                            .foregroundStyle(Theme.ink)
+                                            .animatedNumber(monthlyPaid)
+                                        Text(" / \(Money.number(goal.monthlyCommitment, decimals: 0))")
+                                            .foregroundStyle(Theme.secondaryInk)
+                                            .animatedNumber(goal.monthlyCommitment)
+                                        Text(" · \(monthlyPct)%")
+                                            .foregroundStyle(monthlyPaid >= goal.monthlyCommitment ? Theme.positive : Theme.secondaryInk)
+                                            .animatedNumber(Double(monthlyPct))
+                                    } else {
+                                        Text(Money.format(goal.saved, currency, decimals: 0))
+                                            .fontWeight(.semibold)
+                                            .foregroundStyle(Theme.ink)
+                                            .animatedNumber(goal.saved)
+                                        Text(" / \(Money.number(goal.target, decimals: 0))")
+                                            .foregroundStyle(Theme.secondaryInk)
+                                            .animatedNumber(goal.target)
+                                        Text(" · \(monthlyPct)%")
+                                            .foregroundStyle(goal.isComplete ? Theme.positive : Theme.secondaryInk)
+                                            .animatedNumber(Double(monthlyPct))
+                                    }
+                                }
+                                .font(.footnote.monospacedDigit())
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.75)
+                                .layoutPriority(1)
+                            }
+
+                            ProgressBar(
+                                progress: hasCommitment ? monthlyRatio : goal.progress,
+                                color: (hasCommitment && monthlyPaid >= goal.monthlyCommitment) || goal.isComplete ? Theme.positive : Theme.cobalt
+                            )
+
+                            if hasCommitment && monthlyPaid >= goal.monthlyCommitment {
+                                HStack {
+                                    Label("Monthly commitment paid", systemImage: "checkmark.circle.fill")
+                                        .font(.caption2.weight(.medium))
+                                        .foregroundStyle(Theme.positive)
+                                    Spacer()
                                 }
                             }
-                            HStack(spacing: 0) {
-                                Text(Money.format(goal.saved, currency, decimals: 0))
-                                    .animatedNumber(goal.saved)
-                                Text(" / \(Money.number(goal.target, decimals: 0))")
-                                    .animatedNumber(goal.target)
-                                Text(" · \(goal.targetDate.formatted(.dateTime.month(.abbreviated).year()))")
-                            }
-                            .font(.footnote.monospacedDigit())
-                            .foregroundStyle(Theme.secondaryInk)
-                            ProgressBar(progress: goal.progress, color: goal.progress >= 0.5 ? Theme.positive : Theme.cobalt)
                         }
                         Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(.tertiary)
                     }
@@ -317,17 +376,24 @@ private struct MiniCategorySpendRow: View {
                     Text(category.title)
                         .font(.subheadline.weight(.medium))
                         .foregroundStyle(Theme.ink)
-                    Spacer()
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
+                    Spacer(minLength: 8)
                     if targetPct > 0 || shownPct > 0 {
                         Text("\(shownPct)%")
                             .font(.caption2.weight(.medium).monospacedDigit())
                             .foregroundStyle(Theme.secondaryInk)
                             .animatedNumber(Double(shownPct))
+                            .lineLimit(1)
+                            .layoutPriority(1)
                     }
                     Text(Money.format(displayedSpent, currency))
                         .font(.caption.weight(.semibold).monospacedDigit())
                         .foregroundStyle(Theme.ink)
                         .animatedNumber(displayedSpent)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                        .layoutPriority(2)
                 }
                 ProgressBar(
                     progress: ratio,
@@ -521,6 +587,15 @@ struct GoalSheet: View {
                         .padding(.vertical, 4)
                     }
                     Section("Add money") {
+                        if goal.monthlyCommitment > 0 && goal.remainingCommitment() > 0 {
+                            Button {
+                                contributionText = plain(goal.remainingCommitment())
+                                contribute(goal)
+                            } label: {
+                                Label("Pay monthly commitment (\(Money.format(goal.remainingCommitment(), currency)))", systemImage: "arrow.up.circle.fill")
+                                    .font(.subheadline.weight(.semibold))
+                            }
+                        }
                         HStack {
                             TextField(Money.format(0, currency), text: $contributionText).keyboardType(.decimalPad).monospacedDigit()
                             Button("Add") { contribute(goal) }

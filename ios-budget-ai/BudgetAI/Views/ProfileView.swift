@@ -60,7 +60,7 @@ struct ProfileView: View {
                         row("Bills & subscriptions", "calendar.badge.clock", SpendCategory.bills.color, value: "\(bills.count)")
                     }
                     NavigationLink { CategoriesView() } label: {
-                        row("Categories", "square.grid.2x2.fill", SpendCategory.shopping.color, value: customCategories.isEmpty ? nil : "\(customCategories.count) custom")
+                        row("Categories", "square.grid.2x2.fill", SpendCategory.shopping.color)
                     }
                     Picker(selection: $cycleStartDay) {
                         ForEach(1...28, id: \.self) { d in Text(ordinal(d)).tag(d) }

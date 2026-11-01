@@ -528,4 +528,19 @@ struct BudgetAITests {
         #expect(bill.isPaidForCurrentCycle() == true)
         #expect(bill.lastPaidMethod == .autoSMS)
     }
+
+    @Test func unmatchedBalanceSMSIsNotQuarantined() async throws {
+        let context = makeCleanContext()
+        let acc = Account(name: "BisB Main", kind: .bank, institution: "BisB", balance: 500.000)
+        context.insert(acc)
+        try context.save()
+
+        // Incoming purchase from known bank BisB with an updated balance (not quarantined despite balance difference)
+        let sms = "BisB: Purchase of BHD 15.000 at CARREFOUR on 2026/10/28. Avl Bal BHD 200.000. Tel 17515151"
+        let outcome = await SMSImporter.importText(sms, context: context, forceApprove: true)
+        let tx = try #require(outcome.transaction)
+
+        #expect(tx.isPending == false)
+        #expect(tx.smsBank == "BisB")
+    }
 }

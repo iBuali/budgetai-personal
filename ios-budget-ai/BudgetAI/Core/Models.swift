@@ -51,6 +51,25 @@ struct SpendCategory: Hashable, Identifiable {
         var parentKey: String
     }
 
+    static let builtInHex: [String: Int] = [
+        "groceries": 0x22A565,
+        "dining": 0xF08A24,
+        "transport": 0x2F6BFF,
+        "shopping": 0x8B5CF6,
+        "bills": 0xE9A23B,
+        "housing": 0x0EA5A4,
+        "health": 0xEC4899,
+        "entertainment": 0x6366F1,
+        "subscriptions": 0xF05252,
+        "education": 0x0891B2,
+        "travel": 0x0EA5E9,
+        "visa_transfer": 0xF08A24,
+        "internal_transfer": 0x1E3FAE,
+        "transfers": 0x6B7385,
+        "income": 0x2BB673,
+        "other": 0x8A93A6,
+    ]
+
     static let builtInInfo: [String: Info] = [
         "groceries": Info(title: "Groceries", shortTitle: "Groceries", symbol: "cart.fill", emoji: "", color: Color(hex: 0x22A565), isEssential: true, isIncome: false, parentKey: ""),
         "dining": Info(title: "Food & Dining", shortTitle: "Food", symbol: "fork.knife", emoji: "", color: Color(hex: 0xF08A24), isEssential: false, isIncome: false, parentKey: ""),
@@ -71,7 +90,7 @@ struct SpendCategory: Hashable, Identifiable {
     ]
 
     var info: Info {
-        SpendCategory.builtInInfo[rawValue] ?? CategoryRegistry.shared.info(rawValue)
+        CategoryRegistry.shared.info(rawValue) ?? SpendCategory.builtInInfo[rawValue]
             ?? Info(title: "Other", shortTitle: "Other", symbol: "square.grid.2x2.fill", emoji: "", color: Color(hex: 0x8A93A6), isEssential: false, isIncome: false, parentKey: "")
     }
 
@@ -90,7 +109,7 @@ struct SpendCategory: Hashable, Identifiable {
 
     /// Top-level categories (built-in + custom).
     static var allCases: [SpendCategory] {
-        builtIns + CategoryRegistry.shared.topLevel.filter { !$0.isIncomeCategory } + CategoryRegistry.shared.topLevel.filter(\.isIncomeCategory)
+        builtIns + CategoryRegistry.shared.topLevel.filter { c in SpendCategory.builtInInfo[c.rawValue] == nil && !c.isIncomeCategory } + CategoryRegistry.shared.topLevel.filter { c in SpendCategory.builtInInfo[c.rawValue] == nil && c.isIncomeCategory }
     }
     static var expenseCases: [SpendCategory] { allCases.filter { !$0.isIncomeCategory } }
     static var incomeCases: [SpendCategory] { allCases.filter(\.isIncomeCategory) }
@@ -109,10 +128,10 @@ final class CustomCategory {
     var isEssential: Bool = false
     var createdAt: Date = Date()
 
-    init(name: String, emoji: String, colorHex: Int, parentKey: String = "", isIncome: Bool = false, isEssential: Bool = false) {
+    init(name: String, emoji: String, colorHex: Int, parentKey: String = "", isIncome: Bool = false, isEssential: Bool = false, key: String? = nil) {
         let id = UUID()
         self.id = id
-        self.key = "c-" + id.uuidString.prefix(8).lowercased()
+        self.key = key ?? ("c-" + id.uuidString.prefix(8).lowercased())
         self.name = name
         self.emoji = emoji
         self.colorHex = colorHex
@@ -146,8 +165,9 @@ final class CategoryRegistry {
         var map: [String: SpendCategory.Info] = [:]
         var topKeys: [String] = []
         for c in items where c.parentKey.isEmpty {
+            let symbol = SpendCategory.builtInInfo[c.key]?.symbol ?? "tag.fill"
             map[c.key] = SpendCategory.Info(
-                title: c.name, shortTitle: c.name, symbol: "tag.fill",
+                title: c.name, shortTitle: c.name, symbol: symbol,
                 emoji: c.emoji,
                 color: Color(hex: UInt32(c.colorHex)),
                 isEssential: c.isEssential,
@@ -528,17 +548,9 @@ final class MoneyTransaction {
             reasons.append("Unknown sender bank")
         }
 
-        // Unmatched account or balance
+        // Unmatched account
         if accountID == nil {
             reasons.append("Unmatched account")
-        } else if let matchedAcc = accounts.first(where: { $0.id == accountID }) {
-            if let bal = smsBalance, !isCardLimitBalance, !matchedAcc.kind.isLiability {
-                let matchesDirect = abs(matchedAcc.balance - bal) < 0.05
-                let matchesDelta = abs((matchedAcc.balance + (isIncome ? amount : -amount)) - bal) < 0.05
-                if !matchesDirect && !matchesDelta {
-                    reasons.append("Unmatched balance")
-                }
-            }
         }
 
         // Uncertain classification

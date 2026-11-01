@@ -555,23 +555,16 @@ enum SMSImporter {
         // Quarantine check:
         // If an SMS has:
         // 1. Unknown sender bank
-        // 2. Unmatched account or unmatched account balance
+        // 2. Unmatched account
         // 3. Uncertain classification / low confidence / needs review
         // -> Quarantine: Keep it in the Needs Review filter and DO NOT include in any accounts until approved!
+        // (Note: Unmatched balances are not quarantined; balance syncing handles bank balance updates automatically)
         let allAccounts = (try? context.fetch(FetchDescriptor<Account>())) ?? []
         let bankUnknown = resolvedSMSBank == nil || resolvedSMSBank?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true || resolvedSMSBank?.lowercased().contains("unknown") == true
         let accountUnmatched = target == nil || (p.accountSuffix != nil && matchingDigits != nil && allAccounts.first(where: { !$0.smsMatch.isEmpty && (matchingDigits!.hasSuffix($0.smsMatch) || $0.smsMatch.hasSuffix(matchingDigits!)) }) == nil)
-        let balanceUnmatched: Bool = {
-            guard let bal = p.balance, let targetID = target, let acc = Ledger.account(targetID, context: context), !p.balanceIsCardLimit, !acc.kind.isLiability else {
-                return target == nil && p.balance != nil
-            }
-            let matchDirect = abs(acc.balance - bal) < 0.05
-            let matchDelta = abs((acc.balance + (p.isIncome ? p.amount : -p.amount)) - bal) < 0.05
-            return !matchDirect && !matchDelta
-        }()
         let isUncertain = p.confidence == .low || p.requiresReview || p.transactionType == .unknown
 
-        let mustQuarantine = bankUnknown || accountUnmatched || balanceUnmatched || isUncertain
+        let mustQuarantine = bankUnknown || accountUnmatched || isUncertain
 
         if mustQuarantine {
             tx.isPending = true

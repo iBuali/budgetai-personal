@@ -75,7 +75,7 @@ struct HomeView: View {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(greeting).font(.title2.bold()).foregroundStyle(Theme.ink)
-                    Text("Cash & bank").font(.body).foregroundStyle(Theme.secondaryInk)
+                    Text("Net worth").font(.body).foregroundStyle(Theme.secondaryInk)
                 }
                 Spacer()
                 Button { appState.tab = .profile } label: {
@@ -87,12 +87,12 @@ struct HomeView: View {
                 }
                 .accessibilityLabel("Profile")
             }
-            Text(Money.format(f.liquidBalance, currency))
+            Text(Money.format(f.netWorth, currency))
                 .font(.system(size: 42, weight: .bold).monospacedDigit())
-                .foregroundStyle(f.liquidBalance < 0 ? Theme.negative : Theme.ink)
+                .foregroundStyle(f.netWorth < 0 ? Theme.negative : Theme.ink)
                 .minimumScaleFactor(0.6)
                 .lineLimit(1)
-                .animatedNumber(f.liquidBalance)
+                .animatedNumber(f.netWorth)
             Text("\(Money.format(f.monthNet, currency, signed: true)) \(Cycle.startDay == 1 ? "this month" : "this cycle")")
                 .font(.subheadline.weight(.medium).monospacedDigit())
                 .foregroundStyle(f.monthNet >= 0 ? Theme.positive : Theme.negative)

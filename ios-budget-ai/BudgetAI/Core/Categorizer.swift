@@ -53,6 +53,20 @@ enum SMSUserRules {
         return map[key]
     }
 
+    /// Retrieves all user-assigned sender-to-bank mappings.
+    static func allSenderBanks() -> [String: String] {
+        (UserDefaults.standard.dictionary(forKey: senderBankKey) as? [String: String]) ?? [:]
+    }
+
+    /// Removes a user-assigned sender mapping.
+    static func removeBank(forSender sender: String) {
+        let key = normalizeSender(sender)
+        guard !key.isEmpty else { return }
+        var map = (UserDefaults.standard.dictionary(forKey: senderBankKey) as? [String: String]) ?? [:]
+        map.removeValue(forKey: key)
+        UserDefaults.standard.set(map, forKey: senderBankKey)
+    }
+
     private static func normalizedTemplate(for rawSMS: String) -> String {
         var template = SMSParser.normalizeText(rawSMS).lowercased()
         // Replace dates/times

@@ -220,10 +220,12 @@ struct TransactionRow: View {
                 CategoryIcon(category: tx.isIncome && tx.category == .other ? .income : tx.displayCategory)
             }
             VStack(alignment: .leading, spacing: 3) {
-                Text(tx.merchant)
+                Text(tx.merchant.isEmpty ? tx.displayCategory.title : tx.merchant)
                     .font(.body.weight(.medium))
                     .foregroundStyle(Theme.ink)
-                    .lineLimit(1)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.85)
+                    .truncationMode(.tail)
                 if tx.isPending {
                     let pendingLabel: (text: String, icon: String) = {
                         let bankClean = tx.smsBank?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -259,6 +261,8 @@ struct TransactionRow: View {
             Text(tx.effectiveTransactionType == .internalTransfer ? Money.format(tx.amount, currency) : Money.format(tx.signedAmount, currency, signed: true))
                 .font(.body.weight(.semibold).monospacedDigit())
                 .foregroundStyle(tx.isPending ? Theme.secondaryInk : (tx.isIncome ? Theme.positive : (tx.isTransfer ? Theme.secondaryInk : Theme.negative)))
+                .lineLimit(1)
+                .layoutPriority(1)
                 .animatedNumber(tx.effectiveTransactionType == .internalTransfer ? tx.amount : tx.signedAmount)
         }
         .padding(.vertical, 4)

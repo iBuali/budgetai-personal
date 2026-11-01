@@ -40,16 +40,30 @@ struct CategoriesView: View {
 
     @ViewBuilder
     private func categoryBlock(_ category: SpendCategory) -> some View {
+        let customModel = model(category)
         HStack(spacing: 12) {
             CategoryIcon(category: category, size: 36)
             VStack(alignment: .leading, spacing: 1) {
                 Text(category.title).foregroundStyle(Theme.ink)
-                if !category.isBuiltIn { Text("Custom").font(.caption).foregroundStyle(Theme.secondaryInk) }
+                if !category.isBuiltIn {
+                    Text("Custom").font(.caption).foregroundStyle(Theme.secondaryInk)
+                } else if customModel != nil {
+                    Text("Modified").font(.caption).foregroundStyle(Theme.cobalt)
+                }
             }
             Spacer()
+            Image(systemName: "chevron.right")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(Color(uiColor: .tertiaryLabel))
         }
         .contentShape(Rectangle())
-        .onTapGesture { if let model = model(category) { editorTarget = .edit(model.id) } }
+        .onTapGesture {
+            if let customModel {
+                editorTarget = .edit(customModel.id)
+            } else if category.isBuiltIn {
+                editorTarget = .editBuiltIn(category.rawValue)
+            }
+        }
     }
 
     private func model(_ category: SpendCategory) -> CustomCategory? {
@@ -60,11 +74,13 @@ struct CategoriesView: View {
 enum CategoryEditorTarget: Identifiable {
     case new(parent: String?, income: Bool)
     case edit(UUID)
+    case editBuiltIn(String)
 
     var id: String {
         switch self {
         case .new(let parent, let income): "new-\(parent ?? "root")-\(income)"
         case .edit(let id): id.uuidString
+        case .editBuiltIn(let key): "builtin-\(key)"
         }
     }
 }
@@ -82,13 +98,35 @@ struct CategoryEditor: View {
     @State private var isIncome = false
     @State private var isEssential = false
     @State private var confirmDelete = false
+    @State private var confirmReset = false
     @State private var loaded = false
 
     static let palette = [0x1E3FAE, 0x2BB673, 0xF08A24, 0xF05252, 0x8B5CF6, 0x0EA5A4, 0xEC4899, 0xE9A23B, 0x0EA5E9, 0x6B7385]
 
     private var existing: CustomCategory? {
-        if case .edit(let id) = target { return custom.first { $0.id == id } }
-        return nil
+        switch target {
+        case .edit(let id):
+            return custom.first { $0.id == id }
+        case .editBuiltIn(let key):
+            return custom.first { $0.key == key }
+        case .new:
+            return nil
+        }
+    }
+
+    private var builtInKey: String? {
+        switch target {
+        case .editBuiltIn(let key):
+            return key
+        case .edit(let id):
+            return custom.first { $0.id == id }?.key.flatMap { SpendCategory.builtInInfo[$0] != nil ? $0 : nil }
+        case .new:
+            return nil
+        }
+    }
+
+    private var isEditingBuiltIn: Bool {
+        builtInKey != nil
     }
 
     private var parentOptions: [SpendCategory] {
@@ -114,7 +152,7 @@ struct CategoryEditor: View {
                 }
 
                 Section {
-                    if existing == nil {
+                    if existing == nil && !isEditingBuiltIn {
                         Picker("Type", selection: $isIncome) {
                             Text("Expense").tag(false)
                             Text("Income").tag(true)
@@ -142,13 +180,19 @@ struct CategoryEditor: View {
                     .padding(.vertical, 6)
                 }
 
-                if existing != nil {
+                if isEditingBuiltIn {
+                    if existing != nil {
+                        Section {
+                            Button("Reset to original", role: .destructive) { confirmReset = true }
+                        }
+                    }
+                } else if existing != nil {
                     Section {
                         Button("Delete category", role: .destructive) { confirmDelete = true }
                     }
                 }
             }
-            .navigationTitle(existing == nil ? "New category" : "Edit category")
+            .navigationTitle(existing == nil && !isEditingBuiltIn ? "New category" : "Edit category")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
@@ -162,15 +206,21 @@ struct CategoryEditor: View {
             } message: {
                 Text("Its transactions will move to Other.")
             }
+            .confirmationDialog("Reset this category?", isPresented: $confirmReset, titleVisibility: .visible) {
+                Button("Reset to original", role: .destructive, action: resetToDefault)
+            } message: {
+                Text("This will restore the original name, emoji, color and settings.")
+            }
             .onAppear(perform: load)
         }
     }
 
     private var preview: some View {
         let color = parentKey.isEmpty ? Color(hex: UInt32(colorHex)) : SpendCategory.unchecked(parentKey).color
+        let fallbackSymbol = builtInKey.flatMap { SpendCategory.builtInInfo[$0]?.symbol } ?? (parentKey.isEmpty ? "tag.fill" : SpendCategory.unchecked(parentKey).symbol)
         return Group {
             if emoji.isEmpty {
-                IconBadge(symbol: parentKey.isEmpty ? "tag.fill" : SpendCategory.unchecked(parentKey).symbol, color: color, size: 52)
+                IconBadge(symbol: fallbackSymbol, color: color, size: 52)
             } else {
                 EmojiBadge(emoji: emoji, color: color, size: 52)
             }
@@ -194,6 +244,22 @@ struct CategoryEditor: View {
             parentKey = c.parentKey
             isIncome = c.isIncome
             isEssential = c.isEssential
+        case .editBuiltIn(let key):
+            if let c = existing {
+                name = c.name
+                emoji = c.emoji
+                colorHex = c.colorHex
+                parentKey = c.parentKey
+                isIncome = c.isIncome
+                isEssential = c.isEssential
+            } else if let b = SpendCategory.builtInInfo[key] {
+                name = b.title
+                emoji = b.emoji
+                colorHex = SpendCategory.builtInHex[key] ?? 0x1E3FAE
+                parentKey = b.parentKey
+                isIncome = b.isIncome
+                isEssential = b.isEssential
+            }
         }
     }
 
@@ -207,6 +273,10 @@ struct CategoryEditor: View {
             model.colorHex = colorHex
             model.parentKey = parentKey
             model.isEssential = isEssential
+        } else if let key = builtInKey {
+            model = CustomCategory(name: trimmed, emoji: emoji, colorHex: colorHex, parentKey: parentKey,
+                                   isIncome: isIncome, isEssential: isEssential, key: key)
+            context.insert(model)
         } else {
             let parentIncome = parentKey.isEmpty ? isIncome : SpendCategory.unchecked(parentKey).isIncomeCategory
             model = CustomCategory(name: trimmed, emoji: emoji, colorHex: colorHex, parentKey: parentKey,
@@ -216,6 +286,15 @@ struct CategoryEditor: View {
         try? context.save()
         CategoryRegistry.shared.reload(context: context)
         if existing == nil { onCreate?(SpendCategory.unchecked(model.key)) }
+        dismiss()
+    }
+
+    private func resetToDefault() {
+        if let existing {
+            context.delete(existing)
+            try? context.save()
+            CategoryRegistry.shared.reload(context: context)
+        }
         dismiss()
     }
 
