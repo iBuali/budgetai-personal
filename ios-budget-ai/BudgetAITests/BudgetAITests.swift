@@ -549,7 +549,7 @@ struct BudgetAITests {
     @Test func safeToSpendSubtractsLiabilities() throws {
         let bank = Account(name: "Checking", kind: .bank, balance: 1000.0)
         let loan = Account(name: "Car Loan", kind: .loan, balance: 200.0)
-        let bill = Bill(name: "Internet", amount: 50.0, frequency: .monthly, nextDueDate: .now.addingTimeInterval(86400 * 2))
+        let bill = Bill(name: "Internet", amount: 50.0, category: .bills, nextDueDate: .now.addingTimeInterval(86400 * 2), frequency: .monthly)
         let f = Finance(transactions: [], accounts: [bank, loan], bills: [bill])
 
         let safe = f.safeToSpend
