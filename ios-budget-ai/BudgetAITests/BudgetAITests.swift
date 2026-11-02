@@ -560,4 +560,67 @@ struct BudgetAITests {
         #expect(safe.monthly == 750.0)
         #expect(safe.isShort == false)
     }
+
+    // MARK: - Financial Time Machine engine
+
+    private func simpleBaseline(commitments: [ScheduledCommitment] = []) -> FinancialBaseline {
+        FinancialBaseline(startingBalance: 1000, recurringIncome: 0, recurringIncomeDay: 1, recurringSources: [],
+                          otherIncome: 0,
+                          categories: [CategoryBaseline(category: .groceries, monthly: TimeMachineEngine.daysPerMonth * 10)],
+                          refundsMonthly: 0, commitments: commitments, historyDays: 90, isDemo: false)
+    }
+
+    @Test func timeMachineExpectedProjection() throws {
+        let r = TimeMachineEngine.simulate(simpleBaseline(), SimulationAssumptions(), scenario: .expected, days: 30)
+        #expect(abs(r.endBalance - 700) < 0.001)
+        #expect(abs(r.totalExpenses - 300) < 0.001)
+        #expect(r.points.count == 31)
+        #expect(abs(r.estimatedSavings + 300) < 0.001)
+    }
+
+    @Test func timeMachineScenariosAndAdjustments() throws {
+        var a = SimulationAssumptions()
+        a.conservativeExpenseBuffer = 10
+        let conservative = TimeMachineEngine.simulate(simpleBaseline(), a, scenario: .conservative, days: 30)
+        #expect(abs(conservative.endBalance - 670) < 0.001)
+
+        a.expenseChangeAmount = -TimeMachineEngine.daysPerMonth * 2 // −2 per day
+        let reduced = TimeMachineEngine.simulate(simpleBaseline(), a, scenario: .expected, days: 30)
+        #expect(abs(reduced.endBalance - 760) < 0.001)
+
+        var b = SimulationAssumptions()
+        b.events = [OneTimeEvent(title: "Bonus", amount: 200, date: Date.now.addingTimeInterval(86400 * 3), isIncome: true)]
+        let expected = TimeMachineEngine.simulate(simpleBaseline(), b, scenario: .expected, days: 30)
+        let cautious = TimeMachineEngine.simulate(simpleBaseline(), b, scenario: .conservative, days: 30)
+        #expect(abs(expected.totalIncome - 200) < 0.001)
+        #expect(cautious.totalIncome < expected.totalIncome)
+    }
+
+    @Test func timeMachineSchedulesBillsOnce() throws {
+        let bill = ScheduledCommitment(id: UUID(), name: "Rent", amount: 50,
+                                       nextDueDate: Date.now.addingTimeInterval(86400 * 5), frequency: .monthly, isSubscription: false)
+        let r = TimeMachineEngine.simulate(simpleBaseline(commitments: [bill]), SimulationAssumptions(), scenario: .expected, days: 30)
+        #expect(abs(r.commitmentsTotal - 50) < 0.001)
+        #expect(abs(r.endBalance - 650) < 0.001)
+
+        var off = SimulationAssumptions()
+        off.includeCommitments = false
+        let none = TimeMachineEngine.simulate(simpleBaseline(commitments: [bill]), off, scenario: .expected, days: 30)
+        #expect(none.commitmentsTotal == 0)
+    }
+
+    @Test func timeMachineBaselineExcludesTransfers() throws {
+        let bank = Account(name: "Main", kind: .bank, balance: 1000)
+        let now = Date.now
+        let salary = MoneyTransaction(amount: 1000, isIncome: true, merchant: "Employer", category: .income, date: now.addingTimeInterval(-86400 * 10))
+        let transfer = MoneyTransaction(amount: 500, isIncome: true, merchant: "Own account", category: .internalTransfer, date: now.addingTimeInterval(-86400 * 5))
+        let food = MoneyTransaction(amount: 100, isIncome: false, merchant: "Market", category: .groceries, date: now.addingTimeInterval(-86400 * 3))
+        let f = Finance(transactions: [salary, transfer, food], accounts: [bank])
+        let base = TimeMachineEngine.baseline(from: f, now: now)
+        let months = 30 / TimeMachineEngine.daysPerMonth
+        #expect(base.isDemo == false)
+        #expect(base.startingBalance == 1000)
+        #expect(abs(base.monthlyIncome - 1000 / months) < 0.001)
+        #expect(abs(base.grossSpending - 100 / months) < 0.001)
+    }
 }
