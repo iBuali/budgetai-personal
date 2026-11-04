@@ -8,6 +8,7 @@ import SwiftData
 /// so corrections never apply globally to unrelated messages.
 enum SMSUserRules {
     private static let senderBankKey = "smsUserSenderBankMap_v1"
+    private static let senderAccountKey = "smsUserSenderAccountMap_v1"
     private static let classificationRulesKey = "smsUserClassificationRules_v1"
 
     struct ClassificationRule: Codable, Equatable, Identifiable {
@@ -47,28 +48,111 @@ enum SMSUserRules {
             .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
     }
 
-    /// Saves a user-assigned bank for a specific SMS sender ID or phone number.
-    static func rememberBank(_ bank: String, forSender sender: String) {
+    /// Extracts core phone digits from a sender string or phone number (stripping +973 / 00973 prefix and punctuation).
+    static func normalizePhoneDigits(_ text: String) -> String {
+        let normalized = SMSParser.normalizeText(text)
+        var digits = String(normalized.unicodeScalars.filter { CharacterSet.decimalDigits.contains($0) })
+        if digits.hasPrefix("00973") && digits.count > 8 {
+            digits.removeFirst(5)
+        } else if digits.hasPrefix("973") && digits.count > 8 {
+            digits.removeFirst(3)
+        }
+        return digits
+    }
+
+    /// Saves a user-assigned bank (and optional target Account) for a specific SMS sender ID or phone number.
+    static func rememberBank(_ bank: String, forSender sender: String, accountID: UUID? = nil) {
         let key = normalizeSender(sender)
         let cleanBank = bank.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !key.isEmpty, !cleanBank.isEmpty else { return }
         var map = (UserDefaults.standard.dictionary(forKey: senderBankKey) as? [String: String]) ?? [:]
         map[key] = cleanBank
         UserDefaults.standard.set(map, forKey: senderBankKey)
+
+        var accMap = (UserDefaults.standard.dictionary(forKey: senderAccountKey) as? [String: String]) ?? [:]
+        if let accountID {
+            accMap[key] = accountID.uuidString
+        } else {
+            accMap.removeValue(forKey: key)
+        }
+        UserDefaults.standard.set(accMap, forKey: senderAccountKey)
     }
 
-    /// Looks up a previously saved bank for a specific SMS sender ID or phone number.
-    static func bank(forSender sender: String?) -> String? {
-        guard let sender else { return nil }
-        let key = normalizeSender(sender)
-        guard !key.isEmpty else { return nil }
+    /// Matches a user-saved sender bank rule against the explicit `sender` parameter OR inside the `rawSMS` body.
+    static func matchSenderRule(in rawSMS: String? = nil, sender: String?) -> (senderKey: String, bank: String, accountID: UUID?)? {
         let map = (UserDefaults.standard.dictionary(forKey: senderBankKey) as? [String: String]) ?? [:]
-        return map[key]
+        guard !map.isEmpty else { return nil }
+        let accMap = (UserDefaults.standard.dictionary(forKey: senderAccountKey) as? [String: String]) ?? [:]
+
+        func resolveAccount(_ k: String) -> UUID? {
+            accMap[k].flatMap(UUID.init(uuidString:))
+        }
+
+        // 1. Check explicit sender parameter first (exact, phone-normalized, or substring token)
+        if let sender, !sender.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let normSender = normalizeSender(sender)
+            if let exactBank = map[normSender] {
+                return (normSender, exactBank, resolveAccount(normSender))
+            }
+            let senderDigits = normalizePhoneDigits(normSender)
+            for (savedKey, savedBank) in map {
+                let savedDigits = normalizePhoneDigits(savedKey)
+                if savedDigits.count >= 6 && !senderDigits.isEmpty && (senderDigits == savedDigits || senderDigits.contains(savedDigits) || savedDigits.contains(senderDigits)) {
+                    return (savedKey, savedBank, resolveAccount(savedKey))
+                }
+                if savedKey.count >= 3 && (normSender.contains(savedKey) || savedKey.contains(normSender)) {
+                    return (savedKey, savedBank, resolveAccount(savedKey))
+                }
+            }
+        }
+
+        // 2. Fallback: scan the SMS message body itself for any saved sender ID or phone number
+        if let rawSMS, !rawSMS.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let normBody = SMSParser.normalizeText(rawSMS).lowercased()
+            let compactBodyDigits = normBody.replacingOccurrences(of: "[\\s\\-]", with: "", options: .regularExpression)
+            // Sort longer keys first for most specific match
+            let sortedEntries = map.sorted { $0.key.count > $1.key.count }
+            for (savedKey, savedBank) in sortedEntries {
+                let savedDigits = normalizePhoneDigits(savedKey)
+                if savedDigits.count >= 6 {
+                    if compactBodyDigits.contains(savedDigits) {
+                        return (savedKey, savedBank, resolveAccount(savedKey))
+                    }
+                } else if savedKey.count >= 3 {
+                    let escaped = NSRegularExpression.escapedPattern(for: savedKey)
+                    if normBody.range(of: "\\b\(escaped)\\b", options: .regularExpression) != nil || normBody.contains(savedKey) {
+                        return (savedKey, savedBank, resolveAccount(savedKey))
+                    }
+                }
+            }
+        }
+
+        return nil
+    }
+
+    /// Looks up a previously saved bank for a specific SMS sender ID or phone number (or inside the SMS body).
+    static func bank(forSender sender: String?, in rawSMS: String? = nil) -> String? {
+        matchSenderRule(in: rawSMS, sender: sender)?.bank
+    }
+
+    /// Looks up a previously saved target account ID for a specific SMS sender ID or phone number.
+    static func accountID(forSender sender: String?, in rawSMS: String? = nil) -> UUID? {
+        matchSenderRule(in: rawSMS, sender: sender)?.accountID
     }
 
     /// Retrieves all user-assigned sender-to-bank mappings.
     static func allSenderBanks() -> [String: String] {
         (UserDefaults.standard.dictionary(forKey: senderBankKey) as? [String: String]) ?? [:]
+    }
+
+    /// Retrieves all user-assigned sender-to-account mappings.
+    static func allSenderAccounts() -> [String: UUID] {
+        let raw = (UserDefaults.standard.dictionary(forKey: senderAccountKey) as? [String: String]) ?? [:]
+        var out: [String: UUID] = [:]
+        for (k, v) in raw {
+            if let id = UUID(uuidString: v) { out[k] = id }
+        }
+        return out
     }
 
     /// Removes a user-assigned sender mapping.
@@ -78,6 +162,10 @@ enum SMSUserRules {
         var map = (UserDefaults.standard.dictionary(forKey: senderBankKey) as? [String: String]) ?? [:]
         map.removeValue(forKey: key)
         UserDefaults.standard.set(map, forKey: senderBankKey)
+
+        var accMap = (UserDefaults.standard.dictionary(forKey: senderAccountKey) as? [String: String]) ?? [:]
+        accMap.removeValue(forKey: key)
+        UserDefaults.standard.set(accMap, forKey: senderAccountKey)
     }
 
     private static func normalizedTemplate(for rawSMS: String) -> String {
@@ -263,6 +351,7 @@ enum SMSUserRules {
     /// Clears all sender-to-bank mappings.
     static func clearSenderBanks() {
         UserDefaults.standard.removeObject(forKey: senderBankKey)
+        UserDefaults.standard.removeObject(forKey: senderAccountKey)
     }
 
     /// Total count of all user-saved SMS conditions (sender banks + classification rules).
@@ -272,6 +361,7 @@ enum SMSUserRules {
 
     static func clearAll() {
         UserDefaults.standard.removeObject(forKey: senderBankKey)
+        UserDefaults.standard.removeObject(forKey: senderAccountKey)
         UserDefaults.standard.removeObject(forKey: classificationRulesKey)
     }
 }
@@ -611,40 +701,107 @@ enum SMSParser {
         return [normalized]
     }
 
-    // MARK: - Bank Identification
+    // MARK: - Bank Identification & Sender / Phone Extraction
 
-    /// Identifies the bank using user-saved sender rules, SMS sender ID, verified helpline numbers,
+    /// Known Bahrain bank helpline phone numbers for deterministic multi-account identification.
+    /// For example: 17515151 -> BisB account, 17123456 -> ila Bank account.
+    static let knownBankPhones: [(phone: String, bank: String)] = [
+        ("17515151", "BisB"),
+        ("17123456", "ila"),
+        ("17205555", "BBK"),
+        ("17228800", "NBB"),
+        ("17565656", "Al Salam"),
+        ("17777777", "KFH"),
+        ("17229999", "AUB"),
+        ("17543210", "Khaleeji"),
+        ("17508508", "Ithmaar"),
+        ("13300300", "BenefitPay")
+    ]
+
+    /// Extracts the SMS sender ID or bank helpline phone number from the explicit Shortcut `sender` parameter,
+    /// or directly from the SMS text when the Shortcut automation did not pass the sender ID.
+    static func extractSenderOrPhone(in raw: String, explicitSender: String? = nil) -> String? {
+        if let explicitSender {
+            let trimmed = explicitSender.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                return trimmed
+            }
+        }
+        let text = normalizeText(raw)
+        let lower = text.lowercased()
+
+        // 1. Check if any user-saved sender rule matches inside the SMS text
+        if let savedMatch = SMSUserRules.matchSenderRule(in: text, sender: nil) {
+            return savedMatch.senderKey
+        }
+
+        // 2. Check known bank phone numbers in the SMS text (e.g. 17515151 -> BisB, 17123456 -> ila)
+        for (phone, _) in knownBankPhones {
+            let p1 = phone.prefix(4)
+            let p2 = phone.suffix(4)
+            let pattern = "(?:\\+?973\\s*|00973\\s*)?\(p1)\\s*\(p2)\\b"
+            if lower.range(of: pattern, options: .regularExpression) != nil {
+                return phone
+            }
+        }
+
+        // 3. Check explicit Tel / Call / Phone / From / Sender header or footer in the SMS
+        let telPattern = "(?i)\\b(?:tel|call|phone|contact|helpline|from|sender)\\s*[:\\-]?\\s*(?:\\+?973\\s*|00973\\s*)?([0-9]{4}\\s*[0-9]{4})\\b"
+        if let regex = try? NSRegularExpression(pattern: telPattern),
+           let m = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+           let r = Range(m.range(at: 1), in: text) {
+            return String(text[r]).replacingOccurrences(of: "\\s+", with: "", options: .regularExpression)
+        }
+
+        return nil
+    }
+
+    /// Identifies the bank using user-saved sender rules, SMS sender ID, verified helpline numbers (e.g. 17515151 for BisB, 17123456 for ila),
     /// bank-specific keywords, and verified message formats. Never guesses when confidence is low.
     static func identifyBank(in raw: String, sender: String? = nil) -> (bank: String?, confidence: SMSConfidence, reason: String?) {
         let text = normalizeText(raw)
         let lower = text.lowercased()
+        let effectiveSender = extractSenderOrPhone(in: text, explicitSender: sender)
 
-        // 1. User-remembered bank for this sender ID / phone number
-        if let remembered = SMSUserRules.bank(forSender: sender) {
-            return (remembered, .high, "Matched user-saved bank rule for sender '\(sender ?? "")'")
+        // 1. User-remembered bank for this sender ID / phone number (checks both sender parameter and SMS body)
+        if let matchedRule = SMSUserRules.matchSenderRule(in: text, sender: effectiveSender) {
+            return (matchedRule.bank, .high, "Matched user-saved bank rule for sender '\(matchedRule.senderKey)'")
         }
 
         // 2. Verified Sender ID / Phone number match
-        if let sender, !sender.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            let normSender = SMSUserRules.normalizeSender(sender)
-            if normSender.contains("17515151") || normSender == "bisb" || normSender.contains("bahrain islamic") {
-                return ("BisB", .high, "Identified BisB from sender '\(sender)'")
+        if let effectiveSender, !effectiveSender.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let normSender = SMSUserRules.normalizeSender(effectiveSender)
+            let senderDigits = SMSUserRules.normalizePhoneDigits(normSender)
+            for (phone, bank) in knownBankPhones {
+                if senderDigits == phone || normSender.contains(phone) {
+                    return (bank, .high, "Identified \(bank) from bank phone '\(phone)'")
+                }
+            }
+            if normSender == "bisb" || normSender.contains("bahrain islamic") {
+                return ("BisB", .high, "Identified BisB from sender '\(effectiveSender)'")
+            }
+            if normSender == "ilabank" || normSender == "ila" || normSender.contains("ila bank") {
+                return ("ila", .high, "Identified ila from sender '\(effectiveSender)'")
             }
             if let senderBank = matchExplicitBankName(in: normSender, allowBenefitPay: true) {
-                return (senderBank, .high, "Identified \(senderBank) from SMS sender '\(sender)'")
+                return (senderBank, .high, "Identified \(senderBank) from SMS sender '\(effectiveSender)'")
             }
         }
 
-        // 3. Verified BisB helpline (17515151) and BIB reference format
-        let hasBisBHelpline = lower.range(of: "(?:tel|call|phone|contact)?\\s*[:\\-]?\\s*(?:\\+?973\\s*)?1751\\s*5151\\b", options: .regularExpression) != nil
+        // 3. Verified bank helpline phone numbers in SMS body (e.g. 17515151 -> BisB, 17123456 -> ila)
         let ref = referenceNumber(in: text)
         let hasBIBRef = ref?.uppercased().hasPrefix("BIB") == true
 
-        if hasBisBHelpline && hasBIBRef {
-            return ("BisB", .high, "Identified BisB via helpline 17515151 and BIB reference prefix")
-        }
-        if hasBisBHelpline {
-            return ("BisB", .high, "Identified BisB via verified helpline 17515151")
+        for (phone, bank) in knownBankPhones {
+            let p1 = phone.prefix(4)
+            let p2 = phone.suffix(4)
+            let pattern = "(?:tel|call|phone|contact)?\\s*[:\\-]?\\s*(?:\\+?973\\s*|00973\\s*)?\(p1)\\s*\(p2)\\b"
+            if lower.range(of: pattern, options: .regularExpression) != nil {
+                if bank == "BisB" && hasBIBRef {
+                    return ("BisB", .high, "Identified BisB via helpline 17515151 and BIB reference prefix")
+                }
+                return (bank, .high, "Identified \(bank) via verified phone \(phone)")
+            }
         }
 
         // 4. Explicit bank name in the SMS text
@@ -726,17 +883,20 @@ enum SMSParser {
         let singleLine = normalized.replacingOccurrences(of: "\n", with: " ")
         let lower = singleLine.lowercased()
 
+        let effectiveSender = extractSenderOrPhone(in: normalized, explicitSender: sender)
         let ref = referenceNumber(in: singleLine)
         let bal = balance(in: normalized)
         let (parsedDate, parsedTime) = extractDateAndTime(in: singleLine)
-        let bankInfo = identifyBank(in: normalized, sender: sender)
+        let bankInfo = identifyBank(in: normalized, sender: effectiveSender)
         let rail = detectRail(in: singleLine)
         let suffixes = extractSuffixes(in: singleLine)
+        let senderRuleAccountID = SMSUserRules.accountID(forSender: effectiveSender, in: normalized)
+            ?? (context.flatMap { findMatchingAccount(forBank: bankInfo.bank, senderOrPhone: effectiveSender, in: $0)?.id })
 
         // 1. Check Verified Rule: BisB / Bahrain Outgoing Fawri+ Payment credited to recipient IBAN
         // Confirmed format:
         // "Fawri+ payment BHD3.000, ref: BIB103KAK000KZUM was credited to IBAN ending 0846 on 2026/10/27 15:26. Balance BHD263.195. Tel: 17515151"
-        if let bisbResult = parseVerifiedFawriPlusCreditedToIBAN(
+        if var bisbResult = parseVerifiedFawriPlusCreditedToIBAN(
             singleLine: singleLine,
             amount: amt,
             currency: currency,
@@ -745,9 +905,10 @@ enum SMSParser {
             date: parsedDate,
             timeString: parsedTime,
             bankInfo: bankInfo,
-            sender: sender,
+            sender: effectiveSender,
             context: context
         ) {
+            if bisbResult.accountID == nil { bisbResult.accountID = senderRuleAccountID }
             return bisbResult
         }
 
@@ -755,7 +916,7 @@ enum SMSParser {
         let partyKey = extractRecipientOrMerchantKey(in: normalized) ?? suffixes.recipientSuffix ?? suffixes.accountSuffix
         if let userRule = SMSUserRules.matchingRule(
             forRawSMS: normalized,
-            sender: sender,
+            sender: effectiveSender,
             bank: bankInfo.bank,
             counterparty: partyKey
         ), let ruleType = SMSTransactionType(rawValue: userRule.transactionTypeRaw) {
@@ -787,8 +948,8 @@ enum SMSParser {
                 accountSuffix: suffixes.accountSuffix,
                 recipientSuffix: suffixes.recipientSuffix,
                 timeString: parsedTime,
-                sender: sender,
-                accountID: userRule.accountIDString.flatMap(UUID.init(uuidString:)),
+                sender: effectiveSender,
+                accountID: userRule.accountIDString.flatMap(UUID.init(uuidString:)) ?? senderRuleAccountID,
                 toAccountID: userRule.toAccountIDString.flatMap(UUID.init(uuidString:)),
                 goalID: userRule.goalIDString.flatMap(UUID.init(uuidString:)),
                 matchedUserRule: true
@@ -798,7 +959,7 @@ enum SMSParser {
         // 2b. Credit card (Visa) payment confirmation, e.g.
         // "Dear ISA, Thank you for paying BHD 457.558 on 24/10 for your VISA INFINITE card. Available Bal BHD 5000. Tel 17515151"
         // The money left the user's bank account and paid down the card; "Available Bal" is the card's available limit.
-        if let cardPayment = parseCreditCardPayment(
+        if var cardPayment = parseCreditCardPayment(
             singleLine: singleLine,
             lower: lower,
             amount: amt,
@@ -808,9 +969,10 @@ enum SMSParser {
             date: parsedDate,
             timeString: parsedTime,
             bankInfo: bankInfo,
-            sender: sender,
+            sender: effectiveSender,
             context: context
         ) {
+            if cardPayment.accountID == nil { cardPayment.accountID = senderRuleAccountID }
             return cardPayment
         }
 
@@ -894,7 +1056,8 @@ enum SMSParser {
             accountSuffix: suffixes.accountSuffix,
             recipientSuffix: suffixes.recipientSuffix,
             timeString: parsedTime,
-            sender: sender,
+            sender: effectiveSender,
+            accountID: senderRuleAccountID,
             toAccountID: classification.toAccountID,
             goalID: classification.goalID
         )
@@ -1444,6 +1607,73 @@ enum SMSParser {
             guard !m.isEmpty else { return false }
             return clean.hasSuffix(m) || m.hasSuffix(clean)
         }
+    }
+
+    /// Resolves a user `Account` from multiple accounts based on a saved sender rule, phone number (e.g. 17515151 -> BisB, 17123456 -> ila),
+    /// or identified bank name/aliases.
+    static func findMatchingAccount(forBank bank: String?, senderOrPhone: String? = nil, in context: ModelContext) -> Account? {
+        let accounts = (try? context.fetch(FetchDescriptor<Account>(sortBy: [SortDescriptor(\.createdAt)]))) ?? []
+        guard !accounts.isEmpty else { return nil }
+
+        // 1. Check user-saved sender-to-account rule first
+        if let senderOrPhone, let savedAccID = SMSUserRules.accountID(forSender: senderOrPhone),
+           let acc = accounts.first(where: { $0.id == savedAccID }) {
+            return acc
+        }
+
+        // 2. Check if sender/phone digits match an account's smsMatch field
+        if let senderOrPhone {
+            let cleanSender = senderOrPhone.trimmingCharacters(in: .whitespacesAndNewlines)
+            let digits = SMSUserRules.normalizePhoneDigits(cleanSender)
+            if !digits.isEmpty,
+               let acc = accounts.first(where: {
+                   let m = SMSUserRules.normalizePhoneDigits($0.smsMatch)
+                   return !m.isEmpty && (m == digits || digits.hasSuffix(m) || m.hasSuffix(digits))
+               }) {
+                return acc
+            }
+        }
+
+        // 3. Match by identified bank name and aliases across the user's multiple accounts
+        guard let bank, !bank.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        let bLower = bank.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+
+        let aliasTable: [String: [String]] = [
+            "bisb": ["bisb", "bahrain islamic", "البحرين الإسلامي", "البحرين الاسلامي", "17515151"],
+            "ila": ["ila", "ilabank", "ila bank", "بنك إلى", "بنك الى", "17123456"],
+            "nbb": ["nbb", "national bank of bahrain", "البنك الوطني", "17228800"],
+            "bbk": ["bbk", "bank of bahrain and kuwait", "البحرين والكويت", "17205555"],
+            "al salam": ["al salam", "alsalam", "salam", "بنك السلام", "السلام", "17565656"],
+            "kfh": ["kfh", "kuwait finance", "بيت التمويل", "بيتك", "17777777"],
+            "aub": ["aub", "ahli united", "الأهلي المتحد", "17229999"],
+            "khaleeji": ["khaleeji", "خليجي", "17543210"],
+            "ithmaar": ["ithmaar", "إثمار", "اثمار", "17508508"],
+            "benefitpay": ["benefitpay", "benefit pay", "benefit", "بنفت", "13300300"],
+            "bank abc": ["bank abc", "abc", "العربية المصرفية"],
+            "beyon money": ["beyon money", "beyon", "بيون"],
+            "bfc pay": ["bfc pay", "bfc"]
+        ]
+
+        let aliases = aliasTable[bLower] ?? [bLower]
+        // Prefer liquid (bank/cash) accounts first, then any account matching the bank aliases
+        let sortedAccounts = accounts.sorted { ($0.kind.isLiquid ? 0 : 1) < ($1.kind.isLiquid ? 0 : 1) }
+        for acc in sortedAccounts {
+            let nameLower = acc.name.lowercased()
+            let instLower = acc.institution.lowercased()
+            let matchLower = acc.smsMatch.lowercased()
+            let combined = "\(nameLower) \(instLower) \(matchLower)"
+            for alias in aliases {
+                if alias.count <= 4 {
+                    let escaped = NSRegularExpression.escapedPattern(for: alias)
+                    if combined.range(of: "\\b\(escaped)\\b", options: .regularExpression) != nil || nameLower == alias || instLower == alias {
+                        return acc
+                    }
+                } else if combined.contains(alias) {
+                    return acc
+                }
+            }
+        }
+        return nil
     }
 
     static func findMatchingGoal(suffix: String? = nil, accountID: UUID? = nil, in context: ModelContext) -> SavingsGoal? {

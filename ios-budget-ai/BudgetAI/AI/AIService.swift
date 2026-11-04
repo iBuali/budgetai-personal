@@ -429,15 +429,18 @@ enum SMSImporter {
             return SMSImportOutcome(message: reason)
         }
 
+        // Fetch the SMS sender ID / bank phone number from the message first if Shortcuts did not pass it
+        let effectiveSender = SMSParser.extractSenderOrPhone(in: trimmed, explicitSender: sender)
+
         // 1. Deterministic, bank-specific parsing rules first
-        let deterministic = SMSParser.parse(trimmed, sender: sender, context: context)
+        let deterministic = SMSParser.parse(trimmed, sender: effectiveSender, context: context)
         var parsed: ParsedSMS? = deterministic
         var usedAI = false
 
         // 2. Use AI only as a fallback when deterministic parsing is nil or uncertain
         if (deterministic == nil || deterministic?.requiresReview == true) && GeminiAccount.isConfigured {
             do {
-                if let aiParsed = try await AIService.parseSMS(trimmed, sender: sender, context: context) {
+                if let aiParsed = try await AIService.parseSMS(trimmed, sender: effectiveSender, context: context) {
                     parsed = aiParsed
                     usedAI = true
                 }
@@ -451,9 +454,12 @@ enum SMSImporter {
         }
 
         let cleanManualBank = manualBank?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let resolvedSMSBank = (cleanManualBank?.isEmpty == false ? cleanManualBank : nil) ?? p.detectedBank
+        let resolvedSMSBank = (cleanManualBank?.isEmpty == false ? cleanManualBank : nil)
+            ?? p.detectedBank
+            ?? SMSUserRules.bank(forSender: effectiveSender, in: trimmed)
+        let resolvedSender = effectiveSender ?? p.sender
 
-        // Determine account involved in the transaction (kept separate from smsBank)
+        // Determine account involved in the transaction (supports multiple accounts e.g. 17515151 -> BisB, 17123456 -> ila)
         let matchingDigits: String? = {
             if p.transactionType == .transferIn {
                 return p.accountSuffix ?? p.recipientSuffix
@@ -462,8 +468,14 @@ enum SMSImporter {
             return p.accountSuffix
         }()
         let savedRuleAccount: UUID? = {
-            guard let ruleAccID = p.accountID, Ledger.account(ruleAccID, context: context) != nil else { return nil }
-            return ruleAccID
+            if let ruleAccID = p.accountID, Ledger.account(ruleAccID, context: context) != nil {
+                return ruleAccID
+            }
+            if let senderAccID = SMSUserRules.accountID(forSender: resolvedSender, in: trimmed),
+               Ledger.account(senderAccID, context: context) != nil {
+                return senderAccID
+            }
+            return nil
         }()
         var target = accountID ?? savedRuleAccount ?? Ledger.smsAccountID(context: context, digits: matchingDigits, hint: resolvedSMSBank)
 
@@ -494,6 +506,25 @@ enum SMSImporter {
             if !p.matchedUserRule {
                 p.merchant = "Saved to \(matchedGoal.name)"
             }
+        }
+
+        // Preserve the pre-conversion transfer type so we can detect & merge simultaneous transfer SMS
+        // (e.g., when a transfer between two accounts generates one "Internal Transfer" SMS and one "Transfer Out" SMS at the same date & time).
+        let rawParsedType = p.transactionType
+        if !isCardPayment,
+           (rawParsedType.isTransferType || p.category == .internalTransfer || p.category == .transfers),
+           let mergedOutcome = mergeSameTimeTransferIfNeeded(
+               parsed: p,
+               rawParsedType: rawParsedType,
+               rawSMS: trimmed,
+               resolvedBank: resolvedSMSBank,
+               resolvedSender: resolvedSender,
+               targetAccountID: target,
+               usedAI: usedAI,
+               forceApprove: forceApprove,
+               context: context
+           ) {
+            return mergedOutcome
         }
 
         // If the SMS was not previously recognized by a saved user rule:
@@ -541,7 +572,7 @@ enum SMSImporter {
         tx.aiCategorized = usedAI
         tx.smsBalance = p.balance
         tx.smsBank = resolvedSMSBank
-        tx.smsSender = sender?.trimmingCharacters(in: .whitespacesAndNewlines)
+        tx.smsSender = resolvedSender?.trimmingCharacters(in: .whitespacesAndNewlines)
         tx.smsTransactionType = p.transactionType
         tx.smsConfidence = p.confidence
         tx.smsClassificationReason = p.classificationReason
@@ -561,7 +592,22 @@ enum SMSImporter {
         // (Note: Unmatched balances are not quarantined; balance syncing handles bank balance updates automatically)
         let allAccounts = (try? context.fetch(FetchDescriptor<Account>())) ?? []
         let bankUnknown = resolvedSMSBank == nil || resolvedSMSBank?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true || resolvedSMSBank?.lowercased().contains("unknown") == true
-        let accountUnmatched = target == nil || (p.accountSuffix != nil && matchingDigits != nil && allAccounts.first(where: { !$0.smsMatch.isEmpty && (matchingDigits!.hasSuffix($0.smsMatch) || $0.smsMatch.hasSuffix(matchingDigits!)) }) == nil)
+        let targetAccount = target.flatMap { id in allAccounts.first(where: { $0.id == id }) }
+        let matchedByDigits = matchingDigits.flatMap { d in
+            allAccounts.first(where: { !$0.smsMatch.isEmpty && (d.hasSuffix($0.smsMatch) || $0.smsMatch.hasSuffix(d)) })
+        }
+        let matchedByBankOrSender = savedRuleAccount != nil || SMSParser.findMatchingAccount(forBank: resolvedSMSBank, senderOrPhone: resolvedSender, in: context) != nil
+        let accountUnmatched: Bool = {
+            guard let targetAccount else { return true }
+            if p.accountSuffix != nil && matchingDigits != nil {
+                if matchedByDigits != nil { return false }
+                if targetAccount.smsMatch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && matchedByBankOrSender {
+                    return false
+                }
+                return true
+            }
+            return false
+        }()
         let isUncertain = p.confidence == .low || p.requiresReview || p.transactionType == .unknown
 
         let mustQuarantine = bankUnknown || accountUnmatched || isUncertain
@@ -604,5 +650,186 @@ enum SMSImporter {
             balanceSynced: result.balanceSynced,
             message: summary
         )
+    }
+
+    // MARK: - Simultaneous Inter-Account Transfer Deduplication & Merging
+
+    /// Determines the original transfer role of an already-saved transaction (even if `transferOut` was converted to `.expense` or `transferIn` to `.income`).
+    private static func originalTransferRole(for tx: MoneyTransaction) -> SMSTransactionType? {
+        if tx.smsTransactionType == .internalTransfer || tx.category == .internalTransfer {
+            return .internalTransfer
+        }
+        if tx.smsTransactionType == .transferOut {
+            return .transferOut
+        }
+        if tx.smsTransactionType == .transferIn {
+            return .transferIn
+        }
+        guard tx.source == .sms || tx.source == .transfer else { return nil }
+        if tx.category == .transfers {
+            return tx.isIncome ? .transferIn : .transferOut
+        }
+        if let raw = tx.rawText, let reparsed = SMSParser.parse(raw, sender: tx.smsSender), reparsed.transactionType.isTransferType {
+            return reparsed.transactionType
+        }
+        let reasonLower = (tx.smsClassificationReason ?? "").lowercased()
+        if reasonLower.contains("transfer") || reasonLower.contains("fawri") {
+            return tx.isIncome ? .transferIn : .transferOut
+        }
+        return nil
+    }
+
+    /// When a user transfers between two accounts, they often receive two SMS alerts at the same date & time
+    /// (e.g. one is "Transfer between accounts" / `internalTransfer` and the other is "Transfer Out" / `transferOut`,
+    /// or one is `transferOut` from Account A and the other is `transferIn` to Account B).
+    /// If the date, time, and amount match, this merges them into ONE single transaction instead of creating a duplicate.
+    private static func mergeSameTimeTransferIfNeeded(
+        parsed: ParsedSMS,
+        rawParsedType: SMSTransactionType,
+        rawSMS: String,
+        resolvedBank: String?,
+        resolvedSender: String?,
+        targetAccountID: UUID?,
+        usedAI: Bool,
+        forceApprove: Bool,
+        context: ModelContext
+    ) -> SMSImportOutcome? {
+        let incomingDate = parsed.date ?? .now
+        let startWindow = incomingDate.addingTimeInterval(-86_400)
+        let endWindow = incomingDate.addingTimeInterval(86_400)
+        let descriptor = FetchDescriptor<MoneyTransaction>(
+            predicate: #Predicate { $0.date >= startWindow && $0.date <= endWindow },
+            sortBy: [SortDescriptor(\.date, order: .reverse)]
+        )
+        let candidates = (try? context.fetch(descriptor)) ?? []
+        guard !candidates.isEmpty else { return nil }
+
+        let incomingTime = parsed.timeString ?? SMSParser.extractDateAndTime(in: rawSMS).time
+        let newRole: SMSTransactionType = (parsed.category == .internalTransfer) ? .internalTransfer : rawParsedType
+
+        for existing in candidates {
+            guard abs(existing.amount - parsed.amount) < 0.0005 else { continue }
+            guard let existingRole = originalTransferRole(for: existing) else { continue }
+
+            // Check if date & time are the same:
+            // 1. Exact/near-exact timestamp match (within 3 minutes / 180 seconds, e.g. both at 2026/10/27 15:26)
+            // 2. Or same calendar day when one of the two SMS messages did not include an explicit HH:mm time
+            let timeDiff = abs(existing.date.timeIntervalSince(incomingDate))
+            let existingTime = existing.rawText.flatMap { SMSParser.extractDateAndTime(in: $0).time }
+            let isSameDateAndTime: Bool = {
+                if let t1 = existingTime, let t2 = incomingTime {
+                    return t1 == t2 || timeDiff <= 180
+                }
+                if timeDiff <= 180 {
+                    return true
+                }
+                // One SMS had a date without HH:mm time on the same calendar day
+                return Calendar.current.isDate(existing.date, inSameDayAs: incomingDate) && (existingTime == nil || incomingTime == nil)
+            }()
+            guard isSameDateAndTime else { continue }
+
+            // Check if the pair represents the same transfer between accounts:
+            // Case 1: One is .internalTransfer (transfer between accounts) and the other is .transferOut, .transferIn, or .internalTransfer
+            let oneIsInternal = (existingRole == .internalTransfer || newRole == .internalTransfer)
+            // Case 2: One is .transferOut and the other is .transferIn between two accounts at the same date & time
+            let isOppositeTransferLegs = (existingRole == .transferOut && newRole == .transferIn)
+                || (existingRole == .transferIn && newRole == .transferOut)
+
+            guard oneIsInternal || isOppositeTransferLegs else { continue }
+
+            // If both are from the same bank with two different non-empty reference numbers AND neither is an internal transfer
+            // nor from a different bank/account, do not merge distinct transfers.
+            if !oneIsInternal,
+               let r1 = existing.smsReference?.trimmingCharacters(in: .whitespacesAndNewlines), !r1.isEmpty,
+               let r2 = parsed.referenceNumber?.trimmingCharacters(in: .whitespacesAndNewlines), !r2.isEmpty,
+               r1.caseInsensitiveCompare(r2) != .orderedSame,
+               existing.accountID == targetAccountID {
+                continue
+            }
+
+            // Resolve source (from) and destination (to) accounts for the single merged Internal Transfer transaction
+            var mergedFromID: UUID? = existing.accountID
+            var mergedToID: UUID? = existing.toAccountID
+
+            if newRole == .internalTransfer {
+                if let t = targetAccountID { mergedFromID = mergedFromID ?? t }
+                if let to = parsed.toAccountID { mergedToID = to }
+            } else if newRole == .transferOut {
+                if let t = targetAccountID { mergedFromID = t }
+            } else if newRole == .transferIn {
+                if let t = targetAccountID, t != mergedFromID {
+                    mergedToID = mergedToID ?? t
+                }
+            }
+
+            if existingRole == .transferIn, let exAcc = existing.accountID, exAcc != targetAccountID {
+                if newRole == .transferOut || newRole == .internalTransfer {
+                    mergedFromID = targetAccountID ?? mergedFromID
+                    mergedToID = mergedToID ?? exAcc
+                }
+            }
+
+            if mergedToID == nil, let recipSuffix = parsed.recipientSuffix ?? existing.smsRecipientSuffix,
+               let matchedDest = SMSParser.findMatchingAccount(suffix: recipSuffix, in: context),
+               matchedDest.id != mergedFromID {
+                mergedToID = matchedDest.id
+            }
+
+            let mergedGoalID = existing.goalID ?? parsed.goalID
+                ?? SMSParser.findMatchingGoal(suffix: parsed.recipientSuffix ?? existing.smsRecipientSuffix, accountID: mergedToID, in: context)?.id
+
+            // Update the existing transaction in-place so there is only ONE transaction in the database
+            Ledger.edit(existing, context: context) { tx in
+                tx.smsTransactionType = .internalTransfer
+                tx.category = .internalTransfer
+                tx.isIncome = false
+                if let mergedFromID { tx.accountID = mergedFromID }
+                if let mergedToID, mergedToID != tx.accountID { tx.toAccountID = mergedToID }
+                if let mergedGoalID { tx.goalID = mergedGoalID }
+
+                if newRole == .internalTransfer && !parsed.merchant.isEmpty {
+                    tx.merchant = parsed.merchant
+                } else if let toID = tx.toAccountID, let destAcc = Ledger.account(toID, context: context) {
+                    if let fromID = tx.accountID, let srcAcc = Ledger.account(fromID, context: context), srcAcc.id != destAcc.id {
+                        tx.merchant = "\(srcAcc.name) → \(destAcc.name)"
+                    } else {
+                        tx.merchant = "Transfer to \(destAcc.name)"
+                    }
+                }
+
+                if tx.smsBank == nil { tx.smsBank = resolvedBank }
+                if tx.smsSender == nil { tx.smsSender = resolvedSender }
+                if tx.smsReference == nil { tx.smsReference = parsed.referenceNumber }
+                if tx.smsRecipientSuffix == nil { tx.smsRecipientSuffix = parsed.recipientSuffix }
+                if tx.smsAccountSuffix == nil { tx.smsAccountSuffix = parsed.accountSuffix }
+                if tx.smsBalance == nil && newRole != .transferIn { tx.smsBalance = parsed.balance }
+                tx.smsConfidence = .high
+                tx.smsClassificationReason = "Merged simultaneous transfer between accounts (\(existingRole.title) + \(newRole.title) at same date & time)"
+            }
+
+            var syncedBalance: Double? = nil
+            if existing.isPending && (forceApprove || AppSettings.smsAutoApprove) && existing.smsBank != nil && existing.accountID != nil {
+                let approveRes = Ledger.approve(existing, context: context)
+                syncedBalance = approveRes.balanceSynced
+            } else if !existing.isPending {
+                syncedBalance = Ledger.syncBalanceFromSMS(existing, context: context)
+            }
+
+            let code = AppSettings.currency
+            let summary = "Internal Transfer \(Money.format(existing.amount, code)) · \(existing.merchant) (merged duplicate transfer SMS)"
+            return SMSImportOutcome(
+                transaction: existing,
+                batchTransactions: [existing],
+                usedAI: usedAI,
+                learnedMerchant: false,
+                flaggedDuplicate: true,
+                alerts: [],
+                pending: existing.isPending,
+                balanceSynced: syncedBalance,
+                message: summary
+            )
+        }
+
+        return nil
     }
 }

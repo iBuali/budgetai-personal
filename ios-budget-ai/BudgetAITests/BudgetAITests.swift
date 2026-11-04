@@ -661,4 +661,85 @@ struct BudgetAITests {
         #expect(SMSUserRules.allSenderBanks().isEmpty)
         #expect(SMSUserRules.allClassificationRules().isEmpty)
     }
+
+    @Test func multipleAccountsByBankPhoneAndSavedSenderRules() async throws {
+        let context = makeCleanContext()
+        let bisb = Account(name: "BisB Account", kind: .bank, institution: "BisB", balance: 500.000)
+        let ila = Account(name: "ila Bank", kind: .bank, institution: "ila", balance: 300.000)
+        context.insert(bisb)
+        context.insert(ila)
+        try context.save()
+
+        // 1. SMS with phone 17515151 (without explicit sender parameter) routes to BisB Account
+        let bisbSMS = "Your card ending 4411 was used for BHD 10.000 at STARBUCKS on 2026/10/28 09:15. Tel: 17515151"
+        let out1 = await SMSImporter.importText(bisbSMS, context: context, forceApprove: true, sender: nil)
+        let tx1 = try #require(out1.transaction)
+        #expect(tx1.smsBank == "BisB")
+        #expect(tx1.smsSender == "17515151")
+        #expect(tx1.accountID == bisb.id)
+        #expect(tx1.isPending == false)
+        #expect(abs(bisb.balance - 490.000) < 0.0001)
+        #expect(abs(ila.balance - 300.000) < 0.0001)
+
+        // 2. SMS with phone 17123456 (without explicit sender parameter) routes to ila Bank Account
+        let ilaSMS = "Your card ending 8822 was used for BHD 20.000 at CARREFOUR on 2026/10/28 10:30. Call 17123456"
+        let out2 = await SMSImporter.importText(ilaSMS, context: context, forceApprove: true, sender: nil)
+        let tx2 = try #require(out2.transaction)
+        #expect(tx2.smsBank == "ila")
+        #expect(tx2.smsSender == "17123456")
+        #expect(tx2.accountID == ila.id)
+        #expect(tx2.isPending == false)
+        #expect(abs(ila.balance - 280.000) < 0.0001)
+
+        // 3. User saves custom sender phone/ID linked to ila account, recognized even when Shortcut sender is nil
+        SMSUserRules.rememberBank("ila", forSender: "99001122", accountID: ila.id)
+        let customSenderSMS = "Purchase of BHD 5.000 at COSTA COFFEE on 2026/10/28 11:00. Helpline: +973 9900 1122"
+        let out3 = await SMSImporter.importText(customSenderSMS, context: context, forceApprove: true, sender: nil)
+        let tx3 = try #require(out3.transaction)
+        #expect(tx3.smsBank == "ila")
+        #expect(tx3.accountID == ila.id)
+        #expect(tx3.isPending == false)
+        #expect(abs(ila.balance - 275.000) < 0.0001)
+    }
+
+    @Test func simultaneousTransferBetweenAccountsMergesIntoSingleTransaction() async throws {
+        let context = makeCleanContext()
+        let bisb = Account(name: "BisB Account", kind: .bank, institution: "BisB", balance: 500.000)
+        bisb.smsMatch = "9001"
+        let ila = Account(name: "ila Account", kind: .bank, institution: "ila", balance: 200.000)
+        ila.smsMatch = "0846"
+        context.insert(bisb)
+        context.insert(ila)
+        try context.save()
+
+        // Case A: First SMS is Transfer Out, Second SMS at same date & time is Internal Transfer between accounts
+        let smsTransferOut = "Your account ending 9001 has been debited BHD 50.000 for outward transfer on 2026/10/27 15:26. Tel: 17515151"
+        let smsInternal = "Fawri+ payment BHD50.000, ref: BIB103KAK000KZUM was credited to IBAN ending 0846 on 2026/10/27 15:26. Balance BHD450.000. Tel: 17515151"
+
+        _ = await SMSImporter.importText(smsTransferOut, context: context, forceApprove: true)
+        let mergedOutcome = await SMSImporter.importText(smsInternal, context: context, forceApprove: true)
+
+        let allTxs = try context.fetch(FetchDescriptor<MoneyTransaction>())
+        #expect(allTxs.count == 1)
+        let singleTx = try #require(allTxs.first)
+        #expect(mergedOutcome.transaction?.id == singleTx.id)
+        #expect(singleTx.smsTransactionType == .internalTransfer)
+        #expect(singleTx.category == .internalTransfer)
+        #expect(singleTx.accountID == bisb.id)
+        #expect(singleTx.toAccountID == ila.id)
+        #expect(abs(bisb.balance - 450.000) < 0.0001)
+        #expect(abs(ila.balance - 250.000) < 0.0001)
+
+        // Case B: Reverse order (Internal Transfer arrives first, Transfer Out arrives second at same date & time)
+        let smsInternal2 = "Fawri+ payment BHD30.000, ref: BIB103KAK000AAAA was credited to IBAN ending 0846 on 2026/10/28 18:10. Balance BHD420.000. Tel: 17515151"
+        let smsTransferOut2 = "Your account ending 9001 has been debited BHD 30.000 for outward transfer on 2026/10/28 18:10. Tel: 17515151"
+
+        _ = await SMSImporter.importText(smsInternal2, context: context, forceApprove: true)
+        _ = await SMSImporter.importText(smsTransferOut2, context: context, forceApprove: true)
+
+        let allTxsAftersecond = try context.fetch(FetchDescriptor<MoneyTransaction>())
+        #expect(allTxsAftersecond.count == 2)
+        #expect(abs(bisb.balance - 420.000) < 0.0001)
+        #expect(abs(ila.balance - 280.000) < 0.0001)
+    }
 }

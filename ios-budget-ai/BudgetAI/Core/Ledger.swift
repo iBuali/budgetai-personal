@@ -279,20 +279,27 @@ enum Ledger {
         return try? context.fetch(descriptor).first
     }
 
-    /// Account used for SMS imports: the user's fixed choice, otherwise matched by card digits or bank name.
+    /// Account used for SMS imports: matched by card digits, bank phone/institution hint, or the user's fixed fallback choice.
     static func smsAccountID(context: ModelContext, digits: String?, hint: String?) -> UUID? {
         let accounts = (try? context.fetch(FetchDescriptor<Account>(sortBy: [SortDescriptor(\.createdAt)]))) ?? []
-        if let fixed = AppSettings.smsAccountID, accounts.contains(where: { $0.id == fixed }) { return fixed }
         if let digits, !digits.isEmpty,
            let match = accounts.first(where: { !$0.smsMatch.isEmpty && (digits.hasSuffix($0.smsMatch) || $0.smsMatch.hasSuffix(digits)) }) {
             return match.id
         }
+        if let hint, !hint.isEmpty,
+           let matchedByBank = SMSParser.findMatchingAccount(forBank: hint, in: context) {
+            return matchedByBank.id
+        }
+        if let fixed = AppSettings.smsAccountID, accounts.contains(where: { $0.id == fixed }) { return fixed }
         return defaultAccountID(context: context, hint: hint)
     }
 
     static func defaultAccountID(context: ModelContext, hint: String? = nil) -> UUID? {
         let accounts = (try? context.fetch(FetchDescriptor<Account>(sortBy: [SortDescriptor(\.createdAt)]))) ?? []
         if let hint, !hint.isEmpty {
+            if let matchedByBank = SMSParser.findMatchingAccount(forBank: hint, in: context) {
+                return matchedByBank.id
+            }
             let h = hint.lowercased()
             if let match = accounts.first(where: { $0.name.lowercased().contains(h) || (!$0.institution.isEmpty && h.contains($0.institution.lowercased())) || $0.institution.lowercased().contains(h) }) {
                 return match.id
@@ -305,13 +312,16 @@ enum Ledger {
     static func defaultLiquidAccountID(context: ModelContext, hint: String? = nil) -> UUID? {
         let accounts = ((try? context.fetch(FetchDescriptor<Account>(sortBy: [SortDescriptor(\.createdAt)]))) ?? [])
             .filter { $0.kind.isLiquid }
-        if let fixed = AppSettings.smsAccountID, accounts.contains(where: { $0.id == fixed }) { return fixed }
         if let hint, !hint.isEmpty {
+            if let matchedByBank = SMSParser.findMatchingAccount(forBank: hint, in: context), matchedByBank.kind.isLiquid {
+                return matchedByBank.id
+            }
             let h = hint.lowercased()
             if let match = accounts.first(where: { $0.name.lowercased().contains(h) || (!$0.institution.isEmpty && (h.contains($0.institution.lowercased()) || $0.institution.lowercased().contains(h))) }) {
                 return match.id
             }
         }
+        if let fixed = AppSettings.smsAccountID, accounts.contains(where: { $0.id == fixed }) { return fixed }
         return accounts.first(where: { $0.kind == .bank })?.id ?? accounts.first?.id
     }
 

@@ -11,18 +11,20 @@ struct AddBankSMSIntent: AppIntent {
     @Parameter(title: "Message", inputOptions: String.IntentInputOptions(multiline: true))
     var message: String
 
-    @Parameter(title: "Sender (Optional)")
+    @Parameter(
+        title: "Sender (Optional)",
+        description: "In Shortcuts, set this to Shortcut Input → Sender so the bank sender ID or phone number is fetched from the SMS."
+    )
     var sender: String?
 
     static var parameterSummary: some ParameterSummary {
-        Summary("Add \(\.$message) to Budget AI") {
-            \.$sender
-        }
+        Summary("Add \(\.$message) from \(\.$sender) to Budget AI")
     }
 
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog {
-        let outcome = await SMSImporter.importText(message, context: DataStore.shared.mainContext, sender: sender)
+        let resolvedSender = SMSParser.extractSenderOrPhone(in: message, explicitSender: sender)
+        let outcome = await SMSImporter.importText(message, context: DataStore.shared.mainContext, sender: resolvedSender)
         return .result(dialog: IntentDialog(stringLiteral: outcome.message))
     }
 }

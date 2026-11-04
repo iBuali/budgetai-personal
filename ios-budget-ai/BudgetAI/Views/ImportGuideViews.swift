@@ -9,8 +9,8 @@ struct SMSSetupGuideView: View {
         ("Open the Shortcuts app", "Go to the Automation tab and tap New Automation."),
         ("Choose Message", "Set Message Contains to \"BHD\" (or pick your bank as the sender)."),
         ("Run Immediately", "Select Run Immediately so it works without asking you."),
-        ("Add the Budget AI action", "Search for \"Add Bank SMS\" and set its Message to the Shortcut Input's content."),
-        ("Done", "Every bank alert is now read and filed automatically, with a category and duplicate check."),
+        ("Add the Budget AI action", "Search for \"Add Bank SMS\". Set Message to Shortcut Input, and tap Sender → Shortcut Input → Sender (Budget AI also fetches bank phone numbers like 17515151 for BisB or 17123456 for ila directly from the SMS)."),
+        ("Done", "Every bank alert is now read and filed automatically, with multi-account routing and duplicate transfer merging."),
     ]
 
     var body: some View {
@@ -141,6 +141,7 @@ struct SMSSavedConditionsView: View {
     @Query private var accounts: [Account]
     @Query private var goals: [SavingsGoal]
     @State private var senderBankMap: [String: String] = [:]
+    @State private var senderAccountMap: [String: UUID] = [:]
     @State private var classificationRules: [SMSUserRules.ClassificationRule] = []
     @State private var selectedFilter: SMSConditionFilter = .all
     @State private var showAddSheet = false
@@ -279,9 +280,16 @@ struct SMSSavedConditionsView: View {
                             Text(item.sender)
                                 .font(.body.weight(.semibold))
                                 .foregroundStyle(Theme.ink)
-                            Text(item.bank)
-                                .font(.subheadline)
-                                .foregroundStyle(Theme.secondaryInk)
+                            if let accID = senderAccountMap[item.sender],
+                               let linkedAcc = accounts.first(where: { $0.id == accID }) {
+                                Text("\(item.bank) · ➔ \(linkedAcc.name)")
+                                    .font(.subheadline)
+                                    .foregroundStyle(Theme.secondaryInk)
+                            } else {
+                                Text(item.bank)
+                                    .font(.subheadline)
+                                    .foregroundStyle(Theme.secondaryInk)
+                            }
                         }
                         Spacer()
                     }
@@ -454,6 +462,7 @@ struct SMSSavedConditionsView: View {
 
     private func reload() {
         senderBankMap = SMSUserRules.allSenderBanks()
+        senderAccountMap = SMSUserRules.allSenderAccounts()
         classificationRules = SMSUserRules.allClassificationRules()
     }
 }
@@ -527,12 +536,14 @@ struct AddSMSSenderBankSheet: View {
     var onSaved: () -> Void
     @Environment(\.dismiss) private var dismiss
     @Environment(AppState.self) private var appState
+    @Query(sort: \Account.createdAt) private var accounts: [Account]
     @State private var sender = ""
     @State private var selectedBank = "BisB"
     @State private var customBank = ""
     @State private var useCustomBank = false
+    @State private var selectedAccountIDString = ""
 
-    private let sampleSenders = ["BisB", "ilaBank", "NBB", "BBK", "AlSalam", "AUB", "BenefitPay", "CrediMax"]
+    private let sampleSenders = ["17515151", "17123456", "BisB", "ilaBank", "NBB", "BBK", "AlSalam", "BenefitPay"]
 
     private var effectiveBank: String {
         useCustomBank ? customBank.trimmingCharacters(in: .whitespacesAndNewlines) : selectedBank
@@ -541,8 +552,8 @@ struct AddSMSSenderBankSheet: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("SMS Sender ID or Phone Number") {
-                    TextField("e.g. BisB, ilaBank, or +973...", text: $sender)
+                Section("SMS Sender ID or Bank Phone Number") {
+                    TextField("e.g. 17515151, 17123456, BisB, ilaBank...", text: $sender)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
 
@@ -551,6 +562,7 @@ struct AddSMSSenderBankSheet: View {
                             ForEach(sampleSenders, id: \.self) { sample in
                                 Button {
                                     sender = sample
+                                    applyDefaultBank(for: sample)
                                 } label: {
                                     Text(sample)
                                         .font(.caption.weight(.medium))
@@ -582,6 +594,21 @@ struct AddSMSSenderBankSheet: View {
                     Toggle("Other / custom bank name", isOn: $useCustomBank)
                 }
 
+                if !accounts.isEmpty {
+                    Section {
+                        Picker("Target Account", selection: $selectedAccountIDString) {
+                            Text("Auto-match by bank (\(effectiveBank))").tag("")
+                            ForEach(accounts) { acc in
+                                Text(acc.menuTitle).tag(acc.id.uuidString)
+                            }
+                        }
+                    } header: {
+                        Text("Account Routing (Optional)")
+                    } footer: {
+                        Text("Link this sender or bank phone number (e.g. 17515151 for BisB, 17123456 for ila Bank) directly to one of your accounts.")
+                    }
+                }
+
                 Section {
                     Button {
                         save()
@@ -608,11 +635,24 @@ struct AddSMSSenderBankSheet: View {
         }
     }
 
+    private func applyDefaultBank(for sample: String) {
+        switch sample.lowercased() {
+        case "17515151", "bisb": selectedBank = "BisB"; useCustomBank = false
+        case "17123456", "ilabank", "ila": selectedBank = "ila"; useCustomBank = false
+        case "nbb": selectedBank = "NBB"; useCustomBank = false
+        case "bbk": selectedBank = "BBK"; useCustomBank = false
+        case "alsalam": selectedBank = "Al Salam"; useCustomBank = false
+        case "benefitpay": selectedBank = "BenefitPay"; useCustomBank = false
+        default: break
+        }
+    }
+
     private func save() {
         let cleanSender = sender.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanBank = effectiveBank
         guard !cleanSender.isEmpty, !cleanBank.isEmpty else { return }
-        SMSUserRules.rememberBank(cleanBank, forSender: cleanSender)
+        let linkedAccID = UUID(uuidString: selectedAccountIDString)
+        SMSUserRules.rememberBank(cleanBank, forSender: cleanSender, accountID: linkedAccID)
         appState.show("Linked '\(cleanSender)' to \(cleanBank)")
         onSaved()
         dismiss()
