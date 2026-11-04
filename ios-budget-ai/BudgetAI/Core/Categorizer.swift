@@ -1417,7 +1417,7 @@ enum SMSParser {
 
         // 5. Fawri+ / Fawri / Bank Transfer / IBAN Transfer analysis
         let isTransferContext = (rail?.contains("Fawri") == true)
-            || lower.range(of: "\\b(?:fawri\\+?|iban|bank transfer|wire transfer|remittance|inward transfer|outward transfer|incoming transfer|outgoing transfer|sarie)\\b|فوري\\+?|حوالة|تحويل بنكي|تحويل فوري|آيبان", options: .regularExpression) != nil
+            || lower.range(of: "\\b(?:fawri\\+?|iban|bank transfer|wire transfer|remittance|inward transfer|outward transfer|incoming transfer|outgoing transfer|transfer|sarie)\\b|فوري\\+?|حوالة|تحويل بنكي|تحويل فوري|آيبان", options: .regularExpression) != nil
 
         if isTransferContext {
             return classifyTransferMessage(
@@ -1444,8 +1444,11 @@ enum SMSParser {
 
         // Check for conflicting credit signals on non-transfer messages
         let creditSignals = [
-            "\\bhas been credited\\b", "\\bcredited to your\\b", "\\bcredited with\\b", "\\breceived in your\\b",
-            "\\bdeposit(?:ed)?\\b", "تم إيداع", "تم ايداع", "تمت إضافة", "وارد لحسابك"
+            "\\b(?:was|is|has\\s+been)?\\s*credited\\b",
+            "\\bcredited\\s+(?:to\\s+your|with)?\\b",
+            "\\breceived\\s+in\\s+your\\b",
+            "\\bdeposit(?:ed)?\\b",
+            "تم إيداع", "تم ايداع", "تمت إضافة", "وارد لحسابك", "تم قيد"
         ]
         let hasCreditSignal = creditSignals.contains(where: { lower.range(of: $0, options: .regularExpression) != nil })
 
