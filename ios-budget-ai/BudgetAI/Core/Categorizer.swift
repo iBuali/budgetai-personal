@@ -10,7 +10,8 @@ enum SMSUserRules {
     private static let senderBankKey = "smsUserSenderBankMap_v1"
     private static let classificationRulesKey = "smsUserClassificationRules_v1"
 
-    struct ClassificationRule: Codable, Equatable {
+    struct ClassificationRule: Codable, Equatable, Identifiable {
+        var id: String { signature }
         var signature: String
         var senderKey: String = ""
         var bankKey: String = ""
@@ -25,6 +26,18 @@ enum SMSUserRules {
         var toAccountIDString: String? = nil
         var goalIDString: String? = nil
         var updatedAt: Date
+
+        var transactionType: SMSTransactionType {
+            SMSTransactionType(rawValue: transactionTypeRaw) ?? .expense
+        }
+
+        var category: SpendCategory {
+            SpendCategory(rawValue: categoryRaw) ?? .other
+        }
+
+        var subcategory: SpendCategory? {
+            subcategoryRaw.flatMap { SpendCategory(rawValue: $0) }
+        }
     }
 
     static func normalizeSender(_ sender: String) -> String {
@@ -231,6 +244,30 @@ enum SMSUserRules {
             return []
         }
         return rules
+    }
+
+    /// Removes a user-saved classification rule by signature.
+    static func removeClassificationRule(signature: String) {
+        var rules = allClassificationRules()
+        rules.removeAll { $0.signature == signature }
+        if let data = try? JSONEncoder().encode(rules) {
+            UserDefaults.standard.set(data, forKey: classificationRulesKey)
+        }
+    }
+
+    /// Clears all classification rules.
+    static func clearClassificationRules() {
+        UserDefaults.standard.removeObject(forKey: classificationRulesKey)
+    }
+
+    /// Clears all sender-to-bank mappings.
+    static func clearSenderBanks() {
+        UserDefaults.standard.removeObject(forKey: senderBankKey)
+    }
+
+    /// Total count of all user-saved SMS conditions (sender banks + classification rules).
+    static func totalConditionsCount() -> Int {
+        allSenderBanks().count + allClassificationRules().count
     }
 
     static func clearAll() {

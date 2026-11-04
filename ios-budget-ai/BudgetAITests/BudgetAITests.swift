@@ -623,4 +623,42 @@ struct BudgetAITests {
         #expect(abs(base.monthlyIncome - 1000 / months) < 0.001)
         #expect(abs(base.grossSpending - 100 / months) < 0.001)
     }
+
+    @Test func savedConditionsManagementAndClearAll() throws {
+        SMSUserRules.clearAll()
+        #expect(SMSUserRules.totalConditionsCount() == 0)
+
+        // 1. Add sender bank condition
+        SMSUserRules.rememberBank("BisB", forSender: "17515151")
+        #expect(SMSUserRules.allSenderBanks().count == 1)
+        #expect(SMSUserRules.bank(forSender: "17515151") == "BisB")
+
+        // 2. Add classification condition
+        SMSUserRules.rememberClassification(
+            type: .expense,
+            category: .dining,
+            merchant: "Cafeteria",
+            bank: "BisB",
+            forRawSMS: "Purchase of BHD 2.500 at Cafeteria with card 1234",
+            sender: "17515151"
+        )
+        #expect(SMSUserRules.allClassificationRules().count == 1)
+        #expect(SMSUserRules.totalConditionsCount() == 2)
+
+        let rule = try #require(SMSUserRules.allClassificationRules().first)
+        #expect(rule.merchant == "Cafeteria")
+        #expect(rule.category == .dining)
+        #expect(rule.transactionType == .expense)
+
+        // 3. Delete single classification rule
+        SMSUserRules.removeClassificationRule(signature: rule.signature)
+        #expect(SMSUserRules.allClassificationRules().count == 0)
+        #expect(SMSUserRules.totalConditionsCount() == 1)
+
+        // 4. Clear all conditions
+        SMSUserRules.clearAll()
+        #expect(SMSUserRules.totalConditionsCount() == 0)
+        #expect(SMSUserRules.allSenderBanks().isEmpty)
+        #expect(SMSUserRules.allClassificationRules().isEmpty)
+    }
 }
