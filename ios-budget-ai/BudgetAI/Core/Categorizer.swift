@@ -69,13 +69,11 @@ enum SMSUserRules {
         map[key] = cleanBank
         UserDefaults.standard.set(map, forKey: senderBankKey)
 
-        var accMap = (UserDefaults.standard.dictionary(forKey: senderAccountKey) as? [String: String]) ?? [:]
         if let accountID {
+            var accMap = (UserDefaults.standard.dictionary(forKey: senderAccountKey) as? [String: String]) ?? [:]
             accMap[key] = accountID.uuidString
-        } else {
-            accMap.removeValue(forKey: key)
+            UserDefaults.standard.set(accMap, forKey: senderAccountKey)
         }
-        UserDefaults.standard.set(accMap, forKey: senderAccountKey)
     }
 
     /// Matches a user-saved sender bank rule against the explicit `sender` parameter OR inside the `rawSMS` body.
@@ -269,7 +267,7 @@ enum SMSUserRules {
     static func rememberTransactionRule(for tx: MoneyTransaction) {
         if let bank = tx.smsBank, !bank.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
            let sender = tx.smsSender, !sender.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            rememberBank(bank, forSender: sender)
+            rememberBank(bank, forSender: sender, accountID: tx.accountID)
         }
         guard let raw = tx.rawText, !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         let type = tx.effectiveTransactionType
@@ -920,26 +918,59 @@ enum SMSParser {
             bank: bankInfo.bank,
             counterparty: partyKey
         ), let ruleType = SMSTransactionType(rawValue: userRule.transactionTypeRaw) {
-            let ruleCat = SpendCategory(rawValue: userRule.categoryRaw) ?? (ruleType.isTransferType ? .transfers : (ruleType.countsAsIncome ? .income : .other))
+            var finalRuleType = ruleType
+            var ruleCat = SpendCategory(rawValue: userRule.categoryRaw) ?? (ruleType.isTransferType ? .transfers : (ruleType.countsAsIncome ? .income : .other))
             let ruleSubcat = userRule.subcategoryRaw.flatMap(SpendCategory.init(rawValue:))
             let resolvedBank = userRule.bank ?? bankInfo.bank
-            let isInc = ruleType.isIncomeDirection
+            let matchedBankAcc = context.flatMap { findMatchingAccount(forBank: resolvedBank, senderOrPhone: effectiveSender, digits: suffixes.accountSuffix, in: $0) }
+            let resolvedRuleAccountID: UUID? = {
+                if let bankAcc = matchedBankAcc {
+                    if let savedID = userRule.accountIDString.flatMap(UUID.init(uuidString:)),
+                       let context, let savedAcc = Ledger.account(savedID, context: context),
+                       let resolvedBank, accountMatchesBank(savedAcc, bank: resolvedBank) {
+                        return savedID
+                    }
+                    return bankAcc.id
+                }
+                return userRule.accountIDString.flatMap(UUID.init(uuidString:)) ?? senderRuleAccountID
+            }()
+            var resolvedToAccountID = userRule.toAccountIDString.flatMap(UUID.init(uuidString:))
+            if let context, let recipSuffix = suffixes.recipientSuffix,
+               let ownDest = findMatchingAccount(suffix: recipSuffix, excludingAccountID: resolvedRuleAccountID, in: context) {
+                if resolvedToAccountID == nil || resolvedToAccountID == resolvedRuleAccountID {
+                    resolvedToAccountID = ownDest.id
+                }
+                if !finalRuleType.isIncomeDirection {
+                    finalRuleType = .internalTransfer
+                    ruleCat = .internalTransfer
+                }
+            }
+            let isInc = finalRuleType.isIncomeDirection
             let defaultMerch = merchant(in: normalized, isIncome: isInc, rail: rail, recipientSuffix: suffixes.recipientSuffix)
-                ?? defaultMerchant(for: ruleType, rail: rail, recipientSuffix: suffixes.recipientSuffix)
-            let merch = (userRule.merchant?.isEmpty == false) ? userRule.merchant! : defaultMerch
+                ?? defaultMerchant(for: finalRuleType, rail: rail, recipientSuffix: suffixes.recipientSuffix)
+            var merch = (userRule.merchant?.isEmpty == false) ? userRule.merchant! : defaultMerch
+            if finalRuleType == .internalTransfer,
+               let context, let toID = resolvedToAccountID, let destAcc = Ledger.account(toID, context: context),
+               (userRule.merchant == nil || merch.lowercased().hasPrefix("iban ending") || merch.lowercased().hasPrefix("own account")) {
+                if let srcAcc = matchedBankAcc, srcAcc.id != destAcc.id {
+                    merch = "\(srcAcc.name) → \(destAcc.name)"
+                } else {
+                    merch = "Transfer to \(destAcc.name)"
+                }
+            }
             return ParsedSMS(
                 amount: amt,
                 currency: currency,
                 isIncome: isInc,
                 merchant: merch,
-                category: ruleType.isTransferType && ruleCat == .other ? .transfers : ruleCat,
+                category: finalRuleType == .internalTransfer ? .internalTransfer : (finalRuleType.isTransferType && ruleCat == .other ? .transfers : ruleCat),
                 subcategory: ruleSubcat,
                 date: parsedDate,
                 accountHint: resolvedBank,
                 cardDigits: suffixes.accountSuffix,
                 balance: bal,
                 note: buildNote(rail: rail, reference: ref),
-                transactionType: ruleType,
+                transactionType: finalRuleType,
                 detectedBank: resolvedBank,
                 bankConfidence: resolvedBank != nil ? .high : bankInfo.confidence,
                 confidence: .high,
@@ -949,8 +980,8 @@ enum SMSParser {
                 recipientSuffix: suffixes.recipientSuffix,
                 timeString: parsedTime,
                 sender: effectiveSender,
-                accountID: userRule.accountIDString.flatMap(UUID.init(uuidString:)) ?? senderRuleAccountID,
-                toAccountID: userRule.toAccountIDString.flatMap(UUID.init(uuidString:)),
+                accountID: resolvedRuleAccountID,
+                toAccountID: resolvedToAccountID,
                 goalID: userRule.goalIDString.flatMap(UUID.init(uuidString:)),
                 matchedUserRule: true
             )
@@ -987,9 +1018,39 @@ enum SMSParser {
             context: context
         )
 
-        let txType = classification.type
+        let matchedSourceAccount = context.flatMap {
+            findMatchingAccount(forBank: bankInfo.bank, senderOrPhone: effectiveSender, digits: suffixes.accountSuffix, in: $0)
+        }
+        let resolvedSourceAccountID = matchedSourceAccount?.id ?? senderRuleAccountID
+
+        var txType = classification.type
+        var resolvedToAccountID = classification.toAccountID
+        var resolvedGoalID = classification.goalID
+        var customCounterparty = classification.counterparty
+        var customReason = classification.reason
+
+        // Universal Internal Transfer rule: whenever the recipient IBAN / account suffix from the SMS
+        // matches the smsMatch number of one of the user's accounts in the app, classify as Internal Transfer
+        // and link that destination account in `toAccountID`.
+        if let context, let recipSuffix = suffixes.recipientSuffix,
+           let ownDest = findMatchingAccount(suffix: recipSuffix, excludingAccountID: resolvedSourceAccountID, in: context),
+           !txType.isIncomeDirection {
+            txType = .internalTransfer
+            resolvedToAccountID = ownDest.id
+            if let srcAcc = matchedSourceAccount, srcAcc.id != ownDest.id {
+                customCounterparty = "\(srcAcc.name) → \(ownDest.name)"
+            } else {
+                customCounterparty = "Transfer to \(ownDest.name)"
+            }
+            customReason = "Recipient IBAN/account ending \(recipSuffix) matches your account '\(ownDest.name)'"
+            if resolvedGoalID == nil,
+               let goal = findMatchingGoal(suffix: recipSuffix, accountID: ownDest.id, in: context) {
+                resolvedGoalID = goal.id
+            }
+        }
+
         let isIncome = txType.isIncomeDirection
-        let extractedMerchant = classification.counterparty
+        let extractedMerchant = customCounterparty
             ?? merchant(in: normalized, isIncome: isIncome, rail: rail, recipientSuffix: suffixes.recipientSuffix)
             ?? defaultMerchant(for: txType, rail: rail, recipientSuffix: suffixes.recipientSuffix)
 
@@ -1050,16 +1111,16 @@ enum SMSParser {
             transactionType: txType,
             detectedBank: bankInfo.bank,
             bankConfidence: bankInfo.confidence,
-            confidence: classification.confidence,
-            classificationReason: classification.reason,
+            confidence: txType == .internalTransfer ? .high : classification.confidence,
+            classificationReason: customReason,
             referenceNumber: ref,
             accountSuffix: suffixes.accountSuffix,
             recipientSuffix: suffixes.recipientSuffix,
             timeString: parsedTime,
             sender: effectiveSender,
-            accountID: senderRuleAccountID,
-            toAccountID: classification.toAccountID,
-            goalID: classification.goalID
+            accountID: resolvedSourceAccountID,
+            toAccountID: resolvedToAccountID,
+            goalID: resolvedGoalID
         )
     }
 
@@ -1101,6 +1162,10 @@ enum SMSParser {
         guard let recipRange = Range(match.range(at: 3), in: singleLine) else { return nil }
         let recipientIBANSuffix = String(singleLine[recipRange])
 
+        let matchedSourceAcc = context.flatMap {
+            findMatchingAccount(forBank: bankInfo.bank, senderOrPhone: sender, in: $0)
+        }
+
         // Check if user has a correction rule specifically for this message
         if let userRule = SMSUserRules.matchingRule(
             forRawSMS: singleLine,
@@ -1113,26 +1178,58 @@ enum SMSParser {
             bank: bankInfo.bank,
             counterparty: recipientIBANSuffix
         ), let ruleType = SMSTransactionType(rawValue: userRule.transactionTypeRaw) {
+            var finalRuleType = ruleType
             let resolvedBank = userRule.bank ?? bankInfo.bank
-            let ruleCat = SpendCategory(rawValue: userRule.categoryRaw) ?? (ruleType.isTransferType ? .transfers : .other)
+            let bankAcc = context.flatMap { findMatchingAccount(forBank: resolvedBank, senderOrPhone: sender, in: $0) } ?? matchedSourceAcc
+            let resolvedAccID: UUID? = {
+                if let bankAcc {
+                    if let savedID = userRule.accountIDString.flatMap(UUID.init(uuidString:)),
+                       let context, let savedAcc = Ledger.account(savedID, context: context),
+                       let resolvedBank, accountMatchesBank(savedAcc, bank: resolvedBank) {
+                        return savedID
+                    }
+                    return bankAcc.id
+                }
+                return userRule.accountIDString.flatMap(UUID.init(uuidString:))
+            }()
+            var ruleCat = SpendCategory(rawValue: userRule.categoryRaw) ?? (ruleType.isTransferType ? .transfers : .other)
             let ruleSubcat = userRule.subcategoryRaw.flatMap(SpendCategory.init(rawValue:))
-            let merch = (userRule.merchant?.isEmpty == false) ? userRule.merchant! : "IBAN ending \(recipientIBANSuffix)"
-            let ruleToAcc = userRule.toAccountIDString.flatMap(UUID.init(uuidString:))
+            var ruleToAcc = userRule.toAccountIDString.flatMap(UUID.init(uuidString:))
+            if let context,
+               let ownDest = findMatchingAccount(suffix: recipientIBANSuffix, excludingAccountID: resolvedAccID, in: context) {
+                if ruleToAcc == nil || ruleToAcc == resolvedAccID {
+                    ruleToAcc = ownDest.id
+                }
+                if !finalRuleType.isIncomeDirection {
+                    finalRuleType = .internalTransfer
+                    ruleCat = .internalTransfer
+                }
+            }
+            var merch = (userRule.merchant?.isEmpty == false) ? userRule.merchant! : "IBAN ending \(recipientIBANSuffix)"
+            if finalRuleType == .internalTransfer,
+               let context, let toID = ruleToAcc, let destAcc = Ledger.account(toID, context: context),
+               (userRule.merchant == nil || merch.lowercased().hasPrefix("iban ending") || merch.lowercased().hasPrefix("own account")) {
+                if let bankAcc, bankAcc.id != destAcc.id {
+                    merch = "\(bankAcc.name) → \(destAcc.name)"
+                } else {
+                    merch = "Transfer to \(destAcc.name)"
+                }
+            }
             let ruleGoal = userRule.goalIDString.flatMap(UUID.init(uuidString:))
                 ?? (context.flatMap { findMatchingGoal(suffix: recipientIBANSuffix, accountID: ruleToAcc, in: $0)?.id })
             return ParsedSMS(
                 amount: amount,
                 currency: currency ?? "BHD",
-                isIncome: ruleType.isIncomeDirection,
+                isIncome: finalRuleType.isIncomeDirection,
                 merchant: merch,
-                category: ruleType.isTransferType && ruleCat == .other ? .transfers : ruleCat,
+                category: finalRuleType == .internalTransfer ? .internalTransfer : (finalRuleType.isTransferType && ruleCat == .other ? .transfers : ruleCat),
                 subcategory: ruleSubcat,
                 date: date,
                 accountHint: resolvedBank,
                 cardDigits: nil,
                 balance: balance,
                 note: buildNote(rail: serviceName, reference: matchedRef),
-                transactionType: ruleType,
+                transactionType: finalRuleType,
                 detectedBank: resolvedBank,
                 bankConfidence: resolvedBank != nil ? .high : bankInfo.confidence,
                 confidence: .high,
@@ -1142,7 +1239,7 @@ enum SMSParser {
                 recipientSuffix: recipientIBANSuffix,
                 timeString: timeString,
                 sender: sender,
-                accountID: userRule.accountIDString.flatMap(UUID.init(uuidString:)),
+                accountID: resolvedAccID,
                 toAccountID: ruleToAcc,
                 goalID: ruleGoal,
                 matchedUserRule: true
@@ -1157,18 +1254,21 @@ enum SMSParser {
         var reason = "Verified \(bankInfo.bank ?? "Bahrain bank") \(serviceName) outgoing payment format (payment credited to recipient IBAN ending \(recipientIBANSuffix); reported balance is sender's balance after transfer)"
 
         if let context {
-            if let ownDest = findMatchingAccount(suffix: recipientIBANSuffix, in: context) {
-                let sourceID = Ledger.defaultAccountID(context: context, hint: bankInfo.bank)
-                if sourceID == nil || sourceID != ownDest.id {
-                    txType = .internalTransfer
-                    toAccID = ownDest.id
-                    reason = "Verified \(serviceName) transfer to user's own account (\(ownDest.name), ending \(recipientIBANSuffix))"
+            let sourceID = matchedSourceAcc?.id
+            if let ownDest = findMatchingAccount(suffix: recipientIBANSuffix, excludingAccountID: sourceID, in: context) {
+                txType = .internalTransfer
+                toAccID = ownDest.id
+                if let srcAcc = matchedSourceAcc, srcAcc.id != ownDest.id {
+                    merch = "\(srcAcc.name) → \(ownDest.name)"
+                } else {
+                    merch = "Transfer to \(ownDest.name)"
                 }
+                reason = "Verified \(serviceName) transfer to user's own account (\(ownDest.name), ending \(recipientIBANSuffix))"
             }
             if let goal = findMatchingGoal(suffix: recipientIBANSuffix, accountID: toAccID, in: context) {
                 txType = .internalTransfer
                 matchedGoalID = goal.id
-                if toAccID == nil, let linkedAcc = goal.linkedAccountID {
+                if toAccID == nil, let linkedAcc = goal.linkedAccountID, linkedAcc != sourceID {
                     toAccID = linkedAcc
                 }
                 merch = "Saved to \(goal.name)"
@@ -1198,6 +1298,7 @@ enum SMSParser {
             recipientSuffix: recipientIBANSuffix,
             timeString: timeString,
             sender: sender,
+            accountID: matchedSourceAcc?.id,
             toAccountID: toAccID,
             goalID: matchedGoalID
         )
@@ -1526,7 +1627,8 @@ enum SMSParser {
         if isOutgoing && !isIncoming {
             // Check if the destination suffix matches one of the user's own accounts or a linked SavingsGoal -> Internal Transfer
             if let context, let recipSuffix = suffixes.recipientSuffix {
-                let ownDest = findMatchingAccount(suffix: recipSuffix, in: context)
+                let sourceAcc = findMatchingAccount(forBank: bank, digits: suffixes.accountSuffix, in: context)
+                let ownDest = findMatchingAccount(suffix: recipSuffix, excludingAccountID: sourceAcc?.id, in: context)
                 let matchedGoal = findMatchingGoal(suffix: recipSuffix, accountID: ownDest?.id, in: context)
                 if let matchedGoal {
                     return ClassificationOutcome(
@@ -1539,17 +1641,19 @@ enum SMSParser {
                     )
                 }
                 if let ownDest {
-                    let sourceID = suffixes.accountSuffix.flatMap { findMatchingAccount(suffix: $0, in: context)?.id }
-                        ?? Ledger.defaultAccountID(context: context, hint: bank)
-                    if sourceID == nil || sourceID != ownDest.id {
-                        return ClassificationOutcome(
-                            type: .internalTransfer,
-                            confidence: .high,
-                            reason: "Outgoing transfer to user's own account (\(ownDest.name), ending \(recipSuffix))",
-                            counterparty: "Transfer to \(ownDest.name)",
-                            toAccountID: ownDest.id
-                        )
-                    }
+                    let cp: String = {
+                        if let sourceAcc, sourceAcc.id != ownDest.id {
+                            return "\(sourceAcc.name) → \(ownDest.name)"
+                        }
+                        return "Transfer to \(ownDest.name)"
+                    }()
+                    return ClassificationOutcome(
+                        type: .internalTransfer,
+                        confidence: .high,
+                        reason: "Outgoing transfer to user's own account (\(ownDest.name), ending \(recipSuffix))",
+                        counterparty: cp,
+                        toAccountID: ownDest.id
+                    )
                 }
             }
             return ClassificationOutcome(
@@ -1573,18 +1677,6 @@ enum SMSParser {
                         goalID: matchedGoal.id
                     )
                 }
-                // Check if the sender suffix matches one of the user's own accounts -> Internal Transfer
-                if let srcSuffix = suffixes.accountSuffix,
-                   let recipSuffix = suffixes.recipientSuffix,
-                   srcSuffix != recipSuffix,
-                   let ownSrc = findMatchingAccount(suffix: srcSuffix, in: context) {
-                    return ClassificationOutcome(
-                        type: .internalTransfer,
-                        confidence: .high,
-                        reason: "Incoming transfer from user's own account (\(ownSrc.name), ending \(srcSuffix))",
-                        counterparty: "Transfer from \(ownSrc.name)"
-                    )
-                }
             }
             return ClassificationOutcome(
                 type: .transferIn,
@@ -1601,81 +1693,141 @@ enum SMSParser {
         )
     }
 
-    static func findMatchingAccount(suffix: String, in context: ModelContext) -> Account? {
-        let clean = suffix.trimmingCharacters(in: .whitespacesAndNewlines)
+    static let bankAliasTable: [String: [String]] = [
+        "bisb": ["bisb", "bahrain islamic", "البحرين الإسلامي", "البحرين الاسلامي", "17515151"],
+        "ila": ["ila", "ilabank", "ila bank", "بنك إلى", "بنك الى", "17123456"],
+        "nbb": ["nbb", "national bank of bahrain", "البنك الوطني", "17228800"],
+        "bbk": ["bbk", "bank of bahrain and kuwait", "البحرين والكويت", "17205555"],
+        "al salam": ["al salam", "alsalam", "al salam bank", "salam", "بنك السلام", "السلام", "17565656"],
+        "kfh": ["kfh", "kuwait finance", "بيت التمويل", "بيتك", "17777777"],
+        "aub": ["aub", "ahli united", "الأهلي المتحد", "17229999"],
+        "khaleeji": ["khaleeji", "khaleeji bank", "خليجي", "17543210"],
+        "ithmaar": ["ithmaar", "ithmaar bank", "إثمار", "اثمار", "17508508"],
+        "benefitpay": ["benefitpay", "benefit pay", "benefit", "بنفت", "13300300"],
+        "bank abc": ["bank abc", "abc", "العربية المصرفية"],
+        "beyon money": ["beyon money", "beyon", "بيون"],
+        "bfc pay": ["bfc pay", "bfc"],
+        "stcpay": ["stc pay", "stcpay"]
+    ]
+
+    private static func cleanAccountDigits(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let stripped = trimmed.replacingOccurrences(of: "[\\s\\-•*#xX·]", with: "", options: .regularExpression)
+        let trailingDigits = stripped.replacingOccurrences(of: "^.*?(?=\\d+$)", with: "", options: .regularExpression)
+        if !trailingDigits.isEmpty && trailingDigits.allSatisfy(\.isNumber) {
+            return trailingDigits
+        }
+        return stripped.lowercased()
+    }
+
+    static func findMatchingAccount(suffix: String, excludingAccountID: UUID? = nil, in context: ModelContext) -> Account? {
+        let clean = cleanAccountDigits(suffix)
         guard !clean.isEmpty else { return nil }
         let accounts = (try? context.fetch(FetchDescriptor<Account>(sortBy: [SortDescriptor(\.createdAt)]))) ?? []
         return accounts.first { acc in
-            let m = acc.smsMatch.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let excludingAccountID, acc.id == excludingAccountID { return false }
+            let m = cleanAccountDigits(acc.smsMatch)
             guard !m.isEmpty else { return false }
-            return clean.hasSuffix(m) || m.hasSuffix(clean)
+            return clean == m || clean.hasSuffix(m) || m.hasSuffix(clean)
         }
     }
 
-    /// Resolves a user `Account` from multiple accounts based on a saved sender rule, phone number (e.g. 17515151 -> BisB, 17123456 -> ila),
-    /// or identified bank name/aliases.
-    static func findMatchingAccount(forBank bank: String?, senderOrPhone: String? = nil, in context: ModelContext) -> Account? {
+    /// Checks whether a user `Account` matches a given bank name (e.g. "BisB", "ila", "NBB", "BBK").
+    static func accountMatchesBank(_ acc: Account, bank: String) -> Bool {
+        let bLower = bank.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !bLower.isEmpty else { return false }
+        let aliases: [String] = {
+            if let direct = bankAliasTable[bLower] { return direct }
+            for (_, list) in bankAliasTable where list.contains(where: { bLower.contains($0) || $0.contains(bLower) }) {
+                return list
+            }
+            return [bLower]
+        }()
+        let nameLower = acc.name.lowercased()
+        let instLower = acc.institution.lowercased()
+        let matchLower = acc.smsMatch.lowercased()
+        let combined = "\(nameLower) \(instLower) \(matchLower)"
+        for alias in aliases {
+            if alias.count <= 4 {
+                let escaped = NSRegularExpression.escapedPattern(for: alias)
+                if combined.range(of: "\\b\(escaped)\\b", options: .regularExpression) != nil || nameLower == alias || instLower == alias {
+                    return true
+                }
+            } else if combined.contains(alias) {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Infers the canonical bank name (from `BahrainBankCatalog`) for a given `Account`, if recognizable.
+    static func bankName(forAccount acc: Account) -> String? {
+        for bank in BahrainBankCatalog.bahrainBanks {
+            if accountMatchesBank(acc, bank: bank) {
+                return bank
+            }
+        }
+        let inst = acc.institution.trimmingCharacters(in: .whitespacesAndNewlines)
+        return inst.isEmpty ? nil : inst
+    }
+
+    /// Resolves a user `Account` from multiple accounts based on the SMS sender bank (`bank`),
+    /// saved sender rule, or phone number (e.g. 17515151 -> BisB, 17123456 -> ila).
+    /// Prioritizes matching the SMS sender bank so the `Account` field is always the same as the SMS sender bank.
+    static func findMatchingAccount(forBank bank: String?, senderOrPhone: String? = nil, digits: String? = nil, in context: ModelContext) -> Account? {
         let accounts = (try? context.fetch(FetchDescriptor<Account>(sortBy: [SortDescriptor(\.createdAt)]))) ?? []
         guard !accounts.isEmpty else { return nil }
+        let sortedAccounts = accounts.sorted { ($0.kind.isLiquid ? 0 : 1) < ($1.kind.isLiquid ? 0 : 1) }
 
-        // 1. Check user-saved sender-to-account rule first
-        if let senderOrPhone, let savedAccID = SMSUserRules.accountID(forSender: senderOrPhone),
-           let acc = accounts.first(where: { $0.id == savedAccID }) {
-            return acc
+        // 1. Primary rule: When the SMS sender bank is known, ALWAYS match an account belonging to that bank first
+        if let bank, !bank.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let matchingBankAccounts = sortedAccounts.filter { accountMatchesBank($0, bank: bank) }
+            if !matchingBankAccounts.isEmpty {
+                if let digits, !digits.isEmpty {
+                    let cleanD = cleanAccountDigits(digits)
+                    if !cleanD.isEmpty,
+                       let exactByDigits = matchingBankAccounts.first(where: {
+                           let m = cleanAccountDigits($0.smsMatch)
+                           return !m.isEmpty && (cleanD == m || cleanD.hasSuffix(m) || m.hasSuffix(cleanD))
+                       }) {
+                        return exactByDigits
+                    }
+                }
+                if let senderOrPhone,
+                   let savedAccID = SMSUserRules.accountID(forSender: senderOrPhone),
+                   let savedInBank = matchingBankAccounts.first(where: { $0.id == savedAccID }) {
+                    return savedInBank
+                }
+                return matchingBankAccounts.first
+            }
         }
 
-        // 2. Check if sender/phone digits match an account's smsMatch field
+        // 2. Check user-saved sender-to-account rule (only if bank was nil or no account matched bank by name/institution)
+        if let senderOrPhone, let savedAccID = SMSUserRules.accountID(forSender: senderOrPhone),
+           let acc = accounts.first(where: { $0.id == savedAccID }) {
+            if let bank, !bank.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               let accBank = bankName(forAccount: acc),
+               !accountMatchesBank(acc, bank: bank) {
+                // Saved account clearly belongs to a different bank; do not return a mismatched bank account
+                _ = accBank
+            } else {
+                return acc
+            }
+        }
+
+        // 3. Check if sender/phone digits match an account's smsMatch field
         if let senderOrPhone {
             let cleanSender = senderOrPhone.trimmingCharacters(in: .whitespacesAndNewlines)
-            let digits = SMSUserRules.normalizePhoneDigits(cleanSender)
-            if !digits.isEmpty,
-               let acc = accounts.first(where: {
+            let phoneDigits = SMSUserRules.normalizePhoneDigits(cleanSender)
+            if !phoneDigits.isEmpty,
+               let acc = sortedAccounts.first(where: {
                    let m = SMSUserRules.normalizePhoneDigits($0.smsMatch)
-                   return !m.isEmpty && (m == digits || digits.hasSuffix(m) || m.hasSuffix(digits))
+                   return !m.isEmpty && (m == phoneDigits || phoneDigits.hasSuffix(m) || m.hasSuffix(phoneDigits))
                }) {
                 return acc
             }
         }
 
-        // 3. Match by identified bank name and aliases across the user's multiple accounts
-        guard let bank, !bank.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-        let bLower = bank.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-
-        let aliasTable: [String: [String]] = [
-            "bisb": ["bisb", "bahrain islamic", "البحرين الإسلامي", "البحرين الاسلامي", "17515151"],
-            "ila": ["ila", "ilabank", "ila bank", "بنك إلى", "بنك الى", "17123456"],
-            "nbb": ["nbb", "national bank of bahrain", "البنك الوطني", "17228800"],
-            "bbk": ["bbk", "bank of bahrain and kuwait", "البحرين والكويت", "17205555"],
-            "al salam": ["al salam", "alsalam", "salam", "بنك السلام", "السلام", "17565656"],
-            "kfh": ["kfh", "kuwait finance", "بيت التمويل", "بيتك", "17777777"],
-            "aub": ["aub", "ahli united", "الأهلي المتحد", "17229999"],
-            "khaleeji": ["khaleeji", "خليجي", "17543210"],
-            "ithmaar": ["ithmaar", "إثمار", "اثمار", "17508508"],
-            "benefitpay": ["benefitpay", "benefit pay", "benefit", "بنفت", "13300300"],
-            "bank abc": ["bank abc", "abc", "العربية المصرفية"],
-            "beyon money": ["beyon money", "beyon", "بيون"],
-            "bfc pay": ["bfc pay", "bfc"]
-        ]
-
-        let aliases = aliasTable[bLower] ?? [bLower]
-        // Prefer liquid (bank/cash) accounts first, then any account matching the bank aliases
-        let sortedAccounts = accounts.sorted { ($0.kind.isLiquid ? 0 : 1) < ($1.kind.isLiquid ? 0 : 1) }
-        for acc in sortedAccounts {
-            let nameLower = acc.name.lowercased()
-            let instLower = acc.institution.lowercased()
-            let matchLower = acc.smsMatch.lowercased()
-            let combined = "\(nameLower) \(instLower) \(matchLower)"
-            for alias in aliases {
-                if alias.count <= 4 {
-                    let escaped = NSRegularExpression.escapedPattern(for: alias)
-                    if combined.range(of: "\\b\(escaped)\\b", options: .regularExpression) != nil || nameLower == alias || instLower == alias {
-                        return acc
-                    }
-                } else if combined.contains(alias) {
-                    return acc
-                }
-            }
-        }
         return nil
     }
 
@@ -1731,9 +1883,10 @@ enum SMSParser {
 
         var recipientSuffix: String?
         let recipientPatterns = [
-            "(?i)(?:credited\\s+to|transferred\\s+to|sent\\s+to|\\bto)\\s+(?:iban|a/c|acct|account)\\s*(?:ending(?:\\s+with|\\s+in)?|no\\.?|number)?\\s*[:\\-]?\\s*[x*#]*([0-9]{3,6})\\b",
-            "(?i)(?:beneficiary|recipient)\\s+(?:iban|a/c|acct|account)?\\s*(?:ending)?\\s*[:\\-]?\\s*[x*#]*([0-9]{3,6})\\b",
-            "(?i)(?:إلى|الى|لصالح)\\s*(?:حساب|آيبان|ايبان)\\s*(?:ينتهي\\s*بـ?|رقم)?\\s*[:\\-]?\\s*[x*#]*([0-9]{3,6})\\b"
+            "(?i)(?:credited\\s+to|transferred\\s+to|sent\\s+to|\\bto)\\s+(?!your\\b)(?:iban|a/c|acct|account)\\s*(?:ending(?:\\s+with|\\s+in)?|no\\.?|number)?\\s*[:\\-]?\\s*(?:[A-Z]{2}[0-9A-Z*xX•#]*?)?([0-9]{3,6})\\b",
+            "(?i)(?:beneficiary|recipient)\\s+(?:iban|a/c|acct|account)?\\s*(?:ending(?:\\s+with|\\s+in)?|no\\.?|number)?\\s*[:\\-]?\\s*(?:[A-Z]{2}[0-9A-Z*xX•#]*?)?([0-9]{3,6})\\b",
+            "(?i)\\biban\\s+ending\\s+(?:with\\s+|in\\s+)?[xX*#•]*([0-9]{3,6})\\b",
+            "(?i)(?:إلى|الى|لصالح)\\s*(?!حسابك)(?:حساب|آيبان|ايبان)\\s*(?:ينتهي\\s*بـ?|رقم)?\\s*[:\\-]?\\s*(?:[A-Z]{2}[0-9A-Z*xX•#]*?)?([0-9]{3,6})\\b"
         ]
         for pattern in recipientPatterns {
             if let regex = try? NSRegularExpression(pattern: pattern),
@@ -1746,17 +1899,18 @@ enum SMSParser {
 
         // Remove recipient clause before searching for source card/account suffix so recipient IBAN is never confused with user's card/account
         let textWithoutRecipient = text.replacingOccurrences(
-            of: "(?i)(?:credited\\s+to|transferred\\s+to|sent\\s+to|\\bto)\\s+(?:iban|a/c|acct|account)\\s*(?:ending(?:\\s+with|\\s+in)?|no\\.?|number)?\\s*[:\\-]?\\s*[x*#]*[0-9]{3,6}\\b",
+            of: "(?i)(?:credited\\s+to|transferred\\s+to|sent\\s+to|\\bto)\\s+(?!your\\b)(?:iban|a/c|acct|account)\\s*(?:ending(?:\\s+with|\\s+in)?|no\\.?|number)?\\s*[:\\-]?\\s*(?:[A-Z]{2}[0-9A-Z*xX•#]*?)?[0-9]{3,6}\\b",
             with: " ",
             options: .regularExpression
         )
 
         var accountSuffix: String?
         let sourcePatterns = [
-            "(?i)(?:from|your|using)\\s+(?:card|a/c|acct|account|iban)\\s*(?:ending(?:\\s+with|\\s+in)?|no\\.?|number)?\\s*[:\\-]?\\s*(?:xx|[x*#])*([0-9]{3,6})\\b",
-            "(?i)(?:card|a/c|acct|account)\\s+ending\\s*(?:with|in)?\\s*[x*#]*([0-9]{3,6})\\b",
-            "(?i)(?:card|a/c|acct|account|iban)\\s*(?:no\\.?|number|#)?\\s*[:\\-]?\\s*(?:xx|[x*#])+([0-9]{3,6})\\b",
-            "(?i)(?:بطاقة|بطاقتك|حساب|حسابك)\\s*(?:رقم|مدى|ائتمانية|ينتهي\\s*بـ?|تنتهي\\s*بـ?)?\\s*[:\\-]?\\s*[x*#]*([0-9]{3,6})\\b"
+            "(?i)(?:your|using)\\s+(?:card|a/c|acct|account|iban)\\s*(?:ending(?:\\s+with|\\s+in)?|no\\.?|number)?\\s*[:\\-]?\\s*(?:xx|[xX*#•])*([0-9]{3,6})\\b",
+            "(?i)(?:from)\\s+(?:your\\s+)?(?:card|a/c|acct|account|iban)\\s*(?:ending(?:\\s+with|\\s+in)?|no\\.?|number)?\\s*[:\\-]?\\s*(?:xx|[xX*#•])*([0-9]{3,6})\\b",
+            "(?i)(?:card|a/c|acct|account)\\s+ending\\s*(?:with|in)?\\s*[xX*#•]*([0-9]{3,6})\\b",
+            "(?i)(?:card|a/c|acct|account|iban)\\s*(?:no\\.?|number|#)?\\s*[:\\-]?\\s*(?:xx|[xX*#•])+([0-9]{3,6})\\b",
+            "(?i)(?:بطاقة|بطاقتك|حساب|حسابك)\\s*(?:رقم|مدى|ائتمانية|ينتهي\\s*بـ?|تنتهي\\s*بـ?)?\\s*[:\\-]?\\s*[xX*#•]*([0-9]{3,6})\\b"
         ]
         for pattern in sourcePatterns {
             if let regex = try? NSRegularExpression(pattern: pattern),
@@ -1880,11 +2034,16 @@ enum SMSParser {
              ["dd/MM/yyyy HH:mm:ss", "dd/MM/yyyy HH:mm", "d/M/yyyy HH:mm:ss", "d/M/yyyy HH:mm"]),
             ("\\b([0-3]?[0-9]-[01]?[0-9]-20[0-9]{2}\\s+[0-2][0-9]:[0-5][0-9](?::[0-5][0-9])?)\\b",
              ["dd-MM-yyyy HH:mm:ss", "dd-MM-yyyy HH:mm", "d-M-yyyy HH:mm:ss", "d-M-yyyy HH:mm"]),
+            ("\\b([0-3]?[0-9]/[01]?[0-9]/[0-9]{2}\\s+[0-2][0-9]:[0-5][0-9](?::[0-5][0-9])?)\\b",
+             ["dd/MM/yy HH:mm:ss", "dd/MM/yy HH:mm", "d/M/yy HH:mm:ss", "d/M/yy HH:mm"]),
+            ("\\b([0-3]?[0-9]-[01]?[0-9]-[0-9]{2}\\s+[0-2][0-9]:[0-5][0-9](?::[0-5][0-9])?)\\b",
+             ["dd-MM-yy HH:mm:ss", "dd-MM-yy HH:mm", "d-M-yy HH:mm:ss", "d-M-yy HH:mm"]),
             ("\\b(20[0-9]{2}/[01]?[0-9]/[0-3]?[0-9])\\b", ["yyyy/MM/dd", "yyyy/M/d"]),
             ("\\b(20[0-9]{2}-[01]?[0-9]-[0-3]?[0-9])\\b", ["yyyy-MM-dd", "yyyy-M-d"]),
             ("\\b([0-3]?[0-9]/[01]?[0-9]/20[0-9]{2})\\b", ["dd/MM/yyyy", "d/M/yyyy"]),
             ("\\b([0-3]?[0-9]-[01]?[0-9]-20[0-9]{2})\\b", ["dd-MM-yyyy", "d-M-yyyy"]),
             ("\\b([0-3]?[0-9]/[01]?[0-9]/[0-9]{2})\\b", ["dd/MM/yy", "d/M/yy"]),
+            ("\\b([0-3]?[0-9]-[01]?[0-9]-[0-9]{2})\\b", ["dd-MM-yy", "d-M-yy"]),
             ("(?i)\\b([0-3]?[0-9][\\s\\-](?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*(?:[\\s\\-,]+20[0-9]{2})?)\\b",
              ["dd-MMM-yyyy", "d-MMM-yyyy", "dd MMM yyyy", "d MMM yyyy", "dd-MMM", "d-MMM", "dd MMM", "d MMM"])
         ]

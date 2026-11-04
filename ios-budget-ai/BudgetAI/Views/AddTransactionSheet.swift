@@ -363,7 +363,6 @@ struct PasteSMSSheet: View {
             .sensoryFeedback(.success, trigger: outcome?.transaction?.id)
             .onAppear {
                 CategoryRegistry.shared.reload(context: context)
-                if accountID == nil { accountID = AppSettings.smsAccountID }
             }
         }
     }
@@ -416,15 +415,32 @@ struct PasteSMSSheet: View {
                             .foregroundStyle(Theme.ink)
                     }
                 }
+                if let toID = p.toAccountID, let destAcc = accounts.first(where: { $0.id == toID }) {
+                    HStack {
+                        Text("To account")
+                            .font(.caption)
+                            .foregroundStyle(Theme.secondaryInk)
+                        Spacer()
+                        Text(destAcc.menuTitle)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Theme.cobalt)
+                    }
+                }
                 if let recip = p.recipientSuffix {
                     HStack {
                         Text("Recipient IBAN / account")
                             .font(.caption)
                             .foregroundStyle(Theme.secondaryInk)
                         Spacer()
-                        Text("••\(recip)")
-                            .font(.caption.monospacedDigit().weight(.medium))
-                            .foregroundStyle(Theme.ink)
+                        if let toID = p.toAccountID, let destAcc = accounts.first(where: { $0.id == toID }) {
+                            Text("\(destAcc.name) · ••\(recip)")
+                                .font(.caption.monospacedDigit().weight(.medium))
+                                .foregroundStyle(Theme.ink)
+                        } else {
+                            Text("••\(recip)")
+                                .font(.caption.monospacedDigit().weight(.medium))
+                                .foregroundStyle(Theme.ink)
+                        }
                     }
                 }
                 if let acct = p.accountSuffix {

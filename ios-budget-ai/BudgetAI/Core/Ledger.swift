@@ -93,6 +93,7 @@ enum Ledger {
         }
         change(tx)
         applyBalance(tx, sign: 1, context: context)
+        _ = syncBalanceFromSMS(tx, context: context)
         recordSnapshot(context: context)
         try? context.save()
         if tx.category == .visaTransfer { refreshCardReminders(context: context) }
@@ -104,9 +105,14 @@ enum Ledger {
         }
         let isCardPayment = tx.category == .visaTransfer
         let isInternal = tx.smsTransactionType == .internalTransfer || tx.category == .internalTransfer || isCardPayment
-        if sign > 0, !isCardPayment, tx.goalID == nil,
-           (isInternal || tx.isTransfer) {
-            if let matchedGoal = SMSParser.findMatchingGoal(suffix: tx.smsRecipientSuffix, accountID: tx.toAccountID, in: context),
+        if sign > 0, !isCardPayment, (isInternal || tx.isTransfer) {
+            if tx.toAccountID == nil,
+               let recip = tx.smsRecipientSuffix,
+               let matchedDest = SMSParser.findMatchingAccount(suffix: recip, excludingAccountID: tx.accountID, in: context) {
+                tx.toAccountID = matchedDest.id
+            }
+            if tx.goalID == nil,
+               let matchedGoal = SMSParser.findMatchingGoal(suffix: tx.smsRecipientSuffix, accountID: tx.toAccountID, in: context),
                matchedGoal.linkedAccountID == nil || matchedGoal.linkedAccountID != tx.accountID {
                 tx.goalID = matchedGoal.id
                 if tx.toAccountID == nil, let linkedAcc = matchedGoal.linkedAccountID, linkedAcc != tx.accountID {
@@ -175,6 +181,10 @@ enum Ledger {
             target.smsTransactionType = newType
             target.isIncome = newType.isIncomeDirection
             target.smsBank = resolvedBank
+            if let resolvedBank,
+               let bankAcc = SMSParser.findMatchingAccount(forBank: resolvedBank, senderOrPhone: target.smsSender, digits: target.smsAccountSuffix, in: context) {
+                target.accountID = bankAcc.id
+            }
             target.smsConfidence = .high
             target.smsClassificationReason = "Corrected by user to \(newType.title)"
             target.aiCategorized = false
@@ -190,6 +200,10 @@ enum Ledger {
                 target.subcategory = nil
                 if let toAccountID, toAccountID != target.accountID {
                     target.toAccountID = toAccountID
+                } else if target.toAccountID == nil || target.toAccountID == target.accountID,
+                          let recip = target.smsRecipientSuffix,
+                          let matchedDest = SMSParser.findMatchingAccount(suffix: recip, excludingAccountID: target.accountID, in: context) {
+                    target.toAccountID = matchedDest.id
                 }
                 if target.goalID == nil,
                    let matchedGoal = SMSParser.findMatchingGoal(suffix: target.smsRecipientSuffix, accountID: target.toAccountID, in: context),
@@ -259,17 +273,11 @@ enum Ledger {
     }
 
     /// When the bank SMS includes the available balance, make the app's account match it.
-    /// Only applied for cash/bank accounts and only when this is the newest transaction on that account.
+    /// Updates the specified account's balance independently based on the SMS balance.
     @discardableResult
     static func syncBalanceForAccount(id: UUID, balance: Double, on tx: MoneyTransaction, isToAccount: Bool = false, context: ModelContext, force: Bool = false) -> Double? {
         guard force || AppSettings.smsSyncBalance, !tx.isPending, !tx.isCardLimitBalance,
               let account = account(id, context: context), !account.kind.isLiability else { return nil }
-        let date = tx.date
-        let txID = tx.id
-        let newer = (try? context.fetch(FetchDescriptor<MoneyTransaction>(predicate: #Predicate {
-            $0.date > date && $0.isPending == false
-        })))?.filter { ($0.accountID == id || $0.toAccountID == id) && $0.id != txID } ?? []
-        guard force || newer.isEmpty else { return nil }
         let diff = balance - account.balance
         if abs(diff) >= 0.0005 {
             account.balance = balance
@@ -311,16 +319,16 @@ enum Ledger {
         return try? context.fetch(descriptor).first
     }
 
-    /// Account used for SMS imports: matched by card digits, bank phone/institution hint, or the user's fixed fallback choice.
-    static func smsAccountID(context: ModelContext, digits: String?, hint: String?) -> UUID? {
+    /// Account used for SMS imports: always prioritizes matching the SMS sender bank (`hint` / `sender`),
+    /// then card/account digits, then the user's fallback choice.
+    static func smsAccountID(context: ModelContext, digits: String?, hint: String?, sender: String? = nil) -> UUID? {
         let accounts = (try? context.fetch(FetchDescriptor<Account>(sortBy: [SortDescriptor(\.createdAt)]))) ?? []
-        if let digits, !digits.isEmpty,
-           let match = accounts.first(where: { !$0.smsMatch.isEmpty && (digits.hasSuffix($0.smsMatch) || $0.smsMatch.hasSuffix(digits)) }) {
-            return match.id
-        }
-        if let hint, !hint.isEmpty,
-           let matchedByBank = SMSParser.findMatchingAccount(forBank: hint, in: context) {
+        if let matchedByBank = SMSParser.findMatchingAccount(forBank: hint, senderOrPhone: sender, digits: digits, in: context) {
             return matchedByBank.id
+        }
+        if let digits, !digits.isEmpty,
+           let match = SMSParser.findMatchingAccount(suffix: digits, in: context) {
+            return match.id
         }
         if let fixed = AppSettings.smsAccountID, accounts.contains(where: { $0.id == fixed }) { return fixed }
         return defaultAccountID(context: context, hint: hint)

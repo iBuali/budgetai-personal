@@ -794,7 +794,78 @@ struct BudgetAITests {
         #expect(fourthTx.smsTransactionType == .internalTransfer)
         #expect(fourthTx.accountID == bisb.id)
         #expect(fourthTx.toAccountID == ila.id)
+        #expect(fourthTx.smsBank == "Bahrain Islamic Bank (BisB)")
         #expect(abs(bisb.balance - 400.000) < 0.0001)
         #expect(abs(ila.balance - 300.000) < 0.0001)
+    }
+
+    @Test("Internal transfer recipient IBAN matching, sender bank account consistency, and separate SMS balances on merge")
+    func testInternalTransferRecipientMatchAndSeparateBalances() async throws {
+        SMSUserRules.clearAllRules()
+        let config = ModelConfiguration(isStoredInMemoryOnly: true)
+        let container = try ModelContainer(for: Account.self, MoneyTransaction.self, Budget.self, SavingsGoal.self, NetWorthSnapshot.self, LearnedRule.self, CustomCategory.self, configurations: config)
+        let context = ModelContext(container)
+
+        let bisb = Account(name: "BisB Account", kind: .bank, institution: "BisB", balance: 1000.000)
+        bisb.smsMatch = "9001"
+        let ila = Account(name: "ila Bank", kind: .bank, institution: "ila Bank", balance: 100.000)
+        ila.smsMatch = "0846"
+        context.insert(bisb)
+        context.insert(ila)
+
+        // Add a newer transaction in the future to ensure historical/merged SMS still syncs each account's SMS balance accurately
+        let newerTx = MoneyTransaction(amount: 1.000, isIncome: false, merchant: "Coffee", category: .food, date: Date().addingTimeInterval(3600), source: .manual, accountID: nil)
+        newerTx.isPending = false
+        context.insert(newerTx)
+        try context.save()
+
+        // 1. Outgoing transfer SMS where recipient IBAN/account matches user's ila account (0846):
+        // Must classify as internalTransfer, set toAccountID = ila.id, include ila Bank name, and set accountID = bisb.id matching SMS sender bank
+        let sms1 = "Fawri+ Transfer of BHD 75.000 from account 9001 to IBAN BH29ILAB00000000000846 on 2026/10/25 14:15. Available Balance BHD 925.000. Tel: 17515151"
+        let res1 = await SMSImporter.importText(sms1, context: context, forceApprove: true)
+        let tx1 = try #require(res1.transaction)
+        #expect(tx1.smsTransactionType == .internalTransfer)
+        #expect(tx1.category == .internalTransfer)
+        #expect(tx1.accountID == bisb.id)
+        #expect(tx1.toAccountID == ila.id)
+        #expect(tx1.smsBank == "Bahrain Islamic Bank (BisB)")
+        #expect(tx1.merchant.contains("ila Bank"))
+
+        // 2. Simultaneous second SMS from ila Bank (17123456) at 2026/10/25 14:15 with ila's own SMS balance (175.000):
+        // Must merge into tx1, keep accountID = bisb.id & smsBank = BisB, set toAccountID = ila.id,
+        // and update BisB balance to 925.000 and ila balance to 175.000 separately!
+        let sms2 = "Credit transaction of BHD 75.000 to account 0846 on 2026/10/25 14:15. Available balance is BHD 175.000. Call 17123456"
+        _ = await SMSImporter.importText(sms2, context: context, forceApprove: true)
+
+        let allSMS = try context.fetch(FetchDescriptor<MoneyTransaction>()).filter { $0.source == .sms }
+        #expect(allSMS.count == 1)
+        let merged = try #require(allSMS.first)
+        #expect(merged.accountID == bisb.id)
+        #expect(merged.toAccountID == ila.id)
+        #expect(merged.smsBank == "Bahrain Islamic Bank (BisB)")
+        #expect(merged.smsBalance == 925.000)
+        #expect(merged.smsToBalance == 175.000)
+        #expect(abs(bisb.balance - 925.000) < 0.0001)
+        #expect(abs(ila.balance - 175.000) < 0.0001)
+
+        // 3. Reverse arrival order when second SMS is an internalTransfer from BisB and first SMS was from ila Bank:
+        // Previously, this caused mergedFromID == mergedToID or added the amount to one account in both.
+        let smsIlaFirst = "Your account 0846 credited BHD 25.000 on 2026/10/26 09:30. Available balance BHD 210.000. Call 17123456"
+        let smsBisBSecond = "Fawri+ payment BHD 25.000, ref: BIB555KZUM was credited to IBAN ending 0846 on 2026/10/26 09:30. Balance BHD 890.000. Tel: 17515151"
+
+        _ = await SMSImporter.importText(smsIlaFirst, context: context, forceApprove: true)
+        _ = await SMSImporter.importText(smsBisBSecond, context: context, forceApprove: true)
+
+        let allSMSAfterReverse = try context.fetch(FetchDescriptor<MoneyTransaction>()).filter { $0.source == .sms }
+        #expect(allSMSAfterReverse.count == 2)
+        let mergedReverse = try #require(allSMSAfterReverse.first(where: { $0.amount == 25.000 }))
+        #expect(mergedReverse.smsTransactionType == .internalTransfer)
+        #expect(mergedReverse.accountID == bisb.id)
+        #expect(mergedReverse.toAccountID == ila.id)
+        #expect(mergedReverse.smsBank == "Bahrain Islamic Bank (BisB)")
+        #expect(mergedReverse.smsBalance == 890.000)
+        #expect(mergedReverse.smsToBalance == 210.000)
+        #expect(abs(bisb.balance - 890.000) < 0.0001)
+        #expect(abs(ila.balance - 210.000) < 0.0001)
     }
 }
