@@ -712,10 +712,10 @@ struct BudgetAITests {
         context.insert(ila)
         try context.save()
 
-        // Case A: First SMS is Transfer Out, Second SMS at same date & time is Internal Transfer between accounts.
+        // Case A: First SMS is Transfer Out from BisB, Second SMS at same date & time is Transfer In to ila Bank.
         // Both SMS have independent balances: BisB has 450.000, ila has 250.000.
         let smsTransferOut = "Your account ending 9001 has been debited BHD 50.000 for outward transfer on 2026/10/27 15:26. Balance BHD 450.000. Tel: 17515151"
-        let smsInternal = "Fawri+ payment BHD50.000, ref: BIB103KAK000KZUM was credited to IBAN ending 0846 on 2026/10/27 15:26. Available balance BHD 250.000. Call 17123456"
+        let smsInternal = "Your account ending 0846 has been credited with BHD 50.000 via Fawri+ on 2026/10/27 15:26. Available balance BHD 250.000. Call 17123456"
 
         _ = await SMSImporter.importText(smsTransferOut, context: context, forceApprove: true)
         let mergedOutcome = await SMSImporter.importText(smsInternal, context: context, forceApprove: true)
@@ -738,8 +738,8 @@ struct BudgetAITests {
         #expect(bisb.balance != 250.000)
         #expect(ila.balance != 450.000)
 
-        // Case B: Reverse order (Internal Transfer arrives first with destination balance, Transfer Out arrives second with source balance)
-        let smsInternal2 = "Fawri+ payment BHD30.000, ref: BIB103KAK000AAAA was credited to IBAN ending 0846 on 2026/10/28 18:10. Available balance BHD 280.000. Call 17123456"
+        // Case B: Reverse order (Inward Transfer arrives first with destination balance, Outward Transfer arrives second with source balance)
+        let smsInternal2 = "Your account ending 0846 has been credited with BHD 30.000 via Fawri+ on 2026/10/28 18:10. Available balance BHD 280.000. Call 17123456"
         let smsTransferOut2 = "Your account ending 9001 has been debited BHD 30.000 for outward transfer on 2026/10/28 18:10. Balance BHD 420.000. Tel: 17515151"
 
         _ = await SMSImporter.importText(smsInternal2, context: context, forceApprove: true)
@@ -781,5 +781,20 @@ struct BudgetAITests {
         #expect(abs(nbb.balance - 250.000) < 0.0001)
         #expect(thirdTx.toBalanceAdjustment == 10.000)
         #expect(thirdTx.balanceAdjustment == 0.0)
+
+        // Case D: Same bank sends two messages (Debit alert + Fawri+ payment credited to destination IBAN)
+        let smsOutwardBisB = "Your account ending 9001 has been debited BHD 20.000 for outward transfer on 2026/10/30 08:00. Balance BHD 400.000. Tel: 17515151"
+        let smsFawriBisB = "Fawri+ payment BHD20.000, ref: BIB999KZUM was credited to IBAN ending 0846 on 2026/10/30 08:00. Balance BHD400.000. Tel: 17515151"
+
+        _ = await SMSImporter.importText(smsOutwardBisB, context: context, forceApprove: true)
+        _ = await SMSImporter.importText(smsFawriBisB, context: context, forceApprove: true)
+
+        let allTxsAfterFourth = try context.fetch(FetchDescriptor<MoneyTransaction>())
+        let fourthTx = try #require(allTxsAfterFourth.first(where: { $0.amount == 20.000 }))
+        #expect(fourthTx.smsTransactionType == .internalTransfer)
+        #expect(fourthTx.accountID == bisb.id)
+        #expect(fourthTx.toAccountID == ila.id)
+        #expect(abs(bisb.balance - 400.000) < 0.0001)
+        #expect(abs(ila.balance - 300.000) < 0.0001)
     }
 }

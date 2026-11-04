@@ -512,7 +512,11 @@ enum SMSImporter {
         // (e.g., when a transfer between two accounts generates one "Internal Transfer" SMS and one "Transfer Out" SMS at the same date & time).
         let rawParsedType = p.transactionType
         if !isCardPayment,
-           (rawParsedType.isTransferType || p.category == .internalTransfer || p.category == .transfers),
+           (rawParsedType.isTransferType
+            || p.category == .internalTransfer
+            || p.category == .transfers
+            || (p.isIncome && (trimmed.lowercased().contains("credit") || trimmed.lowercased().contains("fawri") || trimmed.contains("إيداع") || trimmed.contains("ايداع") || trimmed.contains("وارد")))
+            || (!p.isIncome && (trimmed.lowercased().contains("debit") || trimmed.lowercased().contains("transfer") || trimmed.contains("خصم") || trimmed.contains("صادر")))),
            let mergedOutcome = mergeSameTimeTransferIfNeeded(
                parsed: p,
                rawParsedType: rawParsedType,
@@ -676,6 +680,14 @@ enum SMSImporter {
         if reasonLower.contains("transfer") || reasonLower.contains("fawri") {
             return tx.isIncome ? .transferIn : .transferOut
         }
+        if let raw = tx.rawText?.lowercased() {
+            if raw.contains("debit") || raw.contains("outward") || raw.contains("خصم") || raw.contains("صادر") {
+                return .transferOut
+            }
+            if raw.contains("credit") || raw.contains("inward") || raw.contains("إيداع") || raw.contains("ايداع") || raw.contains("وارد") {
+                return .transferIn
+            }
+        }
         return nil
     }
 
@@ -705,7 +717,18 @@ enum SMSImporter {
         guard !candidates.isEmpty else { return nil }
 
         let incomingTime = parsed.timeString ?? SMSParser.extractDateAndTime(in: rawSMS).time
-        let newRole: SMSTransactionType = (parsed.category == .internalTransfer) ? .internalTransfer : rawParsedType
+        let newRole: SMSTransactionType = {
+            if parsed.category == .internalTransfer { return .internalTransfer }
+            if rawParsedType.isTransferType { return rawParsedType }
+            let lower = rawSMS.lowercased()
+            if lower.contains("debit") || lower.contains("outward") || lower.contains("خصم") || lower.contains("صادر") {
+                return .transferOut
+            }
+            if lower.contains("credit") || lower.contains("inward") || lower.contains("إيداع") || lower.contains("ايداع") || lower.contains("وارد") {
+                return .transferIn
+            }
+            return parsed.isIncome ? .transferIn : .transferOut
+        }()
 
         for existing in candidates {
             guard abs(existing.amount - parsed.amount) < 0.0005 else { continue }
