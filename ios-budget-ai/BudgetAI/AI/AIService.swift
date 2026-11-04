@@ -454,7 +454,7 @@ enum SMSImporter {
         }
 
         let cleanManualBank = manualBank?.trimmingCharacters(in: .whitespacesAndNewlines)
-        var resolvedSMSBank = (cleanManualBank?.isEmpty == false ? cleanManualBank : nil)
+        let resolvedSMSBank = (cleanManualBank?.isEmpty == false ? cleanManualBank : nil)
             ?? p.detectedBank
             ?? SMSUserRules.bank(forSender: effectiveSender, in: trimmed)
         let resolvedSender = effectiveSender ?? p.sender
@@ -507,11 +507,6 @@ enum SMSImporter {
             }
             return accountID ?? savedRuleAccount ?? Ledger.smsAccountID(context: context, digits: matchingDigits, hint: resolvedSMSBank, sender: resolvedSender)
         }()
-
-        // Keep resolvedSMSBank synchronized with the matched account if bank was not yet resolved
-        if resolvedSMSBank == nil, let target, let acc = Ledger.account(target, context: context) {
-            resolvedSMSBank = SMSParser.bankName(forAccount: acc)
-        }
 
         // Visa / credit card payments come out of a bank account and pay down the card.
         let isCardPayment = p.category == .visaTransfer

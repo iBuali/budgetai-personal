@@ -794,7 +794,7 @@ struct BudgetAITests {
         #expect(fourthTx.smsTransactionType == .internalTransfer)
         #expect(fourthTx.accountID == bisb.id)
         #expect(fourthTx.toAccountID == ila.id)
-        #expect(fourthTx.smsBank == "Bahrain Islamic Bank (BisB)")
+        #expect(fourthTx.smsBank == "BisB")
         #expect(abs(bisb.balance - 400.000) < 0.0001)
         #expect(abs(ila.balance - 300.000) < 0.0001)
     }
@@ -824,7 +824,7 @@ struct BudgetAITests {
         #expect(tx1.category == .internalTransfer)
         #expect(tx1.accountID == bisb.id)
         #expect(tx1.toAccountID == ila.id)
-        #expect(tx1.smsBank == "Bahrain Islamic Bank (BisB)")
+        #expect(tx1.smsBank == "BisB")
         #expect(tx1.merchant.contains("ila Bank"))
 
         // 2. Simultaneous second SMS from ila Bank (17123456) at 2026/10/25 14:15 with ila's own SMS balance (175.000):
@@ -838,7 +838,7 @@ struct BudgetAITests {
         let merged = try #require(allSMS.first)
         #expect(merged.accountID == bisb.id)
         #expect(merged.toAccountID == ila.id)
-        #expect(merged.smsBank == "Bahrain Islamic Bank (BisB)")
+        #expect(merged.smsBank == "BisB")
         #expect(merged.smsBalance == 925.000)
         #expect(merged.smsToBalance == 175.000)
         #expect(abs(bisb.balance - 925.000) < 0.0001)
@@ -858,7 +858,7 @@ struct BudgetAITests {
         #expect(mergedReverse.smsTransactionType == .internalTransfer)
         #expect(mergedReverse.accountID == bisb.id)
         #expect(mergedReverse.toAccountID == ila.id)
-        #expect(mergedReverse.smsBank == "Bahrain Islamic Bank (BisB)")
+        #expect(mergedReverse.smsBank == "BisB")
         #expect(mergedReverse.smsBalance == 890.000)
         #expect(mergedReverse.smsToBalance == 210.000)
         #expect(abs(bisb.balance - 890.000) < 0.0001)

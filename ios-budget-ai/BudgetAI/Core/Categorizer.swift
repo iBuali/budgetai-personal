@@ -1547,6 +1547,7 @@ enum SMSParser {
         let creditSignals = [
             "\\b(?:was|is|has\\s+been)?\\s*credited\\b",
             "\\bcredited\\s+(?:to\\s+your|with)?\\b",
+            "\\bcredit\\s+(?:transaction|txn|alert|advice|amount|of|to)\\b",
             "\\breceived\\s+in\\s+your\\b",
             "\\bdeposit(?:ed)?\\b",
             "تم إيداع", "تم ايداع", "تمت إضافة", "وارد لحسابك", "تم قيد"
