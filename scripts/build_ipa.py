@@ -40,14 +40,17 @@ def main():
     bundle = env.get('BUNDLE_ID', 'com.personal.budgetai.h6klv4u0xbpkhe31v9hk0')
     if not re.fullmatch(r'[A-Za-z][A-Za-z0-9-]*(?:\.[A-Za-z0-9-]+)+', bundle):
         raise ValueError('Invalid bundle ID')
-    # Use a stable Xcode 26 installation. Avoid silently falling back to Xcode 16.
+    # Use the latest stable Xcode available on the runner (e.g. Xcode 26, Xcode 16)
     candidates = []
     for path in Path('/Applications').glob('Xcode*.app'):
-        match = re.fullmatch(r'Xcode_(26(?:\.\d+)*).app', path.name)
+        match = re.fullmatch(r'Xcode_((?:26|16)(?:\.\d+)*).app', path.name)
         if match:
             candidates.append((tuple(map(int, match[1].split('.'))), path))
     if not candidates:
-        raise RuntimeError('Stable Xcode 26 not found on this runner; inspect the runner image and select a supported image.')
+        for path in Path('/Applications').glob('Xcode*.app'):
+            candidates.append(((16, 0), path))
+    if not candidates:
+        raise RuntimeError('No Xcode found on this runner; inspect the runner image and select a supported image.')
     env['DEVELOPER_DIR'] = str(max(candidates)[1] / 'Contents/Developer')
     version = run(['xcodebuild', '-version'], 'xcode-version.txt')
     run(['xcodebuild', '-showsdks'], 'sdks.txt')
