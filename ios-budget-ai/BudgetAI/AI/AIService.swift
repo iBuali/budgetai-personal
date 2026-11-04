@@ -734,7 +734,7 @@ enum SMSImporter {
         if let raw = tx.rawText, let reparsed = SMSParser.parse(raw, sender: tx.smsSender, context: context), reparsed.transactionType.isTransferType {
             return reparsed.transactionType
         }
-        let reasonLower = (tx.smsClassificationReason ?? "").lowercased()
+        let reasonLower = tx.smsClassificationReason.lowercased()
         if reasonLower.contains("transfer") || reasonLower.contains("fawri") {
             return tx.isIncome ? .transferIn : .transferOut
         }

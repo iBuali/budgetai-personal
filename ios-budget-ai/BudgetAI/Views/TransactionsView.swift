@@ -762,6 +762,24 @@ struct TransactionDetailView: View {
     private var isAccountTransfer: Bool { tx.isTransfer && tx.toAccountID != nil }
     private var isSMSTransaction: Bool { tx.source == .sms || tx.smsTransactionType != nil }
 
+    private var matchedRecipientAccount: Account? {
+        guard let recip = tx.smsRecipientSuffix, !recip.isEmpty else { return nil }
+        return SMSParser.findMatchingAccount(suffix: recip, excludingAccountID: tx.accountID, in: context)
+    }
+
+    private var recipientDisplayText: String {
+        let suffix = (tx.smsRecipientSuffix?.isEmpty == false ? tx.smsRecipientSuffix : nil)
+            ?? (tx.smsAccountSuffix?.isEmpty == false ? tx.smsAccountSuffix : nil)
+        let matchedDest = toAccount ?? matchedRecipientAccount
+        if let suffix {
+            if let matchedDest {
+                return "\(matchedDest.name) · ••\(suffix)"
+            }
+            return "••\(suffix)"
+        }
+        return matchedDest?.name ?? "—"
+    }
+
     private var hasUnsavedName: Bool {
         let trimmed = nameText.trimmingCharacters(in: .whitespacesAndNewlines)
         return !trimmed.isEmpty && trimmed != tx.merchant
@@ -1008,11 +1026,6 @@ struct TransactionDetailView: View {
                     ForEach(accounts) { a in Text(a.menuTitle).tag(UUID?.some(a.id)) }
                 }
 
-                let matchedRecipientAccount: Account? = {
-                    guard let recip = tx.smsRecipientSuffix, !recip.isEmpty else { return nil }
-                    return SMSParser.findMatchingAccount(suffix: recip, excludingAccountID: tx.accountID, in: context)
-                }()
-
                 if tx.category == .visaTransfer {
                     Picker("Visa card", selection: Binding(get: { tx.toAccountID }, set: { newID in
                         guard newID != tx.accountID else { return }
@@ -1130,30 +1143,9 @@ struct TransactionDetailView: View {
                     }
 
                     LabeledContent("Recipient IBAN / Account") {
-                        let suffix = (tx.smsRecipientSuffix?.isEmpty == false ? tx.smsRecipientSuffix : nil)
-                            ?? (tx.smsAccountSuffix?.isEmpty == false ? tx.smsAccountSuffix : nil)
-                        let matchedDest = toAccount ?? (tx.smsRecipientSuffix.flatMap {
-                            SMSParser.findMatchingAccount(suffix: $0, excludingAccountID: tx.accountID, in: context)
-                        })
-                        if let suffix {
-                            if let matchedDest {
-                                Text("\(matchedDest.name) · ••\(suffix)")
-                                    .font(.subheadline.monospacedDigit())
-                                    .foregroundStyle(Theme.ink)
-                            } else {
-                                Text("••\(suffix)")
-                                    .font(.subheadline.monospacedDigit())
-                                    .foregroundStyle(Theme.ink)
-                            }
-                        } else if let matchedDest {
-                            Text(matchedDest.name)
-                                .font(.subheadline)
-                                .foregroundStyle(Theme.ink)
-                        } else {
-                            Text("—")
-                                .font(.subheadline)
-                                .foregroundStyle(Theme.ink)
-                        }
+                        Text(recipientDisplayText)
+                            .font(.subheadline.monospacedDigit())
+                            .foregroundStyle(Theme.ink)
                     }
 
                     LabeledContent(tx.toAccountID != nil && tx.smsToBalance != nil ? "Source balance in SMS" : (tx.isCardLimitBalance ? "Card available limit in SMS" : "Balance in SMS")) {
@@ -1251,45 +1243,7 @@ struct TransactionDetailView: View {
             }
         }
         .onAppear {
-            if isSMSTransaction {
-                var needsEdit = false
-                let bankMatchedAcc = tx.smsBank.flatMap {
-                    SMSParser.findMatchingAccount(forBank: $0, senderOrPhone: tx.smsSender, digits: tx.smsAccountSuffix, in: context)
-                }
-                if let bankMatchedAcc, tx.accountID != bankMatchedAcc.id {
-                    let currentAcc = tx.accountID.flatMap { id in accounts.first(where: { $0.id == id }) }
-                    if currentAcc == nil || !SMSParser.accountMatchesBank(currentAcc!, bank: tx.smsBank) {
-                        needsEdit = true
-                    }
-                }
-                let effectiveAccID = needsEdit ? bankMatchedAcc?.id : tx.accountID
-                let matchedDest: Account? = {
-                    guard tx.category != .visaTransfer,
-                          !tx.isIncome,
-                          tx.toAccountID == nil,
-                          let recip = tx.smsRecipientSuffix, !recip.isEmpty else { return nil }
-                    return SMSParser.findMatchingAccount(suffix: recip, excludingAccountID: effectiveAccID, in: context)
-                }()
-                if matchedDest != nil {
-                    needsEdit = true
-                }
-                if needsEdit {
-                    Ledger.edit(tx, context: context) { target in
-                        if let bankMatchedAcc {
-                            let currentAcc = target.accountID.flatMap { id in accounts.first(where: { $0.id == id }) }
-                            if currentAcc == nil || !SMSParser.accountMatchesBank(currentAcc!, bank: target.smsBank) {
-                                target.accountID = bankMatchedAcc.id
-                            }
-                        }
-                        if let matchedDest, target.toAccountID == nil, matchedDest.id != target.accountID {
-                            target.toAccountID = matchedDest.id
-                            target.category = .internalTransfer
-                            target.smsTransactionType = .internalTransfer
-                            target.isIncome = false
-                        }
-                    }
-                }
-            }
+            syncSMSAccountAndRecipientIfNeeded()
             nameText = tx.merchant
             amountText = Money.number(tx.amount, decimals: Money.digits(currency)).replacingOccurrences(of: ",", with: "")
         }
@@ -1309,6 +1263,47 @@ struct TransactionDetailView: View {
             Button("Delete", role: .destructive) {
                 Ledger.delete(tx, context: context)
                 dismiss()
+            }
+        }
+    }
+
+    private func syncSMSAccountAndRecipientIfNeeded() {
+        guard isSMSTransaction else { return }
+        var needsEdit = false
+        let bankMatchedAcc = tx.smsBank.flatMap {
+            SMSParser.findMatchingAccount(forBank: $0, senderOrPhone: tx.smsSender, digits: tx.smsAccountSuffix, in: context)
+        }
+        if let bankMatchedAcc, tx.accountID != bankMatchedAcc.id {
+            let currentAcc = tx.accountID.flatMap { id in accounts.first(where: { $0.id == id }) }
+            if currentAcc == nil || !SMSParser.accountMatchesBank(currentAcc!, bank: tx.smsBank) {
+                needsEdit = true
+            }
+        }
+        let effectiveAccID = needsEdit ? bankMatchedAcc?.id : tx.accountID
+        let matchedDest: Account? = {
+            guard tx.category != .visaTransfer,
+                  !tx.isIncome,
+                  tx.toAccountID == nil,
+                  let recip = tx.smsRecipientSuffix, !recip.isEmpty else { return nil }
+            return SMSParser.findMatchingAccount(suffix: recip, excludingAccountID: effectiveAccID, in: context)
+        }()
+        if matchedDest != nil {
+            needsEdit = true
+        }
+        if needsEdit {
+            Ledger.edit(tx, context: context) { target in
+                if let bankMatchedAcc {
+                    let currentAcc = target.accountID.flatMap { id in accounts.first(where: { $0.id == id }) }
+                    if currentAcc == nil || !SMSParser.accountMatchesBank(currentAcc!, bank: target.smsBank) {
+                        target.accountID = bankMatchedAcc.id
+                    }
+                }
+                if let matchedDest, target.toAccountID == nil, matchedDest.id != target.accountID {
+                    target.toAccountID = matchedDest.id
+                    target.category = .internalTransfer
+                    target.smsTransactionType = .internalTransfer
+                    target.isIncome = false
+                }
             }
         }
     }

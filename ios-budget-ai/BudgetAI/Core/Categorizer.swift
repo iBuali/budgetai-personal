@@ -1733,7 +1733,8 @@ enum SMSParser {
     }
 
     /// Checks whether a user `Account` matches a given bank name (e.g. "BisB", "ila", "NBB", "BBK").
-    static func accountMatchesBank(_ acc: Account, bank: String) -> Bool {
+    static func accountMatchesBank(_ acc: Account, bank: String?) -> Bool {
+        guard let bank else { return false }
         let bLower = bank.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !bLower.isEmpty else { return false }
         let aliases: [String] = {
