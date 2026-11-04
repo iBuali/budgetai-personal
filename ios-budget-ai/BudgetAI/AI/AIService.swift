@@ -778,6 +778,34 @@ enum SMSImporter {
             let mergedGoalID = existing.goalID ?? parsed.goalID
                 ?? SMSParser.findMatchingGoal(suffix: parsed.recipientSuffix ?? existing.smsRecipientSuffix, accountID: mergedToID, in: context)?.id
 
+            // Determine each account's own independent balance from the two SMS messages:
+            // Match source account (mergedFromID) with its balance (smsBalance).
+            // Match destination account (mergedToID) with its balance (smsToBalance).
+            // Balances are NEVER merged, summed, or cross-assigned.
+            var sourceBalance: Double? = nil
+            var destBalance: Double? = nil
+
+            // 1. Assign existing balances based on the role and account of the existing transaction
+            if existingRole == .transferIn || (mergedToID != nil && existing.accountID == mergedToID) {
+                destBalance = existing.smsBalance
+            } else {
+                sourceBalance = existing.smsBalance
+                destBalance = existing.smsToBalance
+            }
+
+            // 2. Assign the incoming parsed balance based on newRole and targetAccountID
+            if let pBal = parsed.balance {
+                if newRole == .transferIn || (mergedToID != nil && targetAccountID == mergedToID) {
+                    destBalance = pBal
+                } else if newRole == .transferOut || (mergedFromID != nil && targetAccountID == mergedFromID) {
+                    sourceBalance = pBal
+                } else if sourceBalance == nil {
+                    sourceBalance = pBal
+                } else if destBalance == nil {
+                    destBalance = pBal
+                }
+            }
+
             // Update the existing transaction in-place so there is only ONE transaction in the database
             Ledger.edit(existing, context: context) { tx in
                 tx.smsTransactionType = .internalTransfer
@@ -802,7 +830,8 @@ enum SMSImporter {
                 if tx.smsReference == nil { tx.smsReference = parsed.referenceNumber }
                 if tx.smsRecipientSuffix == nil { tx.smsRecipientSuffix = parsed.recipientSuffix }
                 if tx.smsAccountSuffix == nil { tx.smsAccountSuffix = parsed.accountSuffix }
-                if tx.smsBalance == nil && newRole != .transferIn { tx.smsBalance = parsed.balance }
+                tx.smsBalance = sourceBalance
+                tx.smsToBalance = destBalance
                 tx.smsConfidence = .high
                 tx.smsClassificationReason = "Merged simultaneous transfer between accounts (\(existingRole.title) + \(newRole.title) at same date & time)"
             }
@@ -816,7 +845,15 @@ enum SMSImporter {
             }
 
             let code = AppSettings.currency
-            let summary = "Internal Transfer \(Money.format(existing.amount, code)) · \(existing.merchant) (merged duplicate transfer SMS)"
+            var balanceParts: [String] = []
+            if let sBal = existing.smsBalance, let fromID = existing.accountID, let fromAcc = Ledger.account(fromID, context: context) {
+                balanceParts.append("\(fromAcc.name): \(Money.format(sBal, code))")
+            }
+            if let dBal = existing.smsToBalance, let toID = existing.toAccountID, let toAcc = Ledger.account(toID, context: context) {
+                balanceParts.append("\(toAcc.name): \(Money.format(dBal, code))")
+            }
+            let balSummary = balanceParts.isEmpty ? "" : " · [Balances: \(balanceParts.joined(separator: ", "))]"
+            let summary = "Internal Transfer \(Money.format(existing.amount, code)) · \(existing.merchant)\(balSummary) (merged duplicate transfer SMS)"
             return SMSImportOutcome(
                 transaction: existing,
                 batchTransactions: [existing],

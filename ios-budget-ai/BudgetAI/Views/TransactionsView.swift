@@ -1108,12 +1108,12 @@ struct TransactionDetailView: View {
                             .foregroundStyle(Theme.ink)
                     }
 
-                    LabeledContent(tx.isCardLimitBalance ? "Card available limit in SMS" : "Balance in SMS") {
+                    LabeledContent(tx.toAccountID != nil && tx.smsToBalance != nil ? "Source balance in SMS" : (tx.isCardLimitBalance ? "Card available limit in SMS" : "Balance in SMS")) {
                         Text(tx.smsBalance.map { Money.format($0, currency) } ?? "—")
                             .monospacedDigit()
                     }
 
-                    LabeledContent("Account in App") {
+                    LabeledContent(tx.toAccountID != nil && tx.smsToBalance != nil ? "Source account" : "Account in App") {
                         if let account {
                             Text("\(account.name) (\(Money.format(account.balance, currency)))")
                                 .monospacedDigit()
@@ -1130,11 +1130,41 @@ struct TransactionDetailView: View {
                                     appState.show("\(account.name) set to \(Money.format(synced, currency))")
                                 }
                             } label: {
-                                Label("Match account to bank balance", systemImage: "equal.circle.fill")
+                                Label("Match \(account.name) to bank balance", systemImage: "equal.circle.fill")
                             }
                         } else if tx.balanceAdjustment != 0 {
-                            Label("Matched to bank (\(Money.format(tx.balanceAdjustment, currency, signed: true)))", systemImage: "checkmark.seal.fill")
+                            Label("\(account.name) matched (\(Money.format(tx.balanceAdjustment, currency, signed: true)))", systemImage: "checkmark.seal.fill")
                                 .foregroundStyle(Theme.positive)
+                        }
+                    }
+
+                    if let toBal = tx.smsToBalance, let toID = tx.toAccountID, let toAccount = Ledger.account(toID, context: context) {
+                        Divider()
+
+                        LabeledContent("Destination balance in SMS") {
+                            Text(Money.format(toBal, currency))
+                                .monospacedDigit()
+                        }
+
+                        LabeledContent("Destination account") {
+                            Text("\(toAccount.name) (\(Money.format(toAccount.balance, currency)))")
+                                .monospacedDigit()
+                                .animatedNumber(toAccount.balance)
+                        }
+
+                        if !toAccount.kind.isLiability {
+                            if abs(toAccount.balance - toBal) >= 0.0005 && !tx.isPending {
+                                Button {
+                                    if let synced = Ledger.syncBalanceForAccount(id: toID, balance: toBal, on: tx, isToAccount: true, context: context, force: true) {
+                                        appState.show("\(toAccount.name) set to \(Money.format(synced, currency))")
+                                    }
+                                } label: {
+                                    Label("Match \(toAccount.name) to bank balance", systemImage: "equal.circle.fill")
+                                }
+                            } else if tx.toBalanceAdjustment != 0 {
+                                Label("\(toAccount.name) matched (\(Money.format(tx.toBalanceAdjustment, currency, signed: true)))", systemImage: "checkmark.seal.fill")
+                                    .foregroundStyle(Theme.positive)
+                            }
                         }
                     }
 

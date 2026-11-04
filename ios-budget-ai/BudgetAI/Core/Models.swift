@@ -437,10 +437,14 @@ final class MoneyTransaction {
     /// Destination account for transfers.
     var toAccountID: UUID?
     var subcategoryKey: String = ""
-    /// Available balance reported by the bank SMS, if any.
+    /// Available balance reported by the bank SMS for the source account (accountID), if any.
     var smsBalance: Double?
-    /// How much the account balance was corrected to match the bank SMS.
+    /// Available balance reported by the bank SMS for the destination account (toAccountID), if any.
+    var smsToBalance: Double?
+    /// How much the source account balance was corrected to match the bank SMS.
     var balanceAdjustment: Double = 0
+    /// How much the destination account balance was corrected to match the bank SMS.
+    var toBalanceAdjustment: Double = 0
     /// Detected or user-assigned SMS sender bank (kept separate from the accountID involved in the transaction).
     var smsBank: String?
     /// Raw SMS sender ID or phone number, if provided.

@@ -712,9 +712,10 @@ struct BudgetAITests {
         context.insert(ila)
         try context.save()
 
-        // Case A: First SMS is Transfer Out, Second SMS at same date & time is Internal Transfer between accounts
-        let smsTransferOut = "Your account ending 9001 has been debited BHD 50.000 for outward transfer on 2026/10/27 15:26. Tel: 17515151"
-        let smsInternal = "Fawri+ payment BHD50.000, ref: BIB103KAK000KZUM was credited to IBAN ending 0846 on 2026/10/27 15:26. Balance BHD450.000. Tel: 17515151"
+        // Case A: First SMS is Transfer Out, Second SMS at same date & time is Internal Transfer between accounts.
+        // Both SMS have independent balances: BisB has 450.000, ila has 250.000.
+        let smsTransferOut = "Your account ending 9001 has been debited BHD 50.000 for outward transfer on 2026/10/27 15:26. Balance BHD 450.000. Tel: 17515151"
+        let smsInternal = "Fawri+ payment BHD50.000, ref: BIB103KAK000KZUM was credited to IBAN ending 0846 on 2026/10/27 15:26. Available balance BHD 250.000. Call 17123456"
 
         _ = await SMSImporter.importText(smsTransferOut, context: context, forceApprove: true)
         let mergedOutcome = await SMSImporter.importText(smsInternal, context: context, forceApprove: true)
@@ -727,19 +728,58 @@ struct BudgetAITests {
         #expect(singleTx.category == .internalTransfer)
         #expect(singleTx.accountID == bisb.id)
         #expect(singleTx.toAccountID == ila.id)
+        #expect(singleTx.smsBalance == 450.000)
+        #expect(singleTx.smsToBalance == 250.000)
         #expect(abs(bisb.balance - 450.000) < 0.0001)
         #expect(abs(ila.balance - 250.000) < 0.0001)
+        // Ensure balances are NEVER merged or summed
+        #expect(bisb.balance != 700.000)
+        #expect(ila.balance != 700.000)
+        #expect(bisb.balance != 250.000)
+        #expect(ila.balance != 450.000)
 
-        // Case B: Reverse order (Internal Transfer arrives first, Transfer Out arrives second at same date & time)
-        let smsInternal2 = "Fawri+ payment BHD30.000, ref: BIB103KAK000AAAA was credited to IBAN ending 0846 on 2026/10/28 18:10. Balance BHD420.000. Tel: 17515151"
-        let smsTransferOut2 = "Your account ending 9001 has been debited BHD 30.000 for outward transfer on 2026/10/28 18:10. Tel: 17515151"
+        // Case B: Reverse order (Internal Transfer arrives first with destination balance, Transfer Out arrives second with source balance)
+        let smsInternal2 = "Fawri+ payment BHD30.000, ref: BIB103KAK000AAAA was credited to IBAN ending 0846 on 2026/10/28 18:10. Available balance BHD 280.000. Call 17123456"
+        let smsTransferOut2 = "Your account ending 9001 has been debited BHD 30.000 for outward transfer on 2026/10/28 18:10. Balance BHD 420.000. Tel: 17515151"
 
         _ = await SMSImporter.importText(smsInternal2, context: context, forceApprove: true)
         _ = await SMSImporter.importText(smsTransferOut2, context: context, forceApprove: true)
 
-        let allTxsAftersecond = try context.fetch(FetchDescriptor<MoneyTransaction>())
-        #expect(allTxsAftersecond.count == 2)
+        let allTxsAfterSecond = try context.fetch(FetchDescriptor<MoneyTransaction>())
+        #expect(allTxsAfterSecond.count == 2)
+        let secondTx = try #require(allTxsAfterSecond.first(where: { $0.amount == 30.000 }))
+        #expect(secondTx.smsTransactionType == .internalTransfer)
+        #expect(secondTx.accountID == bisb.id)
+        #expect(secondTx.toAccountID == ila.id)
+        #expect(secondTx.smsBalance == 420.000)
+        #expect(secondTx.smsToBalance == 280.000)
         #expect(abs(bisb.balance - 420.000) < 0.0001)
         #expect(abs(ila.balance - 280.000) < 0.0001)
+
+        // Case C: Initial balance discrepancy - each account syncs with its own SMS balance without merging
+        let bbk = Account(name: "BBK Account", kind: .bank, institution: "BBK", balance: 500.000)
+        bbk.smsMatch = "1111"
+        let nbb = Account(name: "NBB Account", kind: .bank, institution: "NBB", balance: 190.000) // Discrepancy: should be 200 at bank
+        nbb.smsMatch = "2222"
+        context.insert(bbk)
+        context.insert(nbb)
+        try context.save()
+
+        let bbkSMS = "Your account ending 1111 was debited BHD 50.000 on 2026/10/29 12:00 for transfer. Avl Bal BHD 450.000. Tel: 17205555"
+        let nbbSMS = "Your account ending 2222 was credited BHD 50.000 on 2026/10/29 12:00. Avl Bal BHD 250.000. Tel: 17228800"
+
+        _ = await SMSImporter.importText(bbkSMS, context: context, forceApprove: true)
+        _ = await SMSImporter.importText(nbbSMS, context: context, forceApprove: true)
+
+        let allTxsAfterThird = try context.fetch(FetchDescriptor<MoneyTransaction>())
+        let thirdTx = try #require(allTxsAfterThird.first(where: { $0.accountID == bbk.id }))
+        #expect(thirdTx.smsTransactionType == .internalTransfer)
+        #expect(thirdTx.toAccountID == nbb.id)
+        #expect(thirdTx.smsBalance == 450.000)
+        #expect(thirdTx.smsToBalance == 250.000)
+        #expect(abs(bbk.balance - 450.000) < 0.0001)
+        #expect(abs(nbb.balance - 250.000) < 0.0001)
+        #expect(thirdTx.toBalanceAdjustment == 10.000)
+        #expect(thirdTx.balanceAdjustment == 0.0)
     }
 }

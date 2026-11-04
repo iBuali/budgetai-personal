@@ -66,6 +66,9 @@ enum Ledger {
             if tx.balanceAdjustment != 0, let id = tx.accountID, let account = account(id, context: context) {
                 account.balance -= tx.balanceAdjustment
             }
+            if tx.toBalanceAdjustment != 0, let toId = tx.toAccountID, let toAccount = account(toId, context: context) {
+                toAccount.balance -= tx.toBalanceAdjustment
+            }
         }
         context.delete(tx)
         recordSnapshot(context: context)
@@ -80,6 +83,14 @@ enum Ledger {
             return
         }
         applyBalance(tx, sign: -1, context: context)
+        if tx.balanceAdjustment != 0, let id = tx.accountID, let account = account(id, context: context) {
+            account.balance -= tx.balanceAdjustment
+            tx.balanceAdjustment = 0
+        }
+        if tx.toBalanceAdjustment != 0, let toId = tx.toAccountID, let toAccount = account(toId, context: context) {
+            toAccount.balance -= tx.toBalanceAdjustment
+            tx.toBalanceAdjustment = 0
+        }
         change(tx)
         applyBalance(tx, sign: 1, context: context)
         recordSnapshot(context: context)
@@ -249,24 +260,45 @@ enum Ledger {
 
     /// When the bank SMS includes the available balance, make the app's account match it.
     /// Only applied for cash/bank accounts and only when this is the newest transaction on that account.
-    static func syncBalanceFromSMS(_ tx: MoneyTransaction, context: ModelContext, force: Bool = false) -> Double? {
-        guard force || AppSettings.smsSyncBalance, !tx.isPending, !tx.isCardLimitBalance, let bankBalance = tx.smsBalance, let id = tx.accountID,
+    @discardableResult
+    static func syncBalanceForAccount(id: UUID, balance: Double, on tx: MoneyTransaction, isToAccount: Bool = false, context: ModelContext, force: Bool = false) -> Double? {
+        guard force || AppSettings.smsSyncBalance, !tx.isPending, !tx.isCardLimitBalance,
               let account = account(id, context: context), !account.kind.isLiability else { return nil }
         let date = tx.date
         let txID = tx.id
         let newer = (try? context.fetch(FetchDescriptor<MoneyTransaction>(predicate: #Predicate {
-            $0.accountID == id && $0.date > date && $0.isPending == false && $0.id != txID
-        }))) ?? []
+            $0.date > date && $0.isPending == false
+        })))?.filter { ($0.accountID == id || $0.toAccountID == id) && $0.id != txID } ?? []
         guard force || newer.isEmpty else { return nil }
-        let diff = bankBalance - account.balance
-        guard abs(diff) >= 0.0005 else { return nil }
-        account.balance = bankBalance
-        tx.balanceAdjustment += diff
-        if force {
-            recordSnapshot(context: context)
-            try? context.save()
+        let diff = balance - account.balance
+        if abs(diff) >= 0.0005 {
+            account.balance = balance
+            if isToAccount {
+                tx.toBalanceAdjustment += diff
+            } else {
+                tx.balanceAdjustment += diff
+            }
+            if force {
+                recordSnapshot(context: context)
+                try? context.save()
+            }
         }
-        return bankBalance
+        return balance
+    }
+
+    /// When the bank SMS includes the available balance, make the app's account match it.
+    /// For internal transfers, matches each account (source `accountID` and destination `toAccountID`)
+    /// with its own respective balance from the SMS; balances are never merged or mixed.
+    @discardableResult
+    static func syncBalanceFromSMS(_ tx: MoneyTransaction, context: ModelContext, force: Bool = false) -> Double? {
+        var syncedPrimary: Double? = nil
+        if let id = tx.accountID, let bal = tx.smsBalance {
+            syncedPrimary = syncBalanceForAccount(id: id, balance: bal, on: tx, isToAccount: false, context: context, force: force)
+        }
+        if let toId = tx.toAccountID, let toBal = tx.smsToBalance, toId != tx.accountID {
+            _ = syncBalanceForAccount(id: toId, balance: toBal, on: tx, isToAccount: true, context: context, force: force)
+        }
+        return syncedPrimary
     }
 
     static func account(_ id: UUID, context: ModelContext) -> Account? {
