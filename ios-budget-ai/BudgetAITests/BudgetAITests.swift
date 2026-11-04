@@ -799,12 +799,8 @@ struct BudgetAITests {
         #expect(abs(ila.balance - 300.000) < 0.0001)
     }
 
-    @Test("Internal transfer recipient IBAN matching, sender bank account consistency, and separate SMS balances on merge")
-    func testInternalTransferRecipientMatchAndSeparateBalances() async throws {
-        SMSUserRules.clearAllRules()
-        let config = ModelConfiguration(isStoredInMemoryOnly: true)
-        let container = try ModelContainer(for: Account.self, MoneyTransaction.self, Budget.self, SavingsGoal.self, NetWorthSnapshot.self, LearnedRule.self, CustomCategory.self, configurations: config)
-        let context = ModelContext(container)
+    @Test func testInternalTransferRecipientMatchAndSeparateBalances() async throws {
+        let context = makeCleanContext()
 
         let bisb = Account(name: "BisB Account", kind: .bank, institution: "BisB", balance: 1000.000)
         bisb.smsMatch = "9001"
@@ -814,7 +810,7 @@ struct BudgetAITests {
         context.insert(ila)
 
         // Add a newer transaction in the future to ensure historical/merged SMS still syncs each account's SMS balance accurately
-        let newerTx = MoneyTransaction(amount: 1.000, isIncome: false, merchant: "Coffee", category: .food, date: Date().addingTimeInterval(3600), source: .manual, accountID: nil)
+        let newerTx = MoneyTransaction(amount: 1.000, isIncome: false, merchant: "Coffee", category: .dining, date: Date().addingTimeInterval(3600), source: .manual, accountID: nil)
         newerTx.isPending = false
         context.insert(newerTx)
         try context.save()
