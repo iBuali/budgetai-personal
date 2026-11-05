@@ -1726,8 +1726,8 @@ enum SMSParser {
 
     /// Formats the combined "SMS sender bank" string including both banks from two merged SMS messages (e.g. "BisB · ila").
     static func formatCombinedBanks(debitBank: String?, creditBank: String?) -> String? {
-        let b1 = debitBank.map { primaryBankName(from: $0).trimmingCharacters(in: .whitespacesAndNewlines) }
-        let b2 = creditBank.map { primaryBankName(from: $0).trimmingCharacters(in: .whitespacesAndNewlines) }
+        let b1 = primaryBankName(from: debitBank)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let b2 = primaryBankName(from: creditBank)?.trimmingCharacters(in: .whitespacesAndNewlines)
         let clean1 = (b1?.isEmpty == false) ? b1 : nil
         let clean2 = (b2?.isEmpty == false) ? b2 : nil
         if let clean1, let clean2 {
@@ -1740,20 +1740,17 @@ enum SMSParser {
     }
 
     /// Extracts the primary (debit/first) bank name when `smsBank` contains both merged banks (e.g. "BisB · ila" -> "BisB").
-    static func primaryBankName(from bank: String) -> String {
-        let parts = bank.components(separatedBy: " · ")
-        return parts.first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? bank
-    }
-
     static func primaryBankName(from bank: String?) -> String? {
         guard let bank else { return nil }
-        return primaryBankName(from: bank)
+        let parts = bank.components(separatedBy: " · ")
+        let first = parts.first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? bank.trimmingCharacters(in: .whitespacesAndNewlines)
+        return first.isEmpty ? nil : first
     }
 
     /// Checks whether a user `Account` matches a given bank name (e.g. "BisB", "ila", "NBB", "BBK", or "BisB · ila").
     static func accountMatchesBank(_ acc: Account, bank: String?) -> Bool {
-        guard let bank else { return false }
-        let bLower = primaryBankName(from: bank).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard let primary = primaryBankName(from: bank) else { return false }
+        let bLower = primary.lowercased()
         guard !bLower.isEmpty else { return false }
         let aliases: [String] = {
             if let direct = bankAliasTable[bLower] { return direct }
