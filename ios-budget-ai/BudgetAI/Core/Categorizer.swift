@@ -1029,26 +1029,6 @@ enum SMSParser {
         var customCounterparty = classification.counterparty
         var customReason = classification.reason
 
-        // Universal Internal Transfer rule: whenever the recipient IBAN / account suffix from the SMS
-        // matches the smsMatch number of one of the user's accounts in the app, classify as Internal Transfer
-        // and link that destination account in `toAccountID`.
-        if let context, let recipSuffix = suffixes.recipientSuffix,
-           let ownDest = findMatchingAccount(suffix: recipSuffix, excludingAccountID: resolvedSourceAccountID, in: context),
-           !txType.isIncomeDirection {
-            txType = .internalTransfer
-            resolvedToAccountID = ownDest.id
-            if let srcAcc = matchedSourceAccount, srcAcc.id != ownDest.id {
-                customCounterparty = "\(srcAcc.name) → \(ownDest.name)"
-            } else {
-                customCounterparty = "Transfer to \(ownDest.name)"
-            }
-            customReason = "Recipient IBAN/account ending \(recipSuffix) matches your account '\(ownDest.name)'"
-            if resolvedGoalID == nil,
-               let goal = findMatchingGoal(suffix: recipSuffix, accountID: ownDest.id, in: context) {
-                resolvedGoalID = goal.id
-            }
-        }
-
         let isIncome = txType.isIncomeDirection
         let extractedMerchant = customCounterparty
             ?? merchant(in: normalized, isIncome: isIncome, rail: rail, recipientSuffix: suffixes.recipientSuffix)
@@ -1246,7 +1226,9 @@ enum SMSParser {
             )
         }
 
-        // Check if recipient IBAN suffix (e.g. 0846) belongs to one of the user's own accounts or a linked SavingsGoal in SwiftData
+        // Single SMS rule: Never mark a single SMS as internalTransfer just because recipient IBAN matches a user account
+        // (Internal Transfer between accounts applies only when matched with another SMS at the same date & time,
+        // or when contributing to a dedicated SavingsGoal with a matching smsMatch).
         var txType: SMSTransactionType = .transferOut
         var toAccID: UUID? = nil
         var matchedGoalID: UUID? = nil
@@ -1255,20 +1237,10 @@ enum SMSParser {
 
         if let context {
             let sourceID = matchedSourceAcc?.id
-            if let ownDest = findMatchingAccount(suffix: recipientIBANSuffix, excludingAccountID: sourceID, in: context) {
-                txType = .internalTransfer
-                toAccID = ownDest.id
-                if let srcAcc = matchedSourceAcc, srcAcc.id != ownDest.id {
-                    merch = "\(srcAcc.name) → \(ownDest.name)"
-                } else {
-                    merch = "Transfer to \(ownDest.name)"
-                }
-                reason = "Verified \(serviceName) transfer to user's own account (\(ownDest.name), ending \(recipientIBANSuffix))"
-            }
-            if let goal = findMatchingGoal(suffix: recipientIBANSuffix, accountID: toAccID, in: context) {
+            if let goal = findMatchingGoal(suffix: recipientIBANSuffix, accountID: nil, in: context) {
                 txType = .internalTransfer
                 matchedGoalID = goal.id
-                if toAccID == nil, let linkedAcc = goal.linkedAccountID, linkedAcc != sourceID {
+                if let linkedAcc = goal.linkedAccountID, linkedAcc != sourceID {
                     toAccID = linkedAcc
                 }
                 merch = "Saved to \(goal.name)"
@@ -1466,35 +1438,19 @@ enum SMSParser {
             )
         }
 
-        // 3. Explicit Internal Transfer wording or two user-owned account suffixes
+        // 3. Note: Rule 6 (Explicit Internal Transfer Wording or Matching Own Accounts)
+        // applies ONLY when two SMS messages match in date & time during import deduplication/merging.
+        // A single SMS by itself is classified as a transfer (transferOut / transferIn) rather than internalTransfer.
         let internalPatterns = [
             "\\binternal transfer\\b", "\\btransfer between your accounts\\b", "\\btransferred between your accounts\\b",
             "\\bto your own account\\b", "تحويل بين حساباتك", "تحويل داخلي بين حساباتك"
         ]
         if internalPatterns.contains(where: { lower.range(of: $0, options: .regularExpression) != nil }) {
-            let destAcc = suffixes.recipientSuffix.flatMap { suffix in context.flatMap { findMatchingAccount(suffix: suffix, in: $0) } }
+            let legDir = analyzeTransferLegDirection(in: normalized)
             return ClassificationOutcome(
-                type: .internalTransfer,
+                type: legDir == .credit ? .transferIn : .transferOut,
                 confidence: .high,
-                reason: "Matched explicit internal transfer between own accounts",
-                counterparty: destAcc.map { "Transfer to \($0.name)" } ?? (suffixes.recipientSuffix.map { "Own account ending \($0)" } ?? "Internal transfer"),
-                toAccountID: destAcc?.id
-            )
-        }
-
-        if let context,
-           let srcSuffix = suffixes.accountSuffix,
-           let dstSuffix = suffixes.recipientSuffix,
-           srcSuffix != dstSuffix,
-           let srcAcc = findMatchingAccount(suffix: srcSuffix, in: context),
-           let dstAcc = findMatchingAccount(suffix: dstSuffix, in: context),
-           srcAcc.id != dstAcc.id {
-            return ClassificationOutcome(
-                type: .internalTransfer,
-                confidence: .high,
-                reason: "Both source account (\(srcSuffix)) and destination account (\(dstSuffix)) belong to user's accounts",
-                counterparty: "\(srcAcc.name) → \(dstAcc.name)",
-                toAccountID: dstAcc.id
+                reason: "Matched transfer wording (will convert to Internal Transfer only if matched with a second SMS at the same date & time)"
             )
         }
 
@@ -1626,34 +1582,18 @@ enum SMSParser {
         let isIncoming = incomingPatterns.contains(where: { lower.range(of: $0, options: .regularExpression) != nil })
 
         if isOutgoing && !isIncoming {
-            // Check if the destination suffix matches one of the user's own accounts or a linked SavingsGoal -> Internal Transfer
+            // Check if the destination suffix matches a linked SavingsGoal
+            // (Note: Matching a regular user account by recipient IBAN/account never marks a single SMS as internalTransfer
+            // unless matched with another SMS at the same date & time).
             if let context, let recipSuffix = suffixes.recipientSuffix {
-                let sourceAcc = findMatchingAccount(forBank: bank, digits: suffixes.accountSuffix, in: context)
-                let ownDest = findMatchingAccount(suffix: recipSuffix, excludingAccountID: sourceAcc?.id, in: context)
-                let matchedGoal = findMatchingGoal(suffix: recipSuffix, accountID: ownDest?.id, in: context)
-                if let matchedGoal {
+                if let matchedGoal = findMatchingGoal(suffix: recipSuffix, accountID: nil, in: context) {
                     return ClassificationOutcome(
                         type: .internalTransfer,
                         confidence: .high,
                         reason: "Outgoing transfer to linked savings goal '\(matchedGoal.name)' (ending \(recipSuffix))",
                         counterparty: "Saved to \(matchedGoal.name)",
-                        toAccountID: ownDest?.id ?? matchedGoal.linkedAccountID,
+                        toAccountID: matchedGoal.linkedAccountID,
                         goalID: matchedGoal.id
-                    )
-                }
-                if let ownDest {
-                    let cp: String = {
-                        if let sourceAcc, sourceAcc.id != ownDest.id {
-                            return "\(sourceAcc.name) → \(ownDest.name)"
-                        }
-                        return "Transfer to \(ownDest.name)"
-                    }()
-                    return ClassificationOutcome(
-                        type: .internalTransfer,
-                        confidence: .high,
-                        reason: "Outgoing transfer to user's own account (\(ownDest.name), ending \(recipSuffix))",
-                        counterparty: cp,
-                        toAccountID: ownDest.id
                     )
                 }
             }
@@ -1733,10 +1673,82 @@ enum SMSParser {
         }
     }
 
-    /// Checks whether a user `Account` matches a given bank name (e.g. "BisB", "ila", "NBB", "BBK").
+    enum TransferLegDirection {
+        case debit
+        case credit
+        case unknown
+    }
+
+    /// Analyzes an SMS message to determine whether it represents the Debit leg (money leaving the account)
+    /// or the Credit leg (money entering the account) of an inter-account transfer.
+    static func analyzeTransferLegDirection(in rawText: String, fallbackIsIncome: Bool? = nil) -> TransferLegDirection {
+        let lower = normalizeText(rawText).replacingOccurrences(of: "\n", with: " ").lowercased()
+
+        // Explicit outgoing Fawri+ format ("payment ... was credited to IBAN ending ...") is always a DEBIT on the sender's account
+        if lower.range(of: "\\bpayment\\b.*\\bwas\\s+credited\\s+to\\s+iban\\s+ending\\b", options: .regularExpression) != nil {
+            return .debit
+        }
+
+        let debitPatterns = [
+            "\\bfawri\\+?\\s+transfer\\s+of\\b.*\\bto\\b",
+            "\\btransfer\\s+of\\b.*\\bto\\b.*\\bfrom\\b",
+            "\\btransfer\\s+of\\b.*\\bfrom\\s+(?:your\\s+)?(?:a/c|acct|account|iban)\\b.*\\bto\\b",
+            "\\b(?:debited|has\\s+been\\s+debited|deducted|withdrawn)\\b",
+            "\\b(?:outward|outgoing)\\s+(?:fawri\\+?|transfer|remittance|payment)\\b",
+            "\\bsent\\s+(?:via\\s+fawri\\+?|to\\s+iban|to\\s+account)\\b",
+            "\\btransferred\\s+to\\b",
+            "حوالة صادرة", "تحويل صادر", "حوالة فوري\\+? صادرة", "تم خصم", "خصم مبلغ", "تم تحويل مبلغ"
+        ]
+
+        let creditPatterns = [
+            "\\breceived\\s+(?:a\\s+)?(?:fawri\\+?|transfer)\\b",
+            "\\b(?:fawri\\+?|transfer)\\b.*\\breceived\\s+from\\b",
+            "\\byour\\s+(?:a/c|acct|account|iban)\\b.*\\b(?:has\\s+been\\s+|was\\s+)?credited\\b",
+            "\\b(?:a/c|acct|account|iban)\\s*(?:ending\\s*)?[0-9*x•#]+\\s*(?:has\\s+been\\s+|was\\s+)?credited\\b",
+            "\\bcredited\\s+(?:to\\s+your|with)\\b",
+            "\\bcredit\\s+(?:transaction|txn|alert|advice|amount|of|to)\\b",
+            "\\b(?:inward|incoming)\\s+(?:fawri\\+?|transfer|remittance)\\b",
+            "\\breceived\\s+in\\s+your\\b",
+            "\\bdeposit(?:ed)?\\b",
+            "حوالة واردة", "تحويل وارد", "حوالة فوري\\+? واردة", "تم إيداع", "تم ايداع", "تم استلام", "وارد لحسابك", "تمت إضافة"
+        ]
+
+        let isDebit = debitPatterns.contains(where: { lower.range(of: $0, options: .regularExpression) != nil })
+        let isCredit = creditPatterns.contains(where: { lower.range(of: $0, options: .regularExpression) != nil })
+
+        if isDebit && !isCredit { return .debit }
+        if isCredit && !isDebit { return .credit }
+        if let fallbackIsIncome {
+            return fallbackIsIncome ? .credit : .debit
+        }
+        return .unknown
+    }
+
+    /// Formats the combined "SMS sender bank" string including both banks from two merged SMS messages (e.g. "BisB · ila").
+    static func formatCombinedBanks(debitBank: String?, creditBank: String?) -> String? {
+        let b1 = debitBank.map { primaryBankName(from: $0).trimmingCharacters(in: .whitespacesAndNewlines) }
+        let b2 = creditBank.map { primaryBankName(from: $0).trimmingCharacters(in: .whitespacesAndNewlines) }
+        let clean1 = (b1?.isEmpty == false) ? b1 : nil
+        let clean2 = (b2?.isEmpty == false) ? b2 : nil
+        if let clean1, let clean2 {
+            if clean1.caseInsensitiveCompare(clean2) == .orderedSame {
+                return clean1
+            }
+            return "\(clean1) · \(clean2)"
+        }
+        return clean1 ?? clean2
+    }
+
+    /// Extracts the primary (debit/first) bank name when `smsBank` contains both merged banks (e.g. "BisB · ila" -> "BisB").
+    static func primaryBankName(from bank: String) -> String {
+        let parts = bank.components(separatedBy: " · ")
+        return parts.first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? bank
+    }
+
+    /// Checks whether a user `Account` matches a given bank name (e.g. "BisB", "ila", "NBB", "BBK", or "BisB · ila").
     static func accountMatchesBank(_ acc: Account, bank: String?) -> Bool {
         guard let bank else { return false }
-        let bLower = bank.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let bLower = primaryBankName(from: bank).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !bLower.isEmpty else { return false }
         let aliases: [String] = {
             if let direct = bankAliasTable[bLower] { return direct }

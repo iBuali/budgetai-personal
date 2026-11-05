@@ -520,26 +520,10 @@ enum SMSImporter {
             }
         }
 
-        // Internal transfer rule: If the recipient IBAN / account from the SMS matches the number (`smsMatch`)
-        // in one of the user's accounts (different from the source `target` account), classify as Internal Transfer
-        // and set `toAccountID` so the account name appears in front of the "To account" field.
-        if !isCardPayment,
-           let recip = p.recipientSuffix,
-           let matchedDest = SMSParser.findMatchingAccount(suffix: recip, excludingAccountID: target, in: context),
-           !p.transactionType.isIncomeDirection {
-            p.toAccountID = matchedDest.id
-            p.transactionType = .internalTransfer
-            p.category = .internalTransfer
-            p.isIncome = false
-            p.confidence = .high
-            if !p.matchedUserRule {
-                if let srcID = target, let srcAcc = Ledger.account(srcID, context: context), srcAcc.id != matchedDest.id {
-                    p.merchant = "\(srcAcc.name) → \(matchedDest.name)"
-                } else {
-                    p.merchant = "Transfer to \(matchedDest.name)"
-                }
-            }
-        }
+        // NOTE: Rule 6 (Internal Transfer between own accounts or matching recipient IBAN/account)
+        // ONLY applies when TWO SMS messages match in date & time (handled below in `mergeSameTimeTransferIfNeeded`).
+        // A single SMS with a matching recipient IBAN/account is never marked as `.internalTransfer` on its own
+        // (unless it matches a saved user rule, a credit card payment, or a dedicated SavingsGoal).
 
         // Check if a transfer recipient suffix or destination account matches a linked SavingsGoal
         if p.goalID == nil, !isCardPayment,
@@ -861,7 +845,26 @@ enum SMSImporter {
                 accountBalances[inOrigin] = pBal
             }
 
-            // Resolve source (from) and destination (to) accounts for the single merged Internal Transfer transaction
+            // Analyze both SMS messages to determine which is the DEBIT leg (money leaving) and which is the CREDIT leg (money entering)
+            let existingRawText = existing.rawText ?? ""
+            let existingLegDir = SMSParser.analyzeTransferLegDirection(
+                in: existingRawText,
+                fallbackIsIncome: existingRole == .transferIn || existing.isIncome
+            )
+            let incomingLegDir = SMSParser.analyzeTransferLegDirection(
+                in: rawSMS,
+                fallbackIsIncome: newRole == .transferIn || parsed.isIncome
+            )
+            let incomingIsCreditLeg: Bool = {
+                if incomingLegDir == .credit && existingLegDir != .credit { return true }
+                if existingLegDir == .credit && incomingLegDir != .credit { return false }
+                if newRole == .transferIn && existingRole != .transferIn { return true }
+                if existingRole == .transferIn && newRole != .transferIn { return false }
+                if parsed.recipientSuffix != nil && existing.smsRecipientSuffix == nil { return true }
+                return true
+            }()
+
+            // Resolve source (DEBIT / from) and destination (CREDIT / to) accounts for the single merged Internal Transfer transaction
             var mergedFromID: UUID? = nil
             var mergedToID: UUID? = nil
 
@@ -870,10 +873,10 @@ enum SMSImporter {
 
             if let exAcc, let newAcc, exAcc != newAcc {
                 // The two SMS messages belong to two DIFFERENT accounts (e.g., BisB and ila Bank)
-                if existingRole == .transferIn {
+                if existingLegDir == .credit || existingRole == .transferIn {
                     mergedFromID = newAcc
                     mergedToID = exAcc
-                } else if newRole == .transferIn {
+                } else if incomingLegDir == .credit || newRole == .transferIn {
                     mergedFromID = exAcc
                     mergedToID = newAcc
                 } else if existingRole == .internalTransfer, existing.toAccountID == newAcc {
@@ -889,7 +892,7 @@ enum SMSImporter {
                     mergedFromID = newAcc
                     mergedToID = parsed.toAccountID ?? exAcc
                 } else {
-                    // Both were transferOut on two different accounts: check if recipientSuffix matches one of them
+                    // Both were debit/transferOut on two different accounts: check if recipientSuffix matches one of them
                     if let recip = existing.smsRecipientSuffix ?? parsed.recipientSuffix,
                        let matchedDest = SMSParser.findMatchingAccount(suffix: recip, in: context) {
                         if matchedDest.id == newAcc {
@@ -909,7 +912,8 @@ enum SMSImporter {
                 mergedToID = existing.toAccountID ?? parsed.toAccountID
             }
 
-            // If destination account is still nil or equal to source, resolve from recipientSuffix
+            // Rule 6: When two SMS match in date & time, if destination account is still nil or equal to source,
+            // resolve the credit account from recipientSuffix matching one of the user's accounts
             if mergedToID == nil || mergedToID == mergedFromID {
                 if let recipSuffix = parsed.recipientSuffix ?? existing.smsRecipientSuffix,
                    let matchedDest = SMSParser.findMatchingAccount(suffix: recipSuffix, excludingAccountID: mergedFromID, in: context) {
@@ -951,22 +955,43 @@ enum SMSImporter {
                 }
             }
 
-            // Determine the bank and sender that belong to `mergedFromID` so `Account` and `SMS sender bank` ALWAYS match!
-            let mergedBank: String? = {
+            // Determine BOTH banks from the two SMS messages (Debit bank first, Credit bank second)
+            // so "SMS sender bank" includes both banks (e.g. "BisB · ila") while primaryBankName matches the Debit account!
+            let debitBank: String? = {
                 if let fromID = mergedFromID {
                     if incomingOriginAccID == fromID, let b = resolvedBank {
-                        return b
+                        return SMSParser.primaryBankName(from: b)
                     }
                     if existingOriginAccID == fromID, let b = existing.smsBank {
-                        return b
+                        return SMSParser.primaryBankName(from: b)
                     }
                     if let fromAcc = Ledger.account(fromID, context: context),
                        let accBank = SMSParser.bankName(forAccount: fromAcc) {
                         return accBank
                     }
                 }
-                return existing.smsBank ?? resolvedBank
+                return incomingIsCreditLeg
+                    ? (SMSParser.primaryBankName(from: existing.smsBank) ?? resolvedBank)
+                    : (resolvedBank ?? SMSParser.primaryBankName(from: existing.smsBank))
             }()
+            let creditBank: String? = {
+                if let toID = mergedToID {
+                    if incomingOriginAccID == toID, let b = resolvedBank {
+                        return SMSParser.primaryBankName(from: b)
+                    }
+                    if existingOriginAccID == toID, let b = existing.smsBank {
+                        return SMSParser.primaryBankName(from: b)
+                    }
+                    if let toAcc = Ledger.account(toID, context: context),
+                       let accBank = SMSParser.bankName(forAccount: toAcc) {
+                        return accBank
+                    }
+                }
+                return incomingIsCreditLeg
+                    ? resolvedBank
+                    : SMSParser.primaryBankName(from: existing.smsBank)
+            }()
+            let mergedBank = SMSParser.formatCombinedBanks(debitBank: debitBank, creditBank: creditBank)
             let mergedSender: String? = {
                 if let fromID = mergedFromID {
                     if incomingOriginAccID == fromID, let s = resolvedSender, !s.isEmpty {
@@ -977,6 +1002,14 @@ enum SMSImporter {
                     }
                 }
                 return existing.smsSender ?? resolvedSender
+            }()
+            let combinedRawSMS: String = {
+                let firstSMS = incomingIsCreditLeg ? existingRawText : rawSMS
+                let secondSMS = incomingIsCreditLeg ? rawSMS : existingRawText
+                if firstSMS.isEmpty { return secondSMS }
+                if secondSMS.isEmpty || firstSMS == secondSMS { return firstSMS }
+                if firstSMS.contains(secondSMS) { return firstSMS }
+                return "\(firstSMS)\n\n---\n\n\(secondSMS)"
             }()
 
             // Update the existing transaction in-place so there is only ONE transaction in the database
@@ -998,6 +1031,7 @@ enum SMSImporter {
                     tx.merchant = parsed.merchant
                 }
 
+                tx.rawText = combinedRawSMS
                 tx.smsBank = mergedBank
                 tx.smsSender = mergedSender
                 if tx.smsReference == nil { tx.smsReference = parsed.referenceNumber }
@@ -1006,7 +1040,7 @@ enum SMSImporter {
                 tx.smsBalance = sourceBalance
                 tx.smsToBalance = destBalance
                 tx.smsConfidence = .high
-                tx.smsClassificationReason = "Merged simultaneous transfer between accounts (\(existingRole.title) + \(newRole.title) at same date & time)"
+                tx.smsClassificationReason = "Rule 6: Merged 2 matching SMS at same date & time (Debit: \(debitBank ?? "Source") → Credit: \(creditBank ?? "Destination"))"
             }
 
             var syncedBalance: Double? = nil

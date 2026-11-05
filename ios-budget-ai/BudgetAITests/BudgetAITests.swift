@@ -116,14 +116,28 @@ struct BudgetAITests {
         let initialNetWorth = Finance(transactions: [], accounts: [bisb, ila]).netWorth
         #expect(abs(initialNetWorth - 366.195) < 0.0001)
 
-        // Because IBAN ending 0846 matches the user's own ila Account, this Fawri+ payment is classified as an internal transfer
-        let sms = "Fawri+ payment BHD3.000, ref: BIB103KAK000KZUM was credited to IBAN ending 0846 on 2026/10/27 15:26. Balance BHD263.195. Tel: 17515151"
-        let outcome = await SMSImporter.importText(sms, context: context, forceApprove: true)
-        let tx = try #require(outcome.transaction)
+        // 1. A single SMS with recipient IBAN ending 0846 is NEVER marked as internalTransfer on its own
+        let sms1 = "Fawri+ payment BHD3.000, ref: BIB103KAK000KZUM was credited to IBAN ending 0846 on 2026/10/27 15:26. Balance BHD263.195. Tel: 17515151"
+        let outcome1 = await SMSImporter.importText(sms1, context: context, forceApprove: true)
+        let tx = try #require(outcome1.transaction)
+        #expect(tx.smsTransactionType == .expense)
+        #expect(tx.toAccountID == nil)
+
+        // 2. When matched with a second SMS at the same date & time (2026/10/27 15:26), Rule 6 applies:
+        //    - Converts to internalTransfer
+        //    - Analyzes debit (BisB) vs credit (ila)
+        //    - Includes both banks in smsBank ("BisB · ila")
+        //    - Stores both SMS messages in rawText
+        let sms2 = "Credit transaction of BHD 3.000 to account 0846 on 2026/10/27 15:26. Available balance is BHD 103.000. Call 17123456"
+        _ = await SMSImporter.importText(sms2, context: context, forceApprove: true)
 
         #expect(tx.smsTransactionType == .internalTransfer)
+        #expect(tx.category == .internalTransfer)
         #expect(tx.accountID == bisb.id)
         #expect(tx.toAccountID == ila.id)
+        #expect(tx.smsBank == "BisB · ila")
+        #expect(tx.rawText?.contains(sms1) == true)
+        #expect(tx.rawText?.contains(sms2) == true)
         #expect(abs(bisb.balance - 263.195) < 0.0001)
         #expect(abs(ila.balance - 103.000) < 0.0001)
 
@@ -794,7 +808,9 @@ struct BudgetAITests {
         #expect(fourthTx.smsTransactionType == .internalTransfer)
         #expect(fourthTx.accountID == bisb.id)
         #expect(fourthTx.toAccountID == ila.id)
-        #expect(fourthTx.smsBank == "BisB")
+        #expect(fourthTx.smsBank == "BisB · ila")
+        #expect(fourthTx.rawText?.contains(smsOutwardBisB) == true)
+        #expect(fourthTx.rawText?.contains(smsFawriBisB) == true)
         #expect(abs(bisb.balance - 400.000) < 0.0001)
         #expect(abs(ila.balance - 300.000) < 0.0001)
     }
@@ -815,41 +831,48 @@ struct BudgetAITests {
         context.insert(newerTx)
         try context.save()
 
-        // 1. Outgoing transfer SMS where recipient IBAN/account matches user's ila account (0846):
-        // Must classify as internalTransfer, set toAccountID = ila.id, include ila Bank name, and set accountID = bisb.id matching SMS sender bank
+        // 1. Single outgoing transfer SMS where recipient IBAN/account matches user's ila account (0846):
+        // Must NEVER be marked as internalTransfer on its own until matched with another SMS at the same date & time!
         let sms1 = "Fawri+ Transfer of BHD 75.000 from account 9001 to IBAN BH29ILAB00000000000846 on 2026/10/25 14:15. Available Balance BHD 925.000. Tel: 17515151"
         let res1 = await SMSImporter.importText(sms1, context: context, forceApprove: true)
         let tx1 = try #require(res1.transaction)
-        #expect(tx1.smsTransactionType == .internalTransfer)
-        #expect(tx1.category == .internalTransfer)
+        #expect(tx1.smsTransactionType == .expense)
+        #expect(tx1.category != .internalTransfer)
         #expect(tx1.accountID == bisb.id)
-        #expect(tx1.toAccountID == ila.id)
+        #expect(tx1.toAccountID == nil)
         #expect(tx1.smsBank == "BisB")
-        #expect(tx1.merchant.contains("ila Bank"))
 
         // 2. Simultaneous second SMS from ila Bank (17123456) at 2026/10/25 14:15 with ila's own SMS balance (175.000):
-        // Must merge into tx1, keep accountID = bisb.id & smsBank = BisB, set toAccountID = ila.id,
-        // and update BisB balance to 925.000 and ila balance to 175.000 separately!
+        // Rule 6 now applies: merges into tx1, analyzes Debit (bisb.id) vs Credit (ila.id),
+        // includes both banks in smsBank ("BisB · ila"), stores both SMS in rawText,
+        // and updates BisB balance to 925.000 and ila balance to 175.000 separately!
         let sms2 = "Credit transaction of BHD 75.000 to account 0846 on 2026/10/25 14:15. Available balance is BHD 175.000. Call 17123456"
         _ = await SMSImporter.importText(sms2, context: context, forceApprove: true)
 
         let allSMS = try context.fetch(FetchDescriptor<MoneyTransaction>()).filter { $0.source == .sms }
         #expect(allSMS.count == 1)
         let merged = try #require(allSMS.first)
+        #expect(merged.smsTransactionType == .internalTransfer)
+        #expect(merged.category == .internalTransfer)
         #expect(merged.accountID == bisb.id)
         #expect(merged.toAccountID == ila.id)
-        #expect(merged.smsBank == "BisB")
+        #expect(merged.smsBank == "BisB · ila")
+        #expect(merged.rawText?.components(separatedBy: "\n\n---\n\n").count == 2)
+        #expect(merged.rawText?.contains(sms1) == true)
+        #expect(merged.rawText?.contains(sms2) == true)
         #expect(merged.smsBalance == 925.000)
         #expect(merged.smsToBalance == 175.000)
         #expect(abs(bisb.balance - 925.000) < 0.0001)
         #expect(abs(ila.balance - 175.000) < 0.0001)
 
-        // 3. Reverse arrival order when second SMS is an internalTransfer from BisB and first SMS was from ila Bank:
-        // Previously, this caused mergedFromID == mergedToID or added the amount to one account in both.
+        // 3. Reverse arrival order when Credit SMS from ila Bank arrives first and Debit SMS from BisB arrives second:
+        // Analyzes both SMS to put Debit (bisb.id) as accountID and Credit (ila.id) as toAccountID,
+        // includes both banks ("BisB · ila"), and updates each balance separately.
         let smsIlaFirst = "Your account 0846 credited BHD 25.000 on 2026/10/26 09:30. Available balance BHD 210.000. Call 17123456"
         let smsBisBSecond = "Fawri+ payment BHD 25.000, ref: BIB555KZUM was credited to IBAN ending 0846 on 2026/10/26 09:30. Balance BHD 890.000. Tel: 17515151"
 
-        _ = await SMSImporter.importText(smsIlaFirst, context: context, forceApprove: true)
+        let resIlaFirst = await SMSImporter.importText(smsIlaFirst, context: context, forceApprove: true)
+        #expect(resIlaFirst.transaction?.smsTransactionType == .income)
         _ = await SMSImporter.importText(smsBisBSecond, context: context, forceApprove: true)
 
         let allSMSAfterReverse = try context.fetch(FetchDescriptor<MoneyTransaction>()).filter { $0.source == .sms }
@@ -858,7 +881,8 @@ struct BudgetAITests {
         #expect(mergedReverse.smsTransactionType == .internalTransfer)
         #expect(mergedReverse.accountID == bisb.id)
         #expect(mergedReverse.toAccountID == ila.id)
-        #expect(mergedReverse.smsBank == "BisB")
+        #expect(mergedReverse.smsBank == "BisB · ila")
+        #expect(mergedReverse.rawText?.components(separatedBy: "\n\n---\n\n").count == 2)
         #expect(mergedReverse.smsBalance == 890.000)
         #expect(mergedReverse.smsToBalance == 210.000)
         #expect(abs(bisb.balance - 890.000) < 0.0001)

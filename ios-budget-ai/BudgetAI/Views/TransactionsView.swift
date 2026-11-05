@@ -770,7 +770,7 @@ struct TransactionDetailView: View {
     private var recipientDisplayText: String {
         let suffix = (tx.smsRecipientSuffix?.isEmpty == false ? tx.smsRecipientSuffix : nil)
             ?? (tx.smsAccountSuffix?.isEmpty == false ? tx.smsAccountSuffix : nil)
-        let matchedDest = toAccount ?? matchedRecipientAccount
+        let matchedDest = toAccount ?? ((tx.category == .internalTransfer || tx.effectiveTransactionType == .internalTransfer) ? matchedRecipientAccount : nil)
         if let suffix {
             if let matchedDest {
                 return "\(matchedDest.name) · ••\(suffix)"
@@ -778,6 +778,13 @@ struct TransactionDetailView: View {
             return "••\(suffix)"
         }
         return matchedDest?.name ?? "—"
+    }
+
+    private var rawSMSMessages: [String] {
+        guard let raw = tx.rawText, !raw.isEmpty else { return [] }
+        return raw.components(separatedBy: "\n\n---\n\n")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
     }
 
     private var hasUnsavedName: Bool {
@@ -1052,7 +1059,7 @@ struct TransactionDetailView: View {
                             }
                         }
                     }
-                } else if tx.category == .internalTransfer || tx.effectiveTransactionType == .internalTransfer || tx.toAccountID != nil || matchedRecipientAccount != nil {
+                } else if tx.category == .internalTransfer || tx.effectiveTransactionType == .internalTransfer || tx.toAccountID != nil {
                     Picker("To account", selection: Binding(get: { tx.toAccountID ?? matchedRecipientAccount?.id }, set: { newID in
                         guard newID != tx.accountID else { return }
                         Ledger.edit(tx, context: context) { target in
@@ -1131,6 +1138,9 @@ struct TransactionDetailView: View {
                         }
                     )) {
                         Text("Unknown / Not set").tag("")
+                        if let currentBank = tx.smsBank, !currentBank.isEmpty, !BahrainBankCatalog.bahrainBanks.contains(currentBank) {
+                            Text(currentBank).tag(currentBank)
+                        }
                         ForEach(BahrainBankCatalog.bahrainBanks, id: \.self) { bank in
                             Text(bank).tag(bank)
                         }
@@ -1217,9 +1227,27 @@ struct TransactionDetailView: View {
                 }
             }
 
-            if let raw = tx.rawText, !raw.isEmpty {
-                Section("Original message") {
-                    Text(raw).font(.footnote).foregroundStyle(Theme.secondaryInk).textSelection(.enabled)
+            if !rawSMSMessages.isEmpty {
+                Section(rawSMSMessages.count > 1 ? "Original SMS messages (\(rawSMSMessages.count))" : "Original message") {
+                    if rawSMSMessages.count > 1 {
+                        ForEach(Array(rawSMSMessages.enumerated()), id: \.offset) { idx, msg in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(smsLegHeaderTitle(index: idx, message: msg))
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(idx == 0 ? Theme.ink : Theme.positive)
+                                Text(msg)
+                                    .font(.footnote)
+                                    .foregroundStyle(Theme.secondaryInk)
+                                    .textSelection(.enabled)
+                            }
+                            .padding(.vertical, 2)
+                        }
+                    } else {
+                        Text(rawSMSMessages[0])
+                            .font(.footnote)
+                            .foregroundStyle(Theme.secondaryInk)
+                            .textSelection(.enabled)
+                    }
                 }
             }
 
@@ -1267,6 +1295,21 @@ struct TransactionDetailView: View {
         }
     }
 
+    private func smsLegHeaderTitle(index: Int, message: String) -> String {
+        let dir = SMSParser.analyzeTransferLegDirection(in: message, fallbackIsIncome: index > 0)
+        let roleLabel: String = {
+            switch dir {
+            case .debit: return "Debit SMS"
+            case .credit: return "Credit SMS"
+            case .unknown: return index == 0 ? "Debit SMS" : "Credit SMS"
+            }
+        }()
+        if let detectedBank = SMSParser.parse(message, context: context)?.detectedBank {
+            return "SMS \(index + 1) · \(roleLabel) (\(detectedBank))"
+        }
+        return "SMS \(index + 1) · \(roleLabel)"
+    }
+
     private func syncSMSAccountAndRecipientIfNeeded() {
         guard isSMSTransaction else { return }
         var needsEdit = false
@@ -1281,8 +1324,7 @@ struct TransactionDetailView: View {
         }
         let effectiveAccID = needsEdit ? bankMatchedAcc?.id : tx.accountID
         let matchedDest: Account? = {
-            guard tx.category != .visaTransfer,
-                  !tx.isIncome,
+            guard tx.category == .internalTransfer || tx.smsTransactionType == .internalTransfer,
                   tx.toAccountID == nil,
                   let recip = tx.smsRecipientSuffix, !recip.isEmpty else { return nil }
             return SMSParser.findMatchingAccount(suffix: recip, excludingAccountID: effectiveAccID, in: context)
@@ -1300,9 +1342,6 @@ struct TransactionDetailView: View {
                 }
                 if let matchedDest, target.toAccountID == nil, matchedDest.id != target.accountID {
                     target.toAccountID = matchedDest.id
-                    target.category = .internalTransfer
-                    target.smsTransactionType = .internalTransfer
-                    target.isIncome = false
                 }
             }
         }
