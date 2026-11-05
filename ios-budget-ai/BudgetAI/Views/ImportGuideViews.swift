@@ -127,33 +127,17 @@ struct SMSImportSettingsSection: View {
 
 // MARK: - Saved SMS Conditions & Rules Management
 
-enum SMSConditionFilter: String, CaseIterable, Identifiable {
-    case all = "All"
-    case senderBanks = "Sender Banks"
-    case transactionRules = "Transaction Rules"
-
-    var id: String { rawValue }
-}
-
 struct SMSSavedConditionsView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(AppState.self) private var appState
     @Query private var accounts: [Account]
     @Query private var goals: [SavingsGoal]
-    @State private var senderBankMap: [String: String] = [:]
-    @State private var senderAccountMap: [String: UUID] = [:]
     @State private var classificationRules: [SMSUserRules.ClassificationRule] = []
-    @State private var selectedFilter: SMSConditionFilter = .all
-    @State private var showAddSheet = false
     @State private var showClearAllConfirmation = false
     @State private var selectedRuleForDetails: SMSUserRules.ClassificationRule? = nil
 
     private var totalCount: Int {
-        senderBankMap.count + classificationRules.count
-    }
-
-    private var sortedSenderRules: [(sender: String, bank: String)] {
-        senderBankMap.map { ($0.key, $0.value) }.sorted { $0.0 < $1.0 }
+        classificationRules.count
     }
 
     private var sortedClassificationRules: [SMSUserRules.ClassificationRule] {
@@ -162,42 +146,10 @@ struct SMSSavedConditionsView: View {
 
     var body: some View {
         List {
-            if totalCount > 0 {
-                Section {
-                    Picker("Filter", selection: $selectedFilter) {
-                        Text("All (\(totalCount))").tag(SMSConditionFilter.all)
-                        Text("Senders (\(senderBankMap.count))").tag(SMSConditionFilter.senderBanks)
-                        Text("Rules (\(classificationRules.count))").tag(SMSConditionFilter.transactionRules)
-                    }
-                    .pickerStyle(.segmented)
-                    .listRowBackground(Color.clear)
-                    .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
-                }
-            }
-
-            if totalCount == 0 {
+            if classificationRules.isEmpty {
                 emptyStateSection
-            }
-
-            if (selectedFilter == .all || selectedFilter == .senderBanks) && (!senderBankMap.isEmpty || selectedFilter == .senderBanks) {
-                senderBanksSection
-            }
-
-            if (selectedFilter == .all || selectedFilter == .transactionRules) && (!classificationRules.isEmpty || selectedFilter == .transactionRules) {
+            } else {
                 classificationRulesSection
-            }
-
-            Section {
-                Button {
-                    showAddSheet = true
-                } label: {
-                    Label("Add SMS sender bank", systemImage: "plus.circle.fill")
-                        .font(.body.weight(.medium))
-                        .foregroundStyle(Theme.cobalt)
-                }
-            }
-
-            if totalCount > 0 {
                 clearAllSection
             }
         }
@@ -207,22 +159,14 @@ struct SMSSavedConditionsView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                HStack(spacing: 12) {
-                    if totalCount > 0 {
-                        Button(role: .destructive) {
-                            showClearAllConfirmation = true
-                        } label: {
-                            Image(systemName: "trash")
-                                .foregroundStyle(Theme.negative)
-                        }
-                        .accessibilityLabel("Clear all saved conditions")
-                    }
-                    Button {
-                        showAddSheet = true
+                if totalCount > 0 {
+                    Button(role: .destructive) {
+                        showClearAllConfirmation = true
                     } label: {
-                        Image(systemName: "plus")
+                        Image(systemName: "trash")
+                            .foregroundStyle(Theme.negative)
                     }
-                    .accessibilityLabel("Add sender bank")
+                    .accessibilityLabel("Clear all saved conditions")
                 }
             }
         }
@@ -232,18 +176,13 @@ struct SMSSavedConditionsView: View {
             titleVisibility: .visible
         ) {
             Button("Clear All (\(totalCount))", role: .destructive) {
-                SMSUserRules.clearAll()
+                SMSUserRules.clearClassificationRules()
                 reload()
                 appState.show("All saved SMS conditions cleared")
             }
             Button("Cancel", role: .cancel) { }
         } message: {
-            Text("This will permanently delete all \(totalCount) saved SMS sender bank mappings and transaction rules. Future incoming SMS will use default parsing.")
-        }
-        .sheet(isPresented: $showAddSheet) {
-            AddSMSSenderBankSheet {
-                reload()
-            }
+            Text("This will permanently delete all \(totalCount) saved SMS transaction rules. Future incoming SMS will use default parsing.")
         }
         .sheet(item: $selectedRuleForDetails) { rule in
             SMSClassificationRuleDetailSheet(rule: rule, accounts: accounts, goals: goals)
@@ -258,7 +197,7 @@ struct SMSSavedConditionsView: View {
                 Text("No saved conditions yet")
                     .font(.headline)
                     .foregroundStyle(Theme.ink)
-                Text("When you link bank senders or edit/approve SMS transactions with custom categories, merchants, or accounts, your conditions are saved here automatically.")
+                Text("When you configure a transaction and tap 'Save Condition for Future', your saved conditions and rules appear here so future matching SMS messages are automatically categorized the same way without restricting by sender bank.")
                     .font(.subheadline)
                     .foregroundStyle(Theme.secondaryInk)
             }
@@ -266,142 +205,78 @@ struct SMSSavedConditionsView: View {
         }
     }
 
-    private var senderBanksSection: some View {
+    private var classificationRulesSection: some View {
         Section {
-            if senderBankMap.isEmpty {
-                Text("No sender banks saved yet.")
-                    .font(.subheadline)
-                    .foregroundStyle(Theme.secondaryInk)
-            } else {
-                ForEach(sortedSenderRules, id: \.sender) { item in
+            ForEach(sortedClassificationRules) { rule in
+                Button {
+                    selectedRuleForDetails = rule
+                } label: {
                     HStack(spacing: 12) {
-                        IconBadge(symbol: "building.columns.fill", color: Theme.cobalt, size: 38)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(item.sender)
+                        CategoryIcon(category: rule.category, size: 38)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(ruleTitle(for: rule))
                                 .font(.body.weight(.semibold))
                                 .foregroundStyle(Theme.ink)
-                            if let accID = senderAccountMap[item.sender],
-                               let linkedAcc = accounts.first(where: { $0.id == accID }) {
-                                Text("\(item.bank) · ➔ \(linkedAcc.name)")
-                                    .font(.subheadline)
+                                .lineLimit(1)
+
+                            HStack(spacing: 6) {
+                                Text(rule.transactionType.title)
+                                    .font(.caption2.weight(.bold))
+                                    .padding(.horizontal, 6).padding(.vertical, 2)
+                                    .background(typeColor(rule.transactionType).opacity(0.12), in: Capsule())
+                                    .foregroundStyle(typeColor(rule.transactionType))
+
+                                Text(rule.category.shortTitle)
+                                    .font(.caption)
                                     .foregroundStyle(Theme.secondaryInk)
-                            } else {
-                                Text(item.bank)
-                                    .font(.subheadline)
+
+                                if let sub = rule.subcategory {
+                                    Text("· \(sub.shortTitle)")
+                                        .font(.caption)
+                                        .foregroundStyle(Theme.secondaryInk)
+                                }
+                            }
+
+                            if let meta = ruleMetaSummary(for: rule) {
+                                Text(meta)
+                                    .font(.caption2)
                                     .foregroundStyle(Theme.secondaryInk)
+                                    .lineLimit(1)
                             }
                         }
                         Spacer()
-                    }
-                    .swipeActions(edge: .trailing) {
-                        Button(role: .destructive) {
-                            SMSUserRules.removeBank(forSender: item.sender)
-                            reload()
-                            appState.show("Removed \(item.sender)")
-                        } label: {
-                            Label("Delete", systemImage: "trash")
-                        }
+                        Image(systemName: "chevron.right")
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(.tertiary)
                     }
                 }
-            }
-        } header: {
-            HStack {
-                Text("Sender Banks (\(senderBankMap.count))")
-                Spacer()
-                if !senderBankMap.isEmpty && selectedFilter == .senderBanks {
-                    Button("Clear senders", role: .destructive) {
-                        SMSUserRules.clearSenderBanks()
+                .buttonStyle(.plain)
+                .swipeActions(edge: .trailing) {
+                    Button(role: .destructive) {
+                        SMSUserRules.removeClassificationRule(signature: rule.signature)
                         reload()
-                        appState.show("Cleared sender banks")
-                    }
-                    .font(.caption)
-                }
-            }
-        } footer: {
-            if !senderBankMap.isEmpty {
-                Text("Swipe left on a sender to remove its bank mapping.")
-            }
-        }
-    }
-
-    private var classificationRulesSection: some View {
-        Section {
-            if classificationRules.isEmpty {
-                Text("No transaction classification rules saved yet.")
-                    .font(.subheadline)
-                    .foregroundStyle(Theme.secondaryInk)
-            } else {
-                ForEach(sortedClassificationRules) { rule in
-                    Button {
-                        selectedRuleForDetails = rule
+                        appState.show("Removed condition")
                     } label: {
-                        HStack(spacing: 12) {
-                            CategoryIcon(category: rule.category, size: 38)
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(ruleTitle(for: rule))
-                                    .font(.body.weight(.semibold))
-                                    .foregroundStyle(Theme.ink)
-                                    .lineLimit(1)
-
-                                HStack(spacing: 6) {
-                                    Text(rule.transactionType.title)
-                                        .font(.caption2.weight(.bold))
-                                        .padding(.horizontal, 6).padding(.vertical, 2)
-                                        .background(typeColor(rule.transactionType).opacity(0.12), in: Capsule())
-                                        .foregroundStyle(typeColor(rule.transactionType))
-
-                                    Text(rule.category.shortTitle)
-                                        .font(.caption)
-                                        .foregroundStyle(Theme.secondaryInk)
-
-                                    if let sub = rule.subcategory {
-                                        Text("· \(sub.shortTitle)")
-                                            .font(.caption)
-                                            .foregroundStyle(Theme.secondaryInk)
-                                    }
-                                }
-
-                                if let meta = ruleMetaSummary(for: rule) {
-                                    Text(meta)
-                                        .font(.caption2)
-                                        .foregroundStyle(Theme.secondaryInk)
-                                        .lineLimit(1)
-                                }
-                            }
-                            Spacer()
-                            Image(systemName: "chevron.right")
-                                .font(.footnote.weight(.semibold))
-                                .foregroundStyle(.tertiary)
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .swipeActions(edge: .trailing) {
-                        Button(role: .destructive) {
-                            SMSUserRules.removeClassificationRule(signature: rule.signature)
-                            reload()
-                            appState.show("Removed condition")
-                        } label: {
-                            Label("Delete", systemImage: "trash")
-                        }
+                        Label("Delete", systemImage: "trash")
                     }
                 }
             }
         } header: {
             HStack {
-                Text("Transaction Rules & Conditions (\(classificationRules.count))")
+                Text("Conditions (\(classificationRules.count))")
                 Spacer()
-                if !classificationRules.isEmpty && selectedFilter == .transactionRules {
-                    Button("Clear rules", role: .destructive) {
+                if !classificationRules.isEmpty {
+                    Button("Clear all", role: .destructive) {
                         SMSUserRules.clearClassificationRules()
                         reload()
-                        appState.show("Cleared transaction rules")
+                        appState.show("Cleared conditions")
                     }
                     .font(.caption)
                 }
             }
         } footer: {
             if !classificationRules.isEmpty {
-                Text("Swipe left on any condition to delete it, or tap to view its full pattern.")
+                Text("Swipe left on any condition to delete it, or tap to view its full details.")
             }
         }
     }
@@ -420,25 +295,18 @@ struct SMSSavedConditionsView: View {
                 }
             }
         } footer: {
-            Text("Permanently deletes all \(totalCount) saved conditions (sender bank links and transaction classification rules).")
+            Text("Permanently deletes all \(totalCount) saved conditions.")
         }
     }
 
     private func ruleTitle(for rule: SMSUserRules.ClassificationRule) -> String {
         if let m = rule.merchant, !m.isEmpty { return m }
         if !rule.partyKey.isEmpty { return rule.partyKey.capitalized }
-        if let bank = rule.bank, !bank.isEmpty { return "SMS from \(bank)" }
         return "SMS Pattern Rule"
     }
 
     private func ruleMetaSummary(for rule: SMSUserRules.ClassificationRule) -> String? {
         var items: [String] = []
-        if let bank = rule.bank, !bank.isEmpty {
-            items.append("Bank: \(bank)")
-        }
-        if !rule.senderKey.isEmpty {
-            items.append("Sender: \(rule.senderKey)")
-        }
         if let goalID = rule.goalIDString.flatMap(UUID.init), let goal = goals.first(where: { $0.id == goalID }) {
             items.append("➔ Goal: \(goal.name)")
         } else if let toID = rule.toAccountIDString.flatMap(UUID.init), let acc = accounts.first(where: { $0.id == toID }) {
@@ -461,8 +329,6 @@ struct SMSSavedConditionsView: View {
     }
 
     private func reload() {
-        senderBankMap = SMSUserRules.allSenderBanks()
-        senderAccountMap = SMSUserRules.allSenderAccounts()
         classificationRules = SMSUserRules.allClassificationRules()
     }
 }
@@ -488,12 +354,6 @@ struct SMSClassificationRuleDetailSheet: View {
                 }
 
                 Section("Routing & Accounts") {
-                    if let bank = rule.bank, !bank.isEmpty {
-                        LabeledContent("Bank", value: bank)
-                    }
-                    if !rule.senderKey.isEmpty {
-                        LabeledContent("Sender ID / Phone", value: rule.senderKey)
-                    }
                     if let fromID = rule.accountIDString.flatMap(UUID.init), let acc = accounts.first(where: { $0.id == fromID }) {
                         LabeledContent("Source Account", value: acc.name)
                     }

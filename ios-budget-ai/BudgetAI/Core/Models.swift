@@ -557,9 +557,9 @@ final class MoneyTransaction {
             reasons.append("Unmatched account")
         }
 
-        // Uncertain classification
-        if smsConfidence == .low || smsTransactionType == .unknown {
-            reasons.append("Uncertain categorization")
+        // Unknown transaction type
+        if smsTransactionType == .unknown {
+            reasons.append("Unknown transaction type")
         }
 
         if reasons.isEmpty && isPending {

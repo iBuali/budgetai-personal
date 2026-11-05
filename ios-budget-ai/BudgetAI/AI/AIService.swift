@@ -568,6 +568,25 @@ enum SMSImporter {
             learnedMerchant = true
         }
 
+        // If there is no user rule and categorization is uncertain (.other or low confidence):
+        // Let AI search for their categorization, or fallback to .other if no information is found.
+        // Transactions with uncertain categorization are NOT put on the list waiting for review.
+        if !p.matchedUserRule && !learnedMerchant && !p.transactionType.isTransferType && p.transactionType != .unknown && !p.isIncome {
+            if p.category == .other || p.confidence == .low {
+                if GeminiAccount.isConfigured {
+                    if let aiCats = try? await AIService.categorize(merchants: [p.merchant]),
+                       let aiCat = aiCats[p.merchant], aiCat != .income, aiCat != .transfers {
+                        p.category = aiCat
+                        p.confidence = .high
+                        usedAI = true
+                    }
+                }
+                if p.category == .transfers || p.category.isIncomeCategory {
+                    p.category = .other
+                }
+            }
+        }
+
         let tx = MoneyTransaction(
             amount: p.amount,
             isIncome: p.isIncome,
@@ -625,7 +644,9 @@ enum SMSImporter {
             }
             return false
         }()
-        let isUncertain = p.confidence == .low || p.requiresReview || p.transactionType == .unknown
+        // Uncertain categorization must NOT put transactions on the list waiting for review.
+        // Only transactions with an unknown transaction type (.unknown) need review.
+        let isUncertain = p.transactionType == .unknown
 
         let mustQuarantine = bankUnknown || accountUnmatched || isUncertain
 

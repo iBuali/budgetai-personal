@@ -1030,4 +1030,80 @@ struct BudgetAITests {
         #expect(nextTx.accountID == acc2.id)
         #expect(nextTx.merchant == "Specialty Books")
     }
+
+    @Test func testUncertainCategorizationDoesNotQuarantine() async throws {
+        let context = makeCleanContext()
+        let acc = Account(name: "Main Account", kind: .bank, institution: "BisB", balance: 500.000)
+        context.insert(acc)
+        try context.save()
+
+        // Merchant with uncertain category (e.g. unknown vendor)
+        let sms = "Debit: BHD 12.500 spent at UnknownVendorXYZ on 2026/10/28 14:00. Tel: 17515151"
+        let outcome = await SMSImporter.importText(sms, context: context, forceApprove: true)
+        let tx = try #require(outcome.transaction)
+
+        // It should NOT be quarantined on the waiting for review list because of uncertain categorization
+        #expect(tx.isPending == false)
+        #expect(tx.category == .other)
+        let reasons = tx.reviewReasons(accounts: [acc])
+        #expect(!reasons.contains("Uncertain categorization"))
+    }
+
+    @Test func testSaveConditionWithoutSMSSenderBankAppliesAcrossBanks() async throws {
+        let context = makeCleanContext()
+        SMSUserRules.clearAll()
+
+        let acc = Account(name: "Daily Account", kind: .bank, institution: "BisB", balance: 500.000)
+        context.insert(acc)
+        try context.save()
+
+        // 1. Initial SMS from BisB
+        let sms1 = "Debit: BHD 15.000 spent at Coffee Corner on 2026/10/28 10:00. Tel: 17515151"
+        let outcome1 = await SMSImporter.importText(sms1, context: context, forceApprove: true)
+        let tx1 = try #require(outcome1.transaction)
+
+        // 2. User edits category and saves condition WITHOUT sender bank
+        tx1.category = .coffee
+        tx1.merchant = "Specialty Coffee"
+        SMSUserRules.rememberTransactionRule(for: tx1, saveBank: false)
+
+        #expect(SMSUserRules.totalConditionsCount() == 1)
+
+        // 3. Receive similar transaction from a DIFFERENT sender/bank (e.g. ila Bank)
+        let sms2 = "Debit: BHD 15.000 spent at Coffee Corner on 2026/10/29 11:00. Tel: 17123456"
+        let outcome2 = await SMSImporter.importText(sms2, context: context, forceApprove: true)
+        let tx2 = try #require(outcome2.transaction)
+
+        // Should apply the saved condition even though the SMS sender bank was different
+        #expect(tx2.category == .coffee)
+        #expect(tx2.merchant == "Specialty Coffee")
+    }
+
+    @Test func testAllFilterMatchesPendingTransactions() async throws {
+        let context = makeCleanContext()
+        let acc = Account(name: "Test Bank", kind: .bank, balance: 100)
+        context.insert(acc)
+        try context.save()
+
+        let pendingTx = MoneyTransaction(amount: 50, isIncome: false, merchant: "Pending Store", category: .other, date: .now, source: .sms, accountID: acc.id)
+        pendingTx.isPending = true
+        context.insert(pendingTx)
+
+        let approvedTx = MoneyTransaction(amount: 30, isIncome: false, merchant: "Approved Store", category: .food, date: .now, source: .manual, accountID: acc.id)
+        approvedTx.isPending = false
+        context.insert(approvedTx)
+        try context.save()
+
+        var allFilter = TxFilterState()
+        allFilter.kind = .all
+
+        // TxFilterState.matches returns true for both pending and approved on .all
+        #expect(allFilter.matches(pendingTx))
+        #expect(allFilter.matches(approvedTx))
+
+        var reviewFilter = TxFilterState()
+        reviewFilter.kind = .review
+        #expect(reviewFilter.matches(pendingTx))
+        #expect(!reviewFilter.matches(approvedTx))
+    }
 }

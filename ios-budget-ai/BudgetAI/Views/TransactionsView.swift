@@ -103,6 +103,9 @@ struct TransactionsView: View {
         if filters.kind == .review {
             return transactions.filter { $0.isPending && filters.matches($0, ignoringDates: mode == .calendar) && matchesSearch($0) }
         }
+        if filters.kind == .all {
+            return transactions.filter { filters.matches($0, ignoringDates: mode == .calendar) && matchesSearch($0) }
+        }
         return transactions.filter { !$0.isPending && filters.matches($0, ignoringDates: mode == .calendar) && matchesSearch($0) }
     }
 
@@ -114,6 +117,7 @@ struct TransactionsView: View {
 
     private var filteredTotals: (income: Double, spent: Double) {
         filtered.reduce((0, 0)) { acc, tx in
+            guard !tx.isPending else { return acc }
             if tx.isOrdinaryIncome { return (acc.0 + tx.amount, acc.1) }
             if tx.isSpending { return (acc.0, acc.1 + tx.amount) }
             return acc
@@ -145,7 +149,7 @@ struct TransactionsView: View {
                                     Text("Quarantined for Review")
                                         .font(.headline)
                                         .foregroundStyle(Theme.ink)
-                                    Text("Transactions needing review or with unknown bank senders appear here. Not included in balances until approved.")
+                                    Text("Transactions needing review appear here. Not included in balances until approved.")
                                         .font(.caption)
                                         .foregroundStyle(Theme.secondaryInk)
                                 }
@@ -169,6 +173,38 @@ struct TransactionsView: View {
                                 .foregroundStyle(Theme.cobalt)
                             }
                         }
+                    }
+                } else if filters.kind == .all && !pending.isEmpty && query.isEmpty {
+                    Section {
+                        HStack(spacing: 12) {
+                            ZStack {
+                                Circle()
+                                    .fill(Theme.warning.opacity(0.16))
+                                    .frame(width: 38, height: 38)
+                                Image(systemName: "clock.badge.exclamationmark.fill")
+                                    .font(.system(size: 18))
+                                    .foregroundStyle(Theme.warning)
+                            }
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("\(pending.count) waiting for approval")
+                                    .font(.subheadline.weight(.semibold))
+                                    .foregroundStyle(Theme.ink)
+                                Text("Included in the list below. Tap to review reasons, approve, or reject.")
+                                    .font(.caption)
+                                    .foregroundStyle(Theme.secondaryInk)
+                            }
+                            Spacer()
+                            Button("Approve all") {
+                                let count = pending.count
+                                withAnimation { _ = Ledger.approveAll(pending, context: context) }
+                                approvedTick += 1
+                                appState.show("Approved \(count) transaction\(count == 1 ? "" : "s")")
+                            }
+                            .font(.caption.weight(.semibold))
+                            .buttonStyle(.bordered)
+                            .tint(Theme.positive)
+                        }
+                        .padding(.vertical, 2)
                     }
                 }
 
@@ -327,17 +363,27 @@ struct TransactionsView: View {
         NavigationLink(value: tx.id) {
             TransactionRow(tx: tx, currency: currency)
         }
-        .listRowBackground(tx.isPossibleDuplicate ? Theme.negative.opacity(0.07) : Theme.surface)
+        .listRowBackground(
+            tx.isPending ? Theme.warning.opacity(0.08) :
+            (tx.isPossibleDuplicate ? Theme.negative.opacity(0.07) : Theme.surface)
+        )
         .swipeActions(edge: .trailing) {
-            Button(role: .destructive) {
-                withAnimation { Ledger.delete(tx, context: context) }
-            } label: { Label("Delete", systemImage: "trash") }
+            if tx.isPending {
+                Button(role: .destructive) {
+                    withAnimation { Ledger.delete(tx, context: context) }
+                    appState.show("Rejected")
+                } label: { Label("Reject", systemImage: "xmark") }
+            } else {
+                Button(role: .destructive) {
+                    withAnimation { Ledger.delete(tx, context: context) }
+                } label: { Label("Delete", systemImage: "trash") }
+            }
         }
         .swipeActions(edge: .leading) {
             if tx.isPending {
                 Button {
                     approve(tx)
-                } label: { Label("Approve", systemImage: "checkmark") }
+                } label: { Label("Approve & update account", systemImage: "checkmark.circle.fill") }
                 .tint(Theme.positive)
             } else if tx.isPossibleDuplicate {
                 Button {
@@ -823,34 +869,94 @@ struct TransactionDetailView: View {
             if tx.isPending {
                 Section {
                     let reasons = tx.reviewReasons(accounts: accounts)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Label("Waiting for approval", systemImage: "clock.fill")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(Theme.warning)
-                        if !reasons.isEmpty {
-                            Text(reasons.joined(separator: " · "))
-                                .font(.caption)
-                                .foregroundStyle(Theme.secondaryInk)
-                        } else {
-                            Text("Not included in account balances until approved.")
-                                .font(.caption)
-                                .foregroundStyle(Theme.secondaryInk)
+                    VStack(alignment: .leading, spacing: 14) {
+                        HStack(spacing: 12) {
+                            ZStack {
+                                Circle()
+                                    .fill(Theme.warning.opacity(0.18))
+                                    .frame(width: 44, height: 44)
+                                Image(systemName: "clock.badge.exclamationmark.fill")
+                                    .font(.system(size: 22))
+                                    .foregroundStyle(Theme.warning)
+                            }
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("Waiting for Approval")
+                                    .font(.headline)
+                                    .foregroundStyle(Theme.ink)
+                                Text("Quarantined transaction · Balances and budgets are not updated until approved.")
+                                    .font(.caption)
+                                    .foregroundStyle(Theme.secondaryInk)
+                            }
                         }
-                    }
-                    .padding(.vertical, 2)
 
-                    Button {
-                        commitPendingEdits(silent: true)
-                        let result = Ledger.approve(tx, context: context)
-                        appState.report(result, base: "Approved \(Money.format(tx.amount, currency))")
-                    } label: {
-                        Label("Approve and update accounts", systemImage: "checkmark.circle.fill").fontWeight(.semibold)
+                        if !reasons.isEmpty {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Reasons for Review")
+                                    .font(.caption.weight(.bold))
+                                    .foregroundStyle(Theme.secondaryInk)
+                                    .textCase(.uppercase)
+
+                                ForEach(reasons, id: \.self) { reason in
+                                    HStack(alignment: .top, spacing: 10) {
+                                        Image(systemName: reasonIcon(for: reason))
+                                            .font(.body)
+                                            .foregroundStyle(Theme.warning)
+                                            .frame(width: 22)
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(reason)
+                                                .font(.subheadline.weight(.semibold))
+                                                .foregroundStyle(Theme.ink)
+                                            Text(reasonExplanation(for: reason))
+                                                .font(.caption2)
+                                                .foregroundStyle(Theme.secondaryInk)
+                                        }
+                                    }
+                                    .padding(.vertical, 6)
+                                    .padding(.horizontal, 10)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .background(Theme.warning.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+                                }
+                            }
+                        }
+
+                        VStack(spacing: 10) {
+                            Button {
+                                commitPendingEdits(silent: true)
+                                let result = Ledger.approve(tx, context: context)
+                                appState.report(result, base: "Approved \(Money.format(tx.amount, currency))")
+                            } label: {
+                                HStack {
+                                    Spacer()
+                                    Label("Approve and update account", systemImage: "checkmark.circle.fill")
+                                        .font(.body.weight(.semibold))
+                                    Spacer()
+                                }
+                                .padding(.vertical, 4)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(Theme.positive)
+
+                            Button(role: .destructive) {
+                                Ledger.delete(tx, context: context)
+                                appState.show("Transaction rejected and removed")
+                                dismiss()
+                            } label: {
+                                HStack {
+                                    Spacer()
+                                    Label("Reject", systemImage: "xmark.circle")
+                                        .font(.body.weight(.medium))
+                                    Spacer()
+                                }
+                                .padding(.vertical, 2)
+                            }
+                            .buttonStyle(.bordered)
+                            .tint(Theme.negative)
+                        }
+                        .padding(.top, 4)
                     }
-                    .foregroundStyle(Theme.positive)
-                    Button("Reject", role: .destructive) {
-                        Ledger.delete(tx, context: context)
-                        dismiss()
-                    }
+                    .padding(.vertical, 6)
+                } header: {
+                    Text("Approval Status")
                 }
             }
 
@@ -1093,13 +1199,13 @@ struct TransactionDetailView: View {
                                 .foregroundStyle(conditionSaved ? Theme.positive : Theme.cobalt)
                             Spacer()
                         }
-                        Text("Save this transaction's rules, category, and account as a condition so future matching SMS messages are automatically categorized the same way.")
+                        Text("Save this transaction's rules, category, and account as a condition so future matching SMS messages are automatically categorized the same way without restricting to SMS sender bank.")
                             .font(.caption)
                             .foregroundStyle(Theme.secondaryInk)
 
                         Button {
                             commitPendingEdits(silent: true)
-                            SMSUserRules.rememberTransactionRule(for: tx)
+                            SMSUserRules.rememberTransactionRule(for: tx, saveBank: false)
                             withAnimation(.snappy) {
                                 conditionSaved = true
                             }
@@ -1349,6 +1455,31 @@ struct TransactionDetailView: View {
                 result.alerts = Ledger.checkBudgetAlerts(for: tx.category, context: context)
             }
             appState.report(result, base: "Updated amount to \(Money.format(tx.amount, currency))")
+        }
+    }
+
+    private func reasonIcon(for reason: String) -> String {
+        switch reason {
+        case "Unknown sender bank": return "building.columns.circle.fill"
+        case "Unmatched account": return "creditcard.trianglebadge.exclamationmark.fill"
+        case "Unknown transaction type": return "questionmark.diamond.fill"
+        case "Possible duplicate": return "doc.on.doc.fill"
+        default: return "clock.badge.exclamationmark.fill"
+        }
+    }
+
+    private func reasonExplanation(for reason: String) -> String {
+        switch reason {
+        case "Unknown sender bank":
+            return "The SMS was received from an unrecognized phone or bank sender. Verify the bank and account below."
+        case "Unmatched account":
+            return "The account or card suffix could not be matched to any of your accounts."
+        case "Unknown transaction type":
+            return "The transaction direction or type could not be classified with certainty."
+        case "Possible duplicate":
+            return "Another transaction with a matching amount and timestamp was already recorded."
+        default:
+            return "This transaction requires approval before updating account balances and budgets."
         }
     }
 }

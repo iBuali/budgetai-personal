@@ -262,10 +262,13 @@ enum SMSUserRules {
         }
     }
 
-    /// Saves all user-selected options on an SMS transaction (type, category, subcategory, name/merchant, bank, source account, destination account, and goal)
+    /// Saves user-selected options on an SMS transaction (type, category, subcategory, name/merchant, source account, destination account, and goal)
     /// so future matching SMS messages automatically receive the same options.
-    static func rememberTransactionRule(for tx: MoneyTransaction) {
-        if let bank = tx.smsBank, !bank.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+    /// When `saveBank` is false (default, e.g. from the transaction page "Save Condition for Future" button),
+    /// the rule is saved without binding to the SMS sender bank.
+    static func rememberTransactionRule(for tx: MoneyTransaction, saveBank: Bool = false) {
+        if saveBank,
+           let bank = tx.smsBank, !bank.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
            let sender = tx.smsSender, !sender.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             rememberBank(bank, forSender: sender, accountID: tx.accountID)
         }
@@ -277,12 +280,12 @@ enum SMSUserRules {
             category: tx.category,
             subcategory: tx.subcategory,
             merchant: tx.merchant,
-            bank: tx.smsBank,
+            bank: saveBank ? tx.smsBank : nil,
             accountID: tx.accountID,
             toAccountID: tx.toAccountID,
             goalID: tx.goalID,
             forRawSMS: raw,
-            sender: tx.smsSender,
+            sender: saveBank ? tx.smsSender : nil,
             counterparty: SMSParser.extractRecipientOrMerchantKey(in: raw)
         )
     }
@@ -352,9 +355,9 @@ enum SMSUserRules {
         UserDefaults.standard.removeObject(forKey: senderAccountKey)
     }
 
-    /// Total count of all user-saved SMS conditions (sender banks + classification rules).
+    /// Total count of all user-saved SMS conditions (classification rules).
     static func totalConditionsCount() -> Int {
-        allSenderBanks().count + allClassificationRules().count
+        allClassificationRules().count
     }
 
     static func clearAll() {

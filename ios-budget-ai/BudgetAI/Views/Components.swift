@@ -230,19 +230,27 @@ struct TransactionRow: View {
                     let pendingLabel: (text: String, icon: String) = {
                         let bankClean = tx.smsBank?.trimmingCharacters(in: .whitespacesAndNewlines)
                         if bankClean == nil || bankClean?.isEmpty == true || bankClean?.lowercased().contains("unknown") == true {
-                            return ("Unknown bank sender", "building.columns")
+                            return ("Unknown bank sender", "building.columns.fill")
                         }
                         if tx.accountID == nil {
                             return ("Unmatched account", "creditcard.trianglebadge.exclamationmark")
                         }
-                        if tx.smsConfidence == .low || tx.category == .other || tx.smsTransactionType == .unknown {
-                            return ("Needs review", "questionmark.circle")
+                        if tx.smsTransactionType == .unknown {
+                            return ("Unknown type", "questionmark.circle.fill")
                         }
-                        return ("Waiting for approval", "clock.fill")
+                        return ("Waiting for approval", "clock.badge.exclamationmark.fill")
                     }()
-                    Label(pendingLabel.text, systemImage: pendingLabel.icon)
-                        .font(.subheadline)
-                        .foregroundStyle(Theme.warning)
+                    HStack(spacing: 5) {
+                        Image(systemName: pendingLabel.icon)
+                            .font(.caption2.weight(.bold))
+                        Text(pendingLabel.text)
+                            .font(.caption.weight(.semibold))
+                            .lineLimit(1)
+                    }
+                    .foregroundStyle(Theme.warning)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2.5)
+                    .background(Theme.warning.opacity(0.14), in: Capsule())
                 } else if tx.isPossibleDuplicate {
                     Label("Possible duplicate", systemImage: "exclamationmark.circle.fill")
                         .font(.subheadline)
