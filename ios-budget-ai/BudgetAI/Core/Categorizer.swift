@@ -1958,18 +1958,18 @@ enum SMSParser {
         var accountSuffix: String?
         let sourcePatterns = [
             // "Your credit card ending 1234", "using card no: 1234", "using visa card ending with 1234"
-            "(?i)(?:your|using)\\s+(?:credit\\s+card|debit\\s+card|prepaid\\s+card|visa\\s+card|mastercard|card|a/c|acct|account|iban)\\s*(?:ending(?:\\s+with|\\s+in)?|no\\.?|number|#)?\\s*[:\\-.=()[\\]]*\\s*(?:xx|[xX*#•.])*([0-9]{3,6})\\b",
+            "(?i)(?:your|using)\\s+(?:credit\\s+card|debit\\s+card|prepaid\\s+card|visa\\s+card|mastercard|card|a/c|acct|account|iban)\\s*(?:ending(?:\\s+with|\\s+in)?|no\\.?|number|#)?\\s*[:=.()[\\]-]*\\s*(?:xx|[xX*#•.])*([0-9]{3,6})\\b",
             // "from your credit card ending 1234", "from card 1234"
-            "(?i)(?:from)\\s+(?:your\\s+)?(?:credit\\s+card|debit\\s+card|prepaid\\s+card|visa\\s+card|mastercard|card|a/c|acct|account|iban)\\s*(?:ending(?:\\s+with|\\s+in)?|no\\.?|number|#)?\\s*[:\\-.=()[\\]]*\\s*(?:xx|[xX*#•.])*([0-9]{3,6})\\b",
+            "(?i)(?:from)\\s+(?:your\\s+)?(?:credit\\s+card|debit\\s+card|prepaid\\s+card|visa\\s+card|mastercard|card|a/c|acct|account|iban)\\s*(?:ending(?:\\s+with|\\s+in)?|no\\.?|number|#)?\\s*[:=.()[\\]-]*\\s*(?:xx|[xX*#•.])*([0-9]{3,6})\\b",
             // "credit card ending in 1234", "card ending 1234"
             "(?i)(?:credit\\s+card|debit\\s+card|prepaid\\s+card|visa\\s+card|mastercard|card|a/c|acct|account)\\s+ending\\s*(?:with|in)?\\s*[xX*#•.]*([0-9]{3,6})\\b",
             // "Card 4532XXXXXXXX1234" or "4532 **** **** 1234" or "Card ..1234" or "Card: 1234" or "Card No. 1234"
-            "(?i)(?:credit\\s+card|debit\\s+card|prepaid\\s+card|visa\\s+card|mastercard|card|a/c|acct|account|iban)\\s*(?:no\\.?|number|#)?\\s*[:\\-.=()[\\]]*\\s*(?:[0-9]{4}[\\s\\-]*[xX*#•]{4,8}[\\s\\-]*|[xX*#•.]{2,12}[\\s\\-]*)?([0-9]{3,6})\\b",
+            "(?i)(?:credit\\s+card|debit\\s+card|prepaid\\s+card|visa\\s+card|mastercard|card|a/c|acct|account|iban)\\s*(?:no\\.?|number|#)?\\s*[:=.()[\\]-]*\\s*(?:[0-9]{4}[\\s-]*[xX*#•]{4,8}[\\s-]*|[xX*#•.]{2,12}[\\s-]*)?([0-9]{3,6})\\b",
             // "card: 1234", "card #1234", "card - 1234"
-            "(?i)\\b(?:credit\\s*card|card|acct)\\s*[:\\-#=]\\s*([0-9]{3,6})\\b",
+            "(?i)\\b(?:credit\\s*card|card|acct)\\s*[:#=-]\\s*([0-9]{3,6})\\b",
             // Arabic:
-            // "بطاقة ائتمانية رقم 1234" / "بطاقتك الائتمانية المنتهية بـ 1234" / "بطاقة مدى 1234"
-            "(?i)(?:بطاقة|بطاقتك|حساب|حسابك)(?:\\s+(?:ائتمانية|مدى|الائتمانية|مسبقة\\s+الدفع|الخصم))?(?:\\s+(?:رقم|تنتهي\\s*بـ?|ينتهي\\s*بـ?|المنتهية\\s*بـ?|المنتهي\\s*بـ?|تنتهي\\s*في|ينتهي\\s*في))?\\s*[:\\-.#=()[\\]]*\\s*[xX*#•.]*([0-9]{3,6})\\b"
+            // "بطاقة ائتمانية رقم 1234" / "بطاقتك الائتمانية المنتهية بـ 1234" / "بطاقة مدى 1234" / "البطاقة رقم 9921"
+            "(?i)(?:البطاقة|بطاقة|بطاقتك|الحساب|حساب|حسابك)(?:\\s*(?:الائتمانية|ائتمانية|مدى|مسبقة\\s*الدفع))?\\s*(?:رقم|مدى|ائتمانية|ينتهي\\s*بـ?|تنتهي\\s*بـ?|المنتهية\\s*بـ?|المنتهي\\s*بـ?|تنتهي\\s*في|ينتهي\\s*في)?\\s*[:=.()[\\]-]*\\s*[xX*#•.]*([0-9]{3,6})\\b"
         ]
         for pattern in sourcePatterns {
             if let regex = try? NSRegularExpression(pattern: pattern),

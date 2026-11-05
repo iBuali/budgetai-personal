@@ -601,18 +601,21 @@ enum SMSImporter {
         // -> Quarantine: Keep it in the Needs Review filter and DO NOT include in any accounts until approved!
         // (Note: Unmatched balances are not quarantined; balance syncing handles bank balance updates automatically)
         let allAccounts = (try? context.fetch(FetchDescriptor<Account>())) ?? []
-        let bankUnknown = resolvedSMSBank == nil || resolvedSMSBank?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true || resolvedSMSBank?.lowercased().contains("unknown") == true
         let targetAccount = target.flatMap { id in allAccounts.first(where: { $0.id == id }) }
+        let effectiveBank = resolvedSMSBank ?? (targetAccount?.institution.isEmpty == false ? targetAccount?.institution : nil)
         let matchedByDigits = matchingDigits.flatMap { d in
             SMSParser.findMatchingAccount(suffix: d, in: context)
-        }
-        let matchedByBankOrSender = savedRuleAccount != nil || SMSParser.findMatchingAccount(forBank: resolvedSMSBank, senderOrPhone: resolvedSender, in: context) != nil
+        } ?? directAccountFromSMS
+        let matchedByBankOrSender = savedRuleAccount != nil || SMSParser.findMatchingAccount(forBank: effectiveBank, senderOrPhone: resolvedSender, in: context) != nil
+        let bankUnknown: Bool = {
+            if matchedByDigits != nil || targetAccount != nil { return false }
+            return effectiveBank == nil || effectiveBank?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true || effectiveBank?.lowercased().contains("unknown") == true
+        }()
         let accountUnmatched: Bool = {
             guard let targetAccount else { return true }
-            if accountID != nil || savedRuleAccount != nil { return false }
+            if accountID != nil || savedRuleAccount != nil || matchedByDigits != nil { return false }
             if p.accountSuffix != nil && matchingDigits != nil {
-                if matchedByDigits != nil { return false }
-                if matchedByBankOrSender && SMSParser.accountMatchesBank(targetAccount, bank: resolvedSMSBank) {
+                if matchedByBankOrSender && SMSParser.accountMatchesBank(targetAccount, bank: effectiveBank) {
                     return false
                 }
                 if targetAccount.smsMatch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && matchedByBankOrSender {
