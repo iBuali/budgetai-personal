@@ -460,7 +460,6 @@ enum SMSImporter {
         let resolvedSender = effectiveSender ?? p.sender
 
         // Determine account involved in the transaction (supports multiple accounts e.g. 17515151 -> BisB, 17123456 -> ila).
-        // Rule: The Account field MUST ALWAYS be the same as SMS sender bank in all situations.
         let matchingDigits: String? = {
             if p.transactionType == .transferIn {
                 return p.accountSuffix ?? p.recipientSuffix
@@ -468,45 +467,17 @@ enum SMSImporter {
             // For outgoing transfers, never match recipientSuffix as the source account
             return p.accountSuffix
         }()
-        let bankMatchedAccount = SMSParser.findMatchingAccount(
-            forBank: resolvedSMSBank,
-            senderOrPhone: resolvedSender,
-            digits: matchingDigits,
-            in: context
-        )
         let savedRuleAccount: UUID? = {
-            if let ruleAccID = p.accountID, let acc = Ledger.account(ruleAccID, context: context) {
-                if let resolvedSMSBank, !SMSParser.accountMatchesBank(acc, bank: resolvedSMSBank), bankMatchedAccount != nil {
-                    return nil
-                }
+            if let ruleAccID = p.accountID, let _ = Ledger.account(ruleAccID, context: context) {
                 return ruleAccID
             }
             if let senderAccID = SMSUserRules.accountID(forSender: resolvedSender, in: trimmed),
-               let acc = Ledger.account(senderAccID, context: context) {
-                if let resolvedSMSBank, !SMSParser.accountMatchesBank(acc, bank: resolvedSMSBank), bankMatchedAccount != nil {
-                    return nil
-                }
+               let _ = Ledger.account(senderAccID, context: context) {
                 return senderAccID
             }
             return nil
         }()
-        var target: UUID? = {
-            // If an account matches the SMS sender bank, always use it unless the user explicitly picked an account of the same bank
-            if let bankAcc = bankMatchedAccount {
-                if let explicitID = accountID,
-                   let explicitAcc = Ledger.account(explicitID, context: context),
-                   SMSParser.accountMatchesBank(explicitAcc, bank: resolvedSMSBank) {
-                    return explicitID
-                }
-                if let savedID = savedRuleAccount,
-                   let savedAcc = Ledger.account(savedID, context: context),
-                   SMSParser.accountMatchesBank(savedAcc, bank: resolvedSMSBank) {
-                    return savedID
-                }
-                return bankAcc.id
-            }
-            return accountID ?? savedRuleAccount ?? Ledger.smsAccountID(context: context, digits: matchingDigits, hint: resolvedSMSBank, sender: resolvedSender)
-        }()
+        var target: UUID? = accountID ?? savedRuleAccount ?? Ledger.smsAccountID(context: context, digits: matchingDigits, hint: resolvedSMSBank, sender: resolvedSender)
 
         // Visa / credit card payments come out of a bank account and pay down the card.
         let isCardPayment = p.category == .visaTransfer
@@ -522,23 +493,15 @@ enum SMSImporter {
 
         // NOTE: Rule 6 (Internal Transfer between own accounts or matching recipient IBAN/account)
         // ONLY applies when TWO SMS messages match in date & time (handled below in `mergeSameTimeTransferIfNeeded`).
-        // A single SMS with a matching recipient IBAN/account is never marked as `.internalTransfer` on its own
-        // (unless it matches a saved user rule, a credit card payment, or a dedicated SavingsGoal).
-
-        // Check if a transfer recipient suffix or destination account matches a linked SavingsGoal
+        // A single SMS with a matching recipient IBAN/account is never marked as `.internalTransfer` on its own.
+        // Savings Goal Link works automatically ONLY if it is marked as internal transfer (or manually added).
         if p.goalID == nil, !isCardPayment,
-           (p.transactionType.isTransferType || p.category == .internalTransfer || p.category == .transfers),
+           (p.category == .internalTransfer || p.transactionType == .internalTransfer),
            let matchedGoal = SMSParser.findMatchingGoal(suffix: p.recipientSuffix, accountID: p.toAccountID, in: context),
            matchedGoal.linkedAccountID == nil || matchedGoal.linkedAccountID != target {
             p.goalID = matchedGoal.id
-            p.transactionType = .internalTransfer
-            p.category = .internalTransfer
-            p.isIncome = false
             if p.toAccountID == nil, let linkedAcc = matchedGoal.linkedAccountID, linkedAcc != target {
                 p.toAccountID = linkedAcc
-            }
-            if !p.matchedUserRule {
-                p.merchant = "Saved to \(matchedGoal.name)"
             }
         }
 
@@ -637,6 +600,7 @@ enum SMSImporter {
         let matchedByBankOrSender = savedRuleAccount != nil || SMSParser.findMatchingAccount(forBank: resolvedSMSBank, senderOrPhone: resolvedSender, in: context) != nil
         let accountUnmatched: Bool = {
             guard let targetAccount else { return true }
+            if accountID != nil || savedRuleAccount != nil { return false }
             if p.accountSuffix != nil && matchingDigits != nil {
                 if matchedByDigits != nil { return false }
                 if matchedByBankOrSender && SMSParser.accountMatchesBank(targetAccount, bank: resolvedSMSBank) {

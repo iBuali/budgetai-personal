@@ -105,7 +105,7 @@ enum Ledger {
         }
         let isCardPayment = tx.category == .visaTransfer
         let isInternal = tx.smsTransactionType == .internalTransfer || tx.category == .internalTransfer || isCardPayment
-        if sign > 0, !isCardPayment, (isInternal || tx.isTransfer) {
+        if sign > 0, !isCardPayment, isInternal {
             if tx.toAccountID == nil,
                let recip = tx.smsRecipientSuffix,
                let matchedDest = SMSParser.findMatchingAccount(suffix: recip, excludingAccountID: tx.accountID, in: context) {
@@ -181,10 +181,6 @@ enum Ledger {
             target.smsTransactionType = newType
             target.isIncome = newType.isIncomeDirection
             target.smsBank = resolvedBank
-            if let resolvedBank,
-               let bankAcc = SMSParser.findMatchingAccount(forBank: resolvedBank, senderOrPhone: target.smsSender, digits: target.smsAccountSuffix, in: context) {
-                target.accountID = bankAcc.id
-            }
             target.smsConfidence = .high
             target.smsClassificationReason = "Corrected by user to \(newType.title)"
             target.aiCategorized = false

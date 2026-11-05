@@ -1020,10 +1020,6 @@ struct TransactionDetailView: View {
                 Picker("Account", selection: Binding(get: { tx.accountID }, set: { newID in
                     Ledger.edit(tx, context: context) { target in
                         target.accountID = newID
-                        if isSMSTransaction, let newID, let acc = accounts.first(where: { $0.id == newID }),
-                           let bank = SMSParser.bankName(forAccount: acc) {
-                            target.smsBank = bank
-                        }
                     }
                     if isSMSTransaction {
                         SMSUserRules.rememberTransactionRule(for: tx)
@@ -1084,7 +1080,7 @@ struct TransactionDetailView: View {
                     }
                 }
 
-                if !goals.isEmpty && tx.category != .visaTransfer && (tx.category == .internalTransfer || tx.effectiveTransactionType == .internalTransfer || tx.goalID != nil) {
+                if !goals.isEmpty && tx.category != .visaTransfer {
                     Picker("Savings goal", selection: Binding(get: { tx.goalID }, set: { newGoalID in
                         Ledger.edit(tx, context: context) { target in
                             target.goalID = newGoalID
@@ -1092,7 +1088,8 @@ struct TransactionDetailView: View {
                                let g = goals.first(where: { $0.id == newGoalID }),
                                target.toAccountID == nil,
                                let linkedAcc = g.linkedAccountID,
-                               linkedAcc != target.accountID {
+                               linkedAcc != target.accountID,
+                               (target.category == .internalTransfer || target.smsTransactionType == .internalTransfer) {
                                 target.toAccountID = linkedAcc
                             }
                         }
@@ -1120,14 +1117,8 @@ struct TransactionDetailView: View {
                         set: { newBank in
                             commitPendingEdits(silent: true)
                             let clean = newBank.isEmpty ? nil : newBank
-                            let matchedBankAccount = clean.flatMap {
-                                SMSParser.findMatchingAccount(forBank: $0, senderOrPhone: tx.smsSender, digits: tx.smsAccountSuffix, in: context)
-                            }
                             Ledger.edit(tx, context: context) { target in
                                 target.smsBank = clean
-                                if let matchedBankAccount {
-                                    target.accountID = matchedBankAccount.id
-                                }
                             }
                             if let clean, let sender = tx.smsSender, !sender.isEmpty {
                                 SMSUserRules.rememberBank(clean, forSender: sender, accountID: tx.accountID)
@@ -1312,38 +1303,14 @@ struct TransactionDetailView: View {
 
     private func syncSMSAccountAndRecipientIfNeeded() {
         guard isSMSTransaction else { return }
-        var needsEdit = false
-        let bankMatchedAcc = tx.smsBank.flatMap {
-            SMSParser.findMatchingAccount(forBank: $0, senderOrPhone: tx.smsSender, digits: tx.smsAccountSuffix, in: context)
+        guard tx.category == .internalTransfer || tx.smsTransactionType == .internalTransfer,
+              tx.toAccountID == nil,
+              let recip = tx.smsRecipientSuffix, !recip.isEmpty,
+              let matchedDest = SMSParser.findMatchingAccount(suffix: recip, excludingAccountID: tx.accountID, in: context) else {
+            return
         }
-        if let bankMatchedAcc, tx.accountID != bankMatchedAcc.id {
-            let currentAcc = tx.accountID.flatMap { id in accounts.first(where: { $0.id == id }) }
-            if currentAcc == nil || !SMSParser.accountMatchesBank(currentAcc!, bank: tx.smsBank) {
-                needsEdit = true
-            }
-        }
-        let effectiveAccID = needsEdit ? bankMatchedAcc?.id : tx.accountID
-        let matchedDest: Account? = {
-            guard tx.category == .internalTransfer || tx.smsTransactionType == .internalTransfer,
-                  tx.toAccountID == nil,
-                  let recip = tx.smsRecipientSuffix, !recip.isEmpty else { return nil }
-            return SMSParser.findMatchingAccount(suffix: recip, excludingAccountID: effectiveAccID, in: context)
-        }()
-        if matchedDest != nil {
-            needsEdit = true
-        }
-        if needsEdit {
-            Ledger.edit(tx, context: context) { target in
-                if let bankMatchedAcc {
-                    let currentAcc = target.accountID.flatMap { id in accounts.first(where: { $0.id == id }) }
-                    if currentAcc == nil || !SMSParser.accountMatchesBank(currentAcc!, bank: target.smsBank) {
-                        target.accountID = bankMatchedAcc.id
-                    }
-                }
-                if let matchedDest, target.toAccountID == nil, matchedDest.id != target.accountID {
-                    target.toAccountID = matchedDest.id
-                }
-            }
+        Ledger.edit(tx, context: context) { target in
+            target.toAccountID = matchedDest.id
         }
     }
 

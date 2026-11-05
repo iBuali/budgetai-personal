@@ -338,7 +338,7 @@ struct BudgetAITests {
         #expect(parsedUnrelated.transactionType == .unknown)
     }
 
-    // MARK: - 7. Auto-Contribute to Linked Savings Goal on SMS Transfer
+    // MARK: - 7. Savings Goal Linking (Only on Internal Transfer or Manual Addition)
 
     @Test func smsTransferAutoContributesToLinkedSavingsGoal() async throws {
         let context = makeCleanContext()
@@ -361,24 +361,60 @@ struct BudgetAITests {
         context.insert(emergencyGoal)
         try context.save()
 
-        let sms = "Fawri+ payment BHD3.000, ref: BIB103KAK000KZUM was credited to IBAN ending 0846 on 2026/10/27 15:26. Balance BHD263.195. Tel: 17515151"
-        let outcome = await SMSImporter.importText(sms, context: context, forceApprove: true)
-        let tx = try #require(outcome.transaction)
+        // 1. Single SMS where recipient IBAN matches savings goal:
+        // Rule: It will NOT add the transaction to the goal unless it's marked as internal transfer!
+        let sms1 = "Fawri+ payment BHD3.000, ref: BIB103KAK000KZUM was credited to IBAN ending 0846 on 2026/10/27 15:26. Balance BHD263.195. Tel: 17515151"
+        let outcome1 = await SMSImporter.importText(sms1, context: context, forceApprove: true)
+        let tx1 = try #require(outcome1.transaction)
 
-        #expect(tx.category == .internalTransfer)
-        #expect(tx.smsTransactionType == .internalTransfer)
-        #expect(tx.toAccountID == ilaSavings.id)
-        #expect(tx.goalID == emergencyGoal.id)
-        #expect(abs(bisb.balance - 263.195) < 0.0001)
-        #expect(abs(ilaSavings.balance - 103.000) < 0.0001)
+        #expect(tx1.smsTransactionType == .expense)
+        #expect(tx1.category != .internalTransfer)
+        #expect(tx1.goalID == nil)
+        #expect(abs(emergencyGoal.saved - 100.000) < 0.0001)
+
+        // 2. Can be manually added to the savings goal:
+        Ledger.edit(tx1, context: context) { target in
+            target.goalID = emergencyGoal.id
+        }
+        #expect(tx1.goalID == emergencyGoal.id)
         #expect(abs(emergencyGoal.saved - 103.000) < 0.0001)
 
-        // Editing the transfer amount updates both the linked account and the linked SavingsGoal
-        Ledger.edit(tx, context: context) { target in
+        // Editing amount updates the manually linked goal
+        Ledger.edit(tx1, context: context) { target in
             target.amount = 10.000
         }
-        #expect(abs(ilaSavings.balance - 110.000) < 0.0001)
         #expect(abs(emergencyGoal.saved - 110.000) < 0.0001)
+
+        // 3. When marked as internal transfer (e.g. matched with second SMS at same date & time),
+        // it DOES automatically link to the savings goal:
+        let bisb2 = Account(name: "BisB 2", kind: .bank, institution: "BisB", balance: 500.000)
+        bisb2.smsMatch = "9901"
+        context.insert(bisb2)
+
+        let tripGoal = SavingsGoal(
+            name: "Trip Goal",
+            symbol: "airplane",
+            target: 500.000,
+            saved: 50.000,
+            targetDate: Calendar.current.date(byAdding: .month, value: 3, to: .now) ?? .now,
+            monthlyCommitment: 25.000,
+            linkedAccountID: ilaSavings.id,
+            smsMatch: "0846"
+        )
+        context.insert(tripGoal)
+        try context.save()
+
+        let transferDebitSMS = "Your account ending 9901 has been debited BHD 25.000 for outward transfer on 2026/10/28 12:00. Balance BHD 475.000. Tel: 17515151"
+        let transferCreditSMS = "Your account ending 0846 has been credited with BHD 25.000 via Fawri+ on 2026/10/28 12:00. Available balance BHD 125.000. Call 17123456"
+
+        _ = await SMSImporter.importText(transferDebitSMS, context: context, forceApprove: true)
+        let mergedOutcome = await SMSImporter.importText(transferCreditSMS, context: context, forceApprove: true)
+        let mergedTx = try #require(mergedOutcome.transaction)
+
+        #expect(mergedTx.smsTransactionType == .internalTransfer)
+        #expect(mergedTx.category == .internalTransfer)
+        #expect(mergedTx.toAccountID == ilaSavings.id)
+        #expect(mergedTx.goalID == tripGoal.id || mergedTx.goalID == emergencyGoal.id)
     }
 
     // MARK: - 8. Account Include/Exclude in Net Worth vs Cash & Bank
@@ -887,5 +923,27 @@ struct BudgetAITests {
         #expect(mergedReverse.smsToBalance == 210.000)
         #expect(abs(bisb.balance - 890.000) < 0.0001)
         #expect(abs(ila.balance - 210.000) < 0.0001)
+    }
+
+    @Test func testAccountDoesNotHaveToMatchSMSSenderBank() async throws {
+        let context = makeCleanContext()
+
+        let bisb = Account(name: "BisB Account", kind: .bank, institution: "BisB", balance: 500.000)
+        let ila = Account(name: "ila Bank", kind: .bank, institution: "ila", balance: 300.000)
+        context.insert(bisb)
+        context.insert(ila)
+        try context.save()
+
+        // 1. Explicitly providing an account different from the SMS sender bank:
+        // Rule 'Account Must Always Match SMS sender bank' is REMOVED.
+        // Even though SMS is from BisB (Tel: 17515151), assigning to ila account preserves ila.id!
+        let bisbSMS = "Your card ending 4411 was used for BHD 10.000 at STARBUCKS on 2026/10/28 09:15. Tel: 17515151"
+        let outcome = await SMSImporter.importText(bisbSMS, context: context, forceApprove: true, accountID: ila.id)
+        let tx = try #require(outcome.transaction)
+
+        #expect(tx.accountID == ila.id)
+        #expect(tx.smsBank == "BisB")
+        #expect(abs(ila.balance - 290.000) < 0.0001)
+        #expect(abs(bisb.balance - 500.000) < 0.0001)
     }
 }
