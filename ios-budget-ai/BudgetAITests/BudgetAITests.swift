@@ -946,4 +946,88 @@ struct BudgetAITests {
         #expect(abs(ila.balance - 290.000) < 0.0001)
         #expect(abs(bisb.balance - 500.000) < 0.0001)
     }
+
+    @Test func testCreditCardIdentifiedCorrectlyFromCardDigitsOrFullCardNumber() async throws {
+        let context = makeCleanContext()
+
+        let bisbChecking = Account(name: "BisB Checking", kind: .bank, institution: "BisB", balance: 500.000)
+        let visaCard = Account(name: "Visa Platinum", kind: .creditCard, institution: "BisB", balance: 50.000)
+        visaCard.smsMatch = "4821" // Last 4 digits
+
+        let mcCard = Account(name: "Mastercard Black", kind: .creditCard, institution: "ila", balance: 0.000)
+        mcCard.smsMatch = "5412123456789988" // Full 16-digit card number configured in setup
+
+        context.insert(bisbChecking)
+        context.insert(visaCard)
+        context.insert(mcCard)
+        try context.save()
+
+        // 1. Transaction with card ending 4821 from BisB sender
+        // MUST identify Visa Platinum (creditCard), NOT the BisB Checking account!
+        let sms1 = "Purchase of BHD 15.000 with Card ending 4821 at Costa Coffee on 2026/10/28 10:00. Tel: 17515151"
+        let outcome1 = await SMSImporter.importText(sms1, context: context, forceApprove: true)
+        let tx1 = try #require(outcome1.transaction)
+
+        #expect(tx1.accountID == visaCard.id)
+        #expect(abs(visaCard.balance - 65.000) < 0.0001) // Liability increased by 15 BHD
+        #expect(abs(bisbChecking.balance - 500.000) < 0.0001) // Checking unchanged
+
+        // 2. Transaction matching full 16-digit card setup when SMS only mentions ending 9988
+        let sms2 = "Your Credit Card ending 9988 was used for BHD 40.000 at Alosra Supermarket on 2026/10/28 11:30"
+        let outcome2 = await SMSImporter.importText(sms2, context: context, forceApprove: true)
+        let tx2 = try #require(outcome2.transaction)
+
+        #expect(tx2.accountID == mcCard.id)
+        #expect(abs(mcCard.balance - 40.000) < 0.0001)
+
+        // 3. Masked card number format in SMS
+        let sms3 = "Purchase of BHD 22.000 with Card No: 4532XXXXXXXX4821 at Carrefour on 2026/10/28 12:00"
+        let outcome3 = await SMSImporter.importText(sms3, context: context, forceApprove: true)
+        let tx3 = try #require(outcome3.transaction)
+
+        #expect(tx3.accountID == visaCard.id)
+        #expect(abs(visaCard.balance - 87.000) < 0.0001)
+    }
+
+    @Test func testConditionsNotSavedAutomaticallyAndCanBeSavedManually() async throws {
+        let context = makeCleanContext()
+        SMSUserRules.clearAll()
+        #expect(SMSUserRules.totalConditionsCount() == 0)
+
+        let acc1 = Account(name: "Main Account", kind: .bank, institution: "BisB", balance: 500.000)
+        let acc2 = Account(name: "Shopping Account", kind: .bank, institution: "BisB", balance: 300.000)
+        context.insert(acc1)
+        context.insert(acc2)
+        try context.save()
+
+        // 1. Import transaction
+        let sms = "Debit: BHD 18.000 spent at Novelty Store on 2026/10/28 14:00. Tel: 17515151"
+        let outcome = await SMSImporter.importText(sms, context: context, forceApprove: true)
+        let tx = try #require(outcome.transaction)
+
+        // 2. Perform various edits like the user would in TransactionDetailView
+        Ledger.edit(tx, context: context) { target in
+            target.merchant = "Specialty Books"
+            target.category = .education
+            target.accountID = acc2.id
+            target.amount = 20.000
+        }
+        _ = Ledger.approve(tx, context: context)
+
+        // Verify conditions were NOT saved automatically!
+        #expect(SMSUserRules.totalConditionsCount() == 0)
+
+        // 3. User explicitly taps "Save condition for future" (calling rememberTransactionRule)
+        SMSUserRules.rememberTransactionRule(for: tx)
+        #expect(SMSUserRules.totalConditionsCount() > 0)
+
+        // 4. Future matching SMS from the same bank & counterparty now automatically gets the saved condition
+        let nextSMS = "Debit: BHD 18.000 spent at Novelty Store on 2026/10/29 15:00. Tel: 17515151"
+        let nextOutcome = await SMSImporter.importText(nextSMS, context: context, forceApprove: true)
+        let nextTx = try #require(nextOutcome.transaction)
+
+        #expect(nextTx.category == .education)
+        #expect(nextTx.accountID == acc2.id)
+        #expect(nextTx.merchant == "Specialty Books")
+    }
 }

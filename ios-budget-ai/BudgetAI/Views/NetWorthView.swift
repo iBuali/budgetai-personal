@@ -228,16 +228,16 @@ struct AccountEditor: View {
                 }
                 if kind == .bank || kind == .creditCard || kind == .cash {
                     Section {
-                        TextField("Last digits, e.g. 4821", text: $smsMatch)
+                        TextField(kind == .creditCard ? "Card number or last digits, e.g. 4821" : "Account or card digits, e.g. 4821", text: $smsMatch)
                             .keyboardType(.numberPad)
                             .onChange(of: smsMatch) { _, v in
-                                let digits = String(v.filter(\.isNumber).suffix(6))
+                                let digits = String(v.filter(\.isNumber).prefix(19))
                                 if digits != v { smsMatch = digits }
                             }
                     } header: {
-                        Text("Card or account digits in SMS")
+                        Text(kind == .creditCard ? "Card number or digits in SMS" : "Card or account digits in SMS")
                     } footer: {
-                        Text("Bank messages mentioning these digits are filed to this account automatically.")
+                        Text(kind == .creditCard ? "Bank SMS messages mentioning this card number or its last digits will be routed to this credit card automatically." : "Bank messages mentioning these digits are filed to this account automatically.")
                     }
                 }
                 if kind == .creditCard {

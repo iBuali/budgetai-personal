@@ -464,9 +464,18 @@ enum SMSImporter {
             if p.transactionType == .transferIn {
                 return p.accountSuffix ?? p.recipientSuffix
             }
-            // For outgoing transfers, never match recipientSuffix as the source account
-            return p.accountSuffix
+            // For outgoing transfers and card expenses, check accountSuffix or cardDigits
+            return p.accountSuffix ?? p.cardDigits
         }()
+
+        // If digits weren't extracted by regex, check if the raw SMS text contains any account's configured smsMatch
+        let directAccountFromSMS: Account? = {
+            if let d = matchingDigits, let acc = SMSParser.findMatchingAccount(suffix: d, in: context) {
+                return acc
+            }
+            return SMSParser.findAccountInSMSText(trimmed, in: context)
+        }()
+
         let savedRuleAccount: UUID? = {
             if let ruleAccID = p.accountID, let _ = Ledger.account(ruleAccID, context: context) {
                 return ruleAccID
@@ -477,7 +486,7 @@ enum SMSImporter {
             }
             return nil
         }()
-        var target: UUID? = accountID ?? savedRuleAccount ?? Ledger.smsAccountID(context: context, digits: matchingDigits, hint: resolvedSMSBank, sender: resolvedSender)
+        var target: UUID? = accountID ?? savedRuleAccount ?? directAccountFromSMS?.id ?? Ledger.smsAccountID(context: context, digits: matchingDigits, hint: resolvedSMSBank, sender: resolvedSender)
 
         // Visa / credit card payments come out of a bank account and pay down the card.
         let isCardPayment = p.category == .visaTransfer

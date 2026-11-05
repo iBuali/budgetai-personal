@@ -166,7 +166,7 @@ enum Ledger {
         newCategory: SpendCategory? = nil,
         toAccountID: UUID? = nil,
         approveIfPending: Bool = false,
-        rememberRule: Bool = true,
+        rememberRule: Bool = false,
         context: ModelContext
     ) -> LedgerResult {
         let resolvedBank: String? = {
@@ -315,16 +315,22 @@ enum Ledger {
         return try? context.fetch(descriptor).first
     }
 
-    /// Account used for SMS imports: always prioritizes matching the SMS sender bank (`hint` / `sender`),
-    /// then card/account digits, then the user's fallback choice.
+    /// Account used for SMS imports: prioritizes card/account digits (e.g. matching a credit card),
+    /// then the SMS sender bank (`hint` / `sender`), then the user's fallback choice.
     static func smsAccountID(context: ModelContext, digits: String?, hint: String?, sender: String? = nil) -> UUID? {
         let accounts = (try? context.fetch(FetchDescriptor<Account>(sortBy: [SortDescriptor(\.createdAt)]))) ?? []
-        if let matchedByBank = SMSParser.findMatchingAccount(forBank: hint, senderOrPhone: sender, digits: digits, in: context) {
-            return matchedByBank.id
+        // 1. Try finding by matching digits (prioritizes credit cards and matching bank)
+        if let digits, !digits.isEmpty,
+           let match = SMSParser.findMatchingAccount(forBank: hint, senderOrPhone: sender, digits: digits, in: context) {
+            return match.id
         }
         if let digits, !digits.isEmpty,
            let match = SMSParser.findMatchingAccount(suffix: digits, in: context) {
             return match.id
+        }
+        // 2. Bank or sender without digits
+        if let matchedByBank = SMSParser.findMatchingAccount(forBank: hint, senderOrPhone: sender, in: context) {
+            return matchedByBank.id
         }
         if let fixed = AppSettings.smsAccountID, accounts.contains(where: { $0.id == fixed }) { return fixed }
         return defaultAccountID(context: context, hint: hint)

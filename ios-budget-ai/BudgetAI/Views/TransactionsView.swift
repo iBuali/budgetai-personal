@@ -751,6 +751,7 @@ struct TransactionDetailView: View {
     @State private var editingCategory = false
     @State private var nameText = ""
     @State private var amountText = ""
+    @State private var conditionSaved = false
     @FocusState private var focusedField: DetailField?
 
     private enum DetailField: Hashable {
@@ -841,9 +842,6 @@ struct TransactionDetailView: View {
                     Button {
                         commitPendingEdits(silent: true)
                         let result = Ledger.approve(tx, context: context)
-                        if isSMSTransaction {
-                            SMSUserRules.rememberTransactionRule(for: tx)
-                        }
                         appState.report(result, base: "Approved \(Money.format(tx.amount, currency))")
                     } label: {
                         Label("Approve and update accounts", systemImage: "checkmark.circle.fill").fontWeight(.semibold)
@@ -884,9 +882,6 @@ struct TransactionDetailView: View {
                             guard !trimmed.isEmpty, trimmed != tx.merchant else { return }
                             tx.merchant = trimmed
                             try? context.save()
-                            if isSMSTransaction {
-                                SMSUserRules.rememberTransactionRule(for: tx)
-                            }
                         }
                 }
 
@@ -902,9 +897,6 @@ struct TransactionDetailView: View {
                             guard let parsed = Money.parse(newValue), parsed > 0, abs(parsed - tx.amount) >= 0.0005 else { return }
                             Ledger.edit(tx, context: context) { target in
                                 target.amount = abs(parsed)
-                            }
-                            if isSMSTransaction {
-                                SMSUserRules.rememberTransactionRule(for: tx)
                             }
                         }
                 }
@@ -1001,16 +993,10 @@ struct TransactionDetailView: View {
                                 tx.aiCategorized = false
                                 try? context.save()
                             }
-                            if isSMSTransaction {
-                                SMSUserRules.rememberTransactionRule(for: tx)
-                            }
                         }),
                         subcategory: Binding(get: { tx.subcategory }, set: { newSub in
                             tx.subcategory = newSub
                             try? context.save()
-                            if isSMSTransaction {
-                                SMSUserRules.rememberTransactionRule(for: tx)
-                            }
                         }),
                         income: tx.isIncome,
                         includeAllTypes: true
@@ -1021,9 +1007,6 @@ struct TransactionDetailView: View {
                     Ledger.edit(tx, context: context) { target in
                         target.accountID = newID
                     }
-                    if isSMSTransaction {
-                        SMSUserRules.rememberTransactionRule(for: tx)
-                    }
                 })) {
                     Text("None").tag(UUID?.none)
                     ForEach(accounts) { a in Text(a.menuTitle).tag(UUID?.some(a.id)) }
@@ -1033,9 +1016,6 @@ struct TransactionDetailView: View {
                     Picker("Visa card", selection: Binding(get: { tx.toAccountID }, set: { newID in
                         guard newID != tx.accountID else { return }
                         Ledger.edit(tx, context: context) { $0.toAccountID = newID }
-                        if isSMSTransaction {
-                            SMSUserRules.rememberTransactionRule(for: tx)
-                        }
                     })) {
                         Text("Select card").tag(UUID?.none)
                         ForEach(accounts.filter { $0.kind == .creditCard }) { a in
@@ -1069,9 +1049,6 @@ struct TransactionDetailView: View {
                                 target.goalID = matchedGoal.id
                             }
                         }
-                        if isSMSTransaction {
-                            SMSUserRules.rememberTransactionRule(for: tx)
-                        }
                     })) {
                         Text("Select destination").tag(UUID?.none)
                         ForEach(accounts.filter { $0.id != tx.accountID }) { a in
@@ -1093,9 +1070,6 @@ struct TransactionDetailView: View {
                                 target.toAccountID = linkedAcc
                             }
                         }
-                        if isSMSTransaction {
-                            SMSUserRules.rememberTransactionRule(for: tx)
-                        }
                     })) {
                         Text("None").tag(UUID?.none)
                         ForEach(goals) { g in
@@ -1110,6 +1084,44 @@ struct TransactionDetailView: View {
                     }
             }
 
+            if isSMSTransaction {
+                Section {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Label(conditionSaved ? "Condition Saved for Future" : "Save Condition for Future", systemImage: conditionSaved ? "checkmark.circle.fill" : "arrow.triangle.2.circlepath")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(conditionSaved ? Theme.positive : Theme.cobalt)
+                            Spacer()
+                        }
+                        Text("Save this transaction's rules, category, and account as a condition so future matching SMS messages are automatically categorized the same way.")
+                            .font(.caption)
+                            .foregroundStyle(Theme.secondaryInk)
+
+                        Button {
+                            commitPendingEdits(silent: true)
+                            SMSUserRules.rememberTransactionRule(for: tx)
+                            withAnimation(.snappy) {
+                                conditionSaved = true
+                            }
+                            appState.show("Saved condition for future SMS")
+                        } label: {
+                            HStack {
+                                Spacer()
+                                Label(conditionSaved ? "Condition Saved for Future SMS" : "Save Condition for Future", systemImage: conditionSaved ? "checkmark" : "square.and.arrow.down")
+                                    .fontWeight(.semibold)
+                                Spacer()
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(conditionSaved ? Theme.positive : Theme.cobalt)
+                        .padding(.top, 4)
+                    }
+                    .padding(.vertical, 4)
+                } header: {
+                    Text("Saved SMS Conditions")
+                }
+            }
+
             if isSMSTransaction || tx.smsBalance != nil {
                 Section("SMS Details") {
                     Picker("SMS sender bank", selection: Binding(
@@ -1120,10 +1132,6 @@ struct TransactionDetailView: View {
                             Ledger.edit(tx, context: context) { target in
                                 target.smsBank = clean
                             }
-                            if let clean, let sender = tx.smsSender, !sender.isEmpty {
-                                SMSUserRules.rememberBank(clean, forSender: sender, accountID: tx.accountID)
-                            }
-                            SMSUserRules.rememberTransactionRule(for: tx)
                             try? context.save()
                             appState.show(clean.map { "Bank set to \($0)" } ?? "Cleared SMS bank")
                         }
@@ -1324,9 +1332,6 @@ struct TransactionDetailView: View {
         guard !trimmed.isEmpty, trimmed != tx.merchant else { return }
         tx.merchant = trimmed
         try? context.save()
-        if isSMSTransaction {
-            SMSUserRules.rememberTransactionRule(for: tx)
-        }
         if !silent {
             appState.show("Updated name to \(trimmed)")
         }

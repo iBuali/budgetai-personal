@@ -922,7 +922,13 @@ enum SMSParser {
             var ruleCat = SpendCategory(rawValue: userRule.categoryRaw) ?? (ruleType.isTransferType ? .transfers : (ruleType.countsAsIncome ? .income : .other))
             let ruleSubcat = userRule.subcategoryRaw.flatMap(SpendCategory.init(rawValue:))
             let resolvedBank = userRule.bank ?? bankInfo.bank
-            let matchedBankAcc = context.flatMap { findMatchingAccount(forBank: resolvedBank, senderOrPhone: effectiveSender, digits: suffixes.accountSuffix, in: $0) }
+            let matchedBankAcc = context.flatMap { ctx in
+                if let d = suffixes.accountSuffix, let acc = findMatchingAccount(forBank: resolvedBank, senderOrPhone: effectiveSender, digits: d, in: ctx) {
+                    return acc
+                }
+                return findAccountInSMSText(normalized, in: ctx)
+                    ?? findMatchingAccount(forBank: resolvedBank, senderOrPhone: effectiveSender, digits: suffixes.accountSuffix, in: ctx)
+            }
             let resolvedRuleAccountID: UUID? = userRule.accountIDString.flatMap(UUID.init(uuidString:))
                 ?? matchedBankAcc?.id
                 ?? senderRuleAccountID
@@ -1000,8 +1006,12 @@ enum SMSParser {
             context: context
         )
 
-        let matchedSourceAccount = context.flatMap {
-            findMatchingAccount(forBank: bankInfo.bank, senderOrPhone: effectiveSender, digits: suffixes.accountSuffix, in: $0)
+        let matchedSourceAccount = context.flatMap { ctx in
+            if let d = suffixes.accountSuffix, let acc = findMatchingAccount(forBank: bankInfo.bank, senderOrPhone: effectiveSender, digits: d, in: ctx) {
+                return acc
+            }
+            return findAccountInSMSText(singleLine, in: ctx)
+                ?? findMatchingAccount(forBank: bankInfo.bank, senderOrPhone: effectiveSender, digits: suffixes.accountSuffix, in: ctx)
         }
         let resolvedSourceAccountID = matchedSourceAccount?.id ?? senderRuleAccountID
 
@@ -1591,7 +1601,7 @@ enum SMSParser {
         "stcpay": ["stc pay", "stcpay"]
     ]
 
-    private static func cleanAccountDigits(_ raw: String) -> String {
+    static func cleanAccountDigits(_ raw: String) -> String {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         let stripped = trimmed.replacingOccurrences(of: "[\\s\\-•*#xX·]", with: "", options: .regularExpression)
         let trailingDigits = stripped.replacingOccurrences(of: "^.*?(?=\\d+$)", with: "", options: .regularExpression)
@@ -1601,16 +1611,43 @@ enum SMSParser {
         return stripped.lowercased()
     }
 
+    /// Determines if an account's configured `smsMatch` matches the query digits or card number from an SMS.
+    /// Handles exact matches, trailing suffix matches (e.g. user entered 16-digit card number and SMS has last 4 digits,
+    /// or user entered last 4 digits and SMS has card ending in those digits), and masked card prefixes/suffixes.
+    static func digitsMatch(accountMatch: String, query: String) -> Bool {
+        let accClean = cleanAccountDigits(accountMatch)
+        let qClean = cleanAccountDigits(query)
+        guard !accClean.isEmpty, !qClean.isEmpty else { return false }
+        if accClean == qClean { return true }
+        if accClean.hasSuffix(qClean) || qClean.hasSuffix(accClean) { return true }
+        // If either digits contains full or masked digits (at least 4 digits), compare trailing 4 digits
+        if accClean.count >= 4 && qClean.count >= 4 {
+            let accLast4 = String(accClean.suffix(4))
+            let qLast4 = String(qClean.suffix(4))
+            if accLast4 == qLast4 { return true }
+        }
+        return false
+    }
+
     static func findMatchingAccount(suffix: String, excludingAccountID: UUID? = nil, in context: ModelContext) -> Account? {
         let clean = cleanAccountDigits(suffix)
         guard !clean.isEmpty else { return nil }
         let accounts = (try? context.fetch(FetchDescriptor<Account>(sortBy: [SortDescriptor(\.createdAt)]))) ?? []
-        return accounts.first { acc in
+        let candidates = accounts.filter { acc in
             if let excludingAccountID, acc.id == excludingAccountID { return false }
-            let m = cleanAccountDigits(acc.smsMatch)
-            guard !m.isEmpty else { return false }
-            return clean == m || clean.hasSuffix(m) || m.hasSuffix(clean)
+            return digitsMatch(accountMatch: acc.smsMatch, query: clean)
         }
+        guard !candidates.isEmpty else { return nil }
+
+        // 1. Exact digit match
+        if let exact = candidates.first(where: { cleanAccountDigits($0.smsMatch) == clean }) {
+            return exact
+        }
+        // 2. Prefer Credit Card accounts when matching card digits
+        if let cardAcc = candidates.first(where: { $0.kind == .creditCard }) {
+            return cardAcc
+        }
+        return candidates.first
     }
 
     enum TransferLegDirection {
@@ -1727,28 +1764,46 @@ enum SMSParser {
         return inst.isEmpty ? nil : inst
     }
 
-    /// Resolves a user `Account` from multiple accounts based on the SMS sender bank (`bank`),
-    /// saved sender rule, or phone number (e.g. 17515151 -> BisB, 17123456 -> ila).
-    /// Prioritizes matching the SMS sender bank so the `Account` field is always the same as the SMS sender bank.
+    /// Resolves a user `Account` based on card/account digits, SMS sender bank (`bank`),
+    /// saved sender rule, or phone number.
+    /// When card/account digits are present, MATCHING DIGITS HAS HIGHEST PRIORITY so credit cards
+    /// and specific accounts are correctly identified even if bank name differs or is omitted.
     static func findMatchingAccount(forBank bank: String?, senderOrPhone: String? = nil, digits: String? = nil, in context: ModelContext) -> Account? {
         let accounts = (try? context.fetch(FetchDescriptor<Account>(sortBy: [SortDescriptor(\.createdAt)]))) ?? []
         guard !accounts.isEmpty else { return nil }
-        let sortedAccounts = accounts.sorted { ($0.kind.isLiquid ? 0 : 1) < ($1.kind.isLiquid ? 0 : 1) }
 
-        // 1. Primary rule: When the SMS sender bank is known, ALWAYS match an account belonging to that bank first
+        // 1. Primary rule: When digits are provided (card number or account suffix from SMS),
+        // MATCHING DIGITS HAS HIGHEST PRIORITY!
+        // A specific card or account number in the SMS should always route to the matching account
+        // (especially credit cards which may not have bank name in their title or institution).
+        if let digits, !digits.isEmpty {
+            let matchingDigitsAccounts = accounts.filter { acc in
+                digitsMatch(accountMatch: acc.smsMatch, query: digits)
+            }
+            if !matchingDigitsAccounts.isEmpty {
+                // a. If an account matches BOTH digits and the bank name/institution, that's top priority
+                if let bank, !bank.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                   let bothMatch = matchingDigitsAccounts.first(where: { accountMatchesBank($0, bank: bank) }) {
+                    return bothMatch
+                }
+                // b. If any matched account is a Credit Card, prioritize it (cards often have blank or separate institution)
+                if let cardMatch = matchingDigitsAccounts.first(where: { $0.kind == .creditCard }) {
+                    return cardMatch
+                }
+                // c. Exact digit match
+                let cleanD = cleanAccountDigits(digits)
+                if let exact = matchingDigitsAccounts.first(where: { cleanAccountDigits($0.smsMatch) == cleanD }) {
+                    return exact
+                }
+                return matchingDigitsAccounts.first
+            }
+        }
+
+        // 2. Bank matching (only when digits were not provided or no account had matching digits)
+        let sortedAccounts = accounts.sorted { ($0.kind.isLiquid ? 0 : 1) < ($1.kind.isLiquid ? 0 : 1) }
         if let bank, !bank.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             let matchingBankAccounts = sortedAccounts.filter { accountMatchesBank($0, bank: bank) }
             if !matchingBankAccounts.isEmpty {
-                if let digits, !digits.isEmpty {
-                    let cleanD = cleanAccountDigits(digits)
-                    if !cleanD.isEmpty,
-                       let exactByDigits = matchingBankAccounts.first(where: {
-                           let m = cleanAccountDigits($0.smsMatch)
-                           return !m.isEmpty && (cleanD == m || cleanD.hasSuffix(m) || m.hasSuffix(cleanD))
-                       }) {
-                        return exactByDigits
-                    }
-                }
                 if let senderOrPhone,
                    let savedAccID = SMSUserRules.accountID(forSender: senderOrPhone),
                    let savedInBank = matchingBankAccounts.first(where: { $0.id == savedAccID }) {
@@ -1758,7 +1813,7 @@ enum SMSParser {
             }
         }
 
-        // 2. Check user-saved sender-to-account rule (only if bank was nil or no account matched bank by name/institution)
+        // 3. Check user-saved sender-to-account rule (only if bank was nil or no account matched bank by name/institution)
         if let senderOrPhone, let savedAccID = SMSUserRules.accountID(forSender: senderOrPhone),
            let acc = accounts.first(where: { $0.id == savedAccID }) {
             if let bank, !bank.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -1771,7 +1826,7 @@ enum SMSParser {
             }
         }
 
-        // 3. Check if sender/phone digits match an account's smsMatch field
+        // 4. Check if sender/phone digits match an account's smsMatch field
         if let senderOrPhone {
             let cleanSender = senderOrPhone.trimmingCharacters(in: .whitespacesAndNewlines)
             let phoneDigits = SMSUserRules.normalizePhoneDigits(cleanSender)
@@ -1785,6 +1840,46 @@ enum SMSParser {
         }
 
         return nil
+    }
+
+    /// Scans raw SMS text to check if any registered account's `smsMatch` (card number or account digits)
+    /// appears explicitly in the message. Strongly prioritizes `.creditCard` accounts when card terms appear.
+    static func findAccountInSMSText(_ text: String, in context: ModelContext) -> Account? {
+        let accounts = (try? context.fetch(FetchDescriptor<Account>(sortBy: [SortDescriptor(\.createdAt)]))) ?? []
+        guard !accounts.isEmpty else { return nil }
+        let cleanText = text.replacingOccurrences(of: "\n", with: " ")
+        let lowerText = cleanText.lowercased()
+        let hasCardKeyword = lowerText.contains("card") || lowerText.contains("بطاق") || lowerText.contains("visa") || lowerText.contains("mastercard")
+
+        var matchedAccounts: [(account: Account, matchLength: Int)] = []
+        for acc in accounts {
+            let m = cleanAccountDigits(acc.smsMatch)
+            guard m.count >= 3 else { continue }
+            if cleanText.contains(m) {
+                matchedAccounts.append((acc, m.count))
+                continue
+            }
+            // If user configured a full 16-digit card number, check its last 4 digits in text
+            if m.count >= 12 {
+                let last4 = String(m.suffix(4))
+                if cleanText.contains(last4) {
+                    matchedAccounts.append((acc, 4))
+                }
+            }
+        }
+        guard !matchedAccounts.isEmpty else { return nil }
+
+        if hasCardKeyword, let cardAcc = matchedAccounts.first(where: { $0.account.kind == .creditCard }) {
+            return cardAcc.account
+        }
+        matchedAccounts.sort {
+            if $0.matchLength != $1.matchLength { return $0.matchLength > $1.matchLength }
+            if ($0.account.kind == .creditCard) != ($1.account.kind == .creditCard) {
+                return $0.account.kind == .creditCard
+            }
+            return false
+        }
+        return matchedAccounts.first?.account
     }
 
     static func findMatchingGoal(suffix: String? = nil, accountID: UUID? = nil, in context: ModelContext) -> SavingsGoal? {
@@ -1862,11 +1957,19 @@ enum SMSParser {
 
         var accountSuffix: String?
         let sourcePatterns = [
-            "(?i)(?:your|using)\\s+(?:card|a/c|acct|account|iban)\\s*(?:ending(?:\\s+with|\\s+in)?|no\\.?|number)?\\s*[:\\-]?\\s*(?:xx|[xX*#•])*([0-9]{3,6})\\b",
-            "(?i)(?:from)\\s+(?:your\\s+)?(?:card|a/c|acct|account|iban)\\s*(?:ending(?:\\s+with|\\s+in)?|no\\.?|number)?\\s*[:\\-]?\\s*(?:xx|[xX*#•])*([0-9]{3,6})\\b",
-            "(?i)(?:card|a/c|acct|account)\\s+ending\\s*(?:with|in)?\\s*[xX*#•]*([0-9]{3,6})\\b",
-            "(?i)(?:card|a/c|acct|account|iban)\\s*(?:no\\.?|number|#)?\\s*[:\\-]?\\s*(?:xx|[xX*#•])+([0-9]{3,6})\\b",
-            "(?i)(?:بطاقة|بطاقتك|حساب|حسابك)\\s*(?:رقم|مدى|ائتمانية|ينتهي\\s*بـ?|تنتهي\\s*بـ?)?\\s*[:\\-]?\\s*[xX*#•]*([0-9]{3,6})\\b"
+            // "Your credit card ending 1234", "using card no: 1234", "using visa card ending with 1234"
+            "(?i)(?:your|using)\\s+(?:credit\\s+card|debit\\s+card|prepaid\\s+card|visa\\s+card|mastercard|card|a/c|acct|account|iban)\\s*(?:ending(?:\\s+with|\\s+in)?|no\\.?|number|#)?\\s*[:\\-.=()[\\]]*\\s*(?:xx|[xX*#•.])*([0-9]{3,6})\\b",
+            // "from your credit card ending 1234", "from card 1234"
+            "(?i)(?:from)\\s+(?:your\\s+)?(?:credit\\s+card|debit\\s+card|prepaid\\s+card|visa\\s+card|mastercard|card|a/c|acct|account|iban)\\s*(?:ending(?:\\s+with|\\s+in)?|no\\.?|number|#)?\\s*[:\\-.=()[\\]]*\\s*(?:xx|[xX*#•.])*([0-9]{3,6})\\b",
+            // "credit card ending in 1234", "card ending 1234"
+            "(?i)(?:credit\\s+card|debit\\s+card|prepaid\\s+card|visa\\s+card|mastercard|card|a/c|acct|account)\\s+ending\\s*(?:with|in)?\\s*[xX*#•.]*([0-9]{3,6})\\b",
+            // "Card 4532XXXXXXXX1234" or "4532 **** **** 1234" or "Card ..1234" or "Card: 1234" or "Card No. 1234"
+            "(?i)(?:credit\\s+card|debit\\s+card|prepaid\\s+card|visa\\s+card|mastercard|card|a/c|acct|account|iban)\\s*(?:no\\.?|number|#)?\\s*[:\\-.=()[\\]]*\\s*(?:[0-9]{4}[\\s\\-]*[xX*#•]{4,8}[\\s\\-]*|[xX*#•.]{2,12}[\\s\\-]*)?([0-9]{3,6})\\b",
+            // "card: 1234", "card #1234", "card - 1234"
+            "(?i)\\b(?:credit\\s*card|card|acct)\\s*[:\\-#=]\\s*([0-9]{3,6})\\b",
+            // Arabic:
+            // "بطاقة ائتمانية رقم 1234" / "بطاقتك الائتمانية المنتهية بـ 1234" / "بطاقة مدى 1234"
+            "(?i)(?:بطاقة|بطاقتك|حساب|حسابك)(?:\\s+(?:ائتمانية|مدى|الائتمانية|مسبقة\\s+الدفع|الخصم))?(?:\\s+(?:رقم|تنتهي\\s*بـ?|ينتهي\\s*بـ?|المنتهية\\s*بـ?|المنتهي\\s*بـ?|تنتهي\\s*في|ينتهي\\s*في))?\\s*[:\\-.#=()[\\]]*\\s*[xX*#•.]*([0-9]{3,6})\\b"
         ]
         for pattern in sourcePatterns {
             if let regex = try? NSRegularExpression(pattern: pattern),
