@@ -1023,11 +1023,11 @@ enum SMSParser {
         }
         let resolvedSourceAccountID = matchedSourceAccount?.id ?? senderRuleAccountID
 
-        var txType = classification.type
-        var resolvedToAccountID = classification.toAccountID
-        var resolvedGoalID = classification.goalID
-        var customCounterparty = classification.counterparty
-        var customReason = classification.reason
+        let txType = classification.type
+        let resolvedToAccountID = classification.toAccountID
+        let resolvedGoalID = classification.goalID
+        let customCounterparty = classification.counterparty
+        let customReason = classification.reason
 
         let isIncome = txType.isIncomeDirection
         let extractedMerchant = customCounterparty
@@ -1743,6 +1743,11 @@ enum SMSParser {
     static func primaryBankName(from bank: String) -> String {
         let parts = bank.components(separatedBy: " · ")
         return parts.first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? bank
+    }
+
+    static func primaryBankName(from bank: String?) -> String? {
+        guard let bank else { return nil }
+        return primaryBankName(from: bank)
     }
 
     /// Checks whether a user `Account` matches a given bank name (e.g. "BisB", "ila", "NBB", "BBK", or "BisB · ila").
