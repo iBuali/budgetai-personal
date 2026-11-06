@@ -30,12 +30,14 @@ jobs:
           DEV_DIR=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -n 1)/Contents/Developer
           if [ ! -d "$DEV_DIR" ]; then DEV_DIR="/Applications/Xcode.app/Contents/Developer"; fi
           export DEVELOPER_DIR="$DEV_DIR"
-          echo "Running BudgetAITests on Simulator: iPhone 16"
+          SIM_NAME=$(xcrun simctl list devices available | grep -E "iPhone (17|16|15|14)" | head -n 1 | sed -E 's/^[[:space:]]+//' | sed -E 's/ \([A-F0-9-]+\) \(.*//')
+          if [ -z "$SIM_NAME" ]; then SIM_NAME="iPhone 17"; fi
+          echo "Running BudgetAITests on Simulator: $SIM_NAME"
           xcodebuild test \
             -project ios-budget-ai/BudgetAI.xcodeproj \
             -scheme BudgetAI \
             -only-testing:BudgetAITests \
-            -destination "platform=iOS Simulator,name=iPhone 16" \
+            -destination "platform=iOS Simulator,name=$SIM_NAME" \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" DEVELOPMENT_TEAM=""
       - name: Upload verified unsigned IPA
         uses: actions/upload-artifact@v4
