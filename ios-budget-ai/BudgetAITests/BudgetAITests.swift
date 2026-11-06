@@ -1063,7 +1063,7 @@ struct BudgetAITests {
         let tx1 = try #require(outcome1.transaction)
 
         // 2. User edits category and saves condition WITHOUT sender bank
-        tx1.category = .coffee
+        tx1.category = .dining
         tx1.merchant = "Specialty Coffee"
         SMSUserRules.rememberTransactionRule(for: tx1, saveBank: false)
 
@@ -1075,7 +1075,7 @@ struct BudgetAITests {
         let tx2 = try #require(outcome2.transaction)
 
         // Should apply the saved condition even though the SMS sender bank was different
-        #expect(tx2.category == .coffee)
+        #expect(tx2.category == .dining)
         #expect(tx2.merchant == "Specialty Coffee")
     }
 
@@ -1089,7 +1089,7 @@ struct BudgetAITests {
         pendingTx.isPending = true
         context.insert(pendingTx)
 
-        let approvedTx = MoneyTransaction(amount: 30, isIncome: false, merchant: "Approved Store", category: .food, date: .now, source: .manual, accountID: acc.id)
+        let approvedTx = MoneyTransaction(amount: 30, isIncome: false, merchant: "Approved Store", category: .dining, date: .now, source: .manual, accountID: acc.id)
         approvedTx.isPending = false
         context.insert(approvedTx)
         try context.save()
