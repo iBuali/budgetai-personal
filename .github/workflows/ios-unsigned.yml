@@ -12,13 +12,9 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: budgetai-personal-${{ github.ref }}
-  cancel-in-progress: false
-
 jobs:
   build:
-    runs-on: macos-14
+    runs-on: macos-latest
     timeout-minutes: 30
     env:
       BUNDLE_ID: ${{ inputs.bundle_id }}
