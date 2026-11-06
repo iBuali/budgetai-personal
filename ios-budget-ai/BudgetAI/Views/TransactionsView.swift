@@ -1114,7 +1114,7 @@ struct TransactionDetailView: View {
                         target.accountID = newID
                     }
                 })) {
-                    Text("None").tag(UUID?.none)
+                    Text(isSMSTransaction ? "Unknown" : "None").tag(UUID?.none)
                     ForEach(accounts) { a in Text(a.menuTitle).tag(UUID?.some(a.id)) }
                 }
 

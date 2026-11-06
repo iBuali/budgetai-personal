@@ -470,23 +470,42 @@ enum SMSImporter {
 
         // If digits weren't extracted by regex, check if the raw SMS text contains any account's configured smsMatch
         let directAccountFromSMS: Account? = {
-            if let d = matchingDigits, let acc = SMSParser.findMatchingAccount(suffix: d, in: context) {
+            if let d = matchingDigits, let acc = SMSParser.findMatchingAccount(forBank: resolvedSMSBank, senderOrPhone: resolvedSender, digits: d, in: context) {
                 return acc
             }
-            return SMSParser.findAccountInSMSText(trimmed, in: context)
+            return SMSParser.findAccountInSMSText(trimmed, detectedBank: resolvedSMSBank, in: context)
         }()
 
         let savedRuleAccount: UUID? = {
-            if let ruleAccID = p.accountID, let _ = Ledger.account(ruleAccID, context: context) {
+            func isCompatible(_ acc: Account) -> Bool {
+                if p.matchedUserRule { return true }
+                if let b = resolvedSMSBank, !b.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                   acc.kind != .creditCard,
+                   SMSParser.bankName(forAccount: acc) != nil,
+                   !SMSParser.accountMatchesBank(acc, bank: b) {
+                    return false
+                }
+                if let d = matchingDigits, !d.isEmpty,
+                   !acc.smsMatch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                   !SMSParser.digitsMatch(accountMatch: acc.smsMatch, query: d) {
+                    return false
+                }
+                return true
+            }
+            if let ruleAccID = p.accountID, let acc = Ledger.account(ruleAccID, context: context), isCompatible(acc) {
                 return ruleAccID
             }
             if let senderAccID = SMSUserRules.accountID(forSender: resolvedSender, in: trimmed),
-               let _ = Ledger.account(senderAccID, context: context) {
+               let acc = Ledger.account(senderAccID, context: context), isCompatible(acc) {
                 return senderAccID
             }
             return nil
         }()
-        var target: UUID? = accountID ?? savedRuleAccount ?? directAccountFromSMS?.id ?? Ledger.smsAccountID(context: context, digits: matchingDigits, hint: resolvedSMSBank, sender: resolvedSender)
+        // Never fall back to a default/first account when the SMS bank or account digits do not match any user account.
+        var target: UUID? = accountID
+            ?? savedRuleAccount
+            ?? directAccountFromSMS?.id
+            ?? SMSParser.findMatchingAccount(forBank: resolvedSMSBank, senderOrPhone: resolvedSender, digits: matchingDigits, in: context)?.id
 
         // Visa / credit card payments come out of a bank account and pay down the card.
         let isCardPayment = p.category == .visaTransfer
@@ -496,7 +515,11 @@ enum SMSImporter {
             }
             let targetAccount = target.flatMap { Ledger.account($0, context: context) }
             if accountID == nil, targetAccount == nil || targetAccount?.kind.isLiquid == false || target == p.toAccountID {
-                target = Ledger.defaultLiquidAccountID(context: context, hint: resolvedSMSBank)
+                if let matchedBankAcc = SMSParser.findMatchingAccount(forBank: resolvedSMSBank, senderOrPhone: resolvedSender, in: context), matchedBankAcc.kind.isLiquid {
+                    target = matchedBankAcc.id
+                } else if resolvedSMSBank == nil {
+                    target = Ledger.defaultLiquidAccountID(context: context, hint: nil)
+                }
             }
         }
 
@@ -623,27 +646,37 @@ enum SMSImporter {
         let targetAccount = target.flatMap { id in allAccounts.first(where: { $0.id == id }) }
         let effectiveBank = resolvedSMSBank ?? (targetAccount?.institution.isEmpty == false ? targetAccount?.institution : nil)
         let matchedByDigits = matchingDigits.flatMap { d in
-            SMSParser.findMatchingAccount(suffix: d, in: context)
+            SMSParser.findMatchingAccount(forBank: resolvedSMSBank, senderOrPhone: resolvedSender, digits: d, in: context)
         } ?? directAccountFromSMS
-        let matchedByBankOrSender = savedRuleAccount != nil || SMSParser.findMatchingAccount(forBank: effectiveBank, senderOrPhone: resolvedSender, in: context) != nil
+        let matchedByBankOrSender = savedRuleAccount != nil || SMSParser.findMatchingAccount(forBank: effectiveBank, senderOrPhone: resolvedSender, digits: matchingDigits, in: context) != nil
         let bankUnknown: Bool = {
-            if matchedByDigits != nil || targetAccount != nil { return false }
+            if matchedByDigits != nil { return false }
+            if targetAccount != nil && (accountID != nil || savedRuleAccount != nil) { return false }
             return effectiveBank == nil || effectiveBank?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true || effectiveBank?.lowercased().contains("unknown") == true
         }()
         let accountUnmatched: Bool = {
             guard let targetAccount else { return true }
-            if accountID != nil || savedRuleAccount != nil || matchedByDigits != nil { return false }
-            if p.accountSuffix != nil && matchingDigits != nil {
-                if matchedByBankOrSender && SMSParser.accountMatchesBank(targetAccount, bank: effectiveBank) {
-                    return false
-                }
-                if targetAccount.smsMatch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && matchedByBankOrSender {
-                    return false
-                }
+            if accountID != nil || p.matchedUserRule { return false }
+            if let b = resolvedSMSBank, !b.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               targetAccount.kind != .creditCard,
+               !SMSParser.accountMatchesBank(targetAccount, bank: b) {
                 return true
+            }
+            if let suffix = p.accountSuffix, !suffix.isEmpty {
+                let targetDigits = targetAccount.smsMatch.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !targetDigits.isEmpty && !SMSParser.digitsMatch(accountMatch: targetDigits, query: suffix) {
+                    return true
+                }
+                if targetDigits.isEmpty && !matchedByBankOrSender {
+                    return true
+                }
             }
             return false
         }()
+        if accountUnmatched && accountID == nil {
+            target = nil
+            tx.accountID = nil
+        }
         // Uncertain categorization must NOT put transactions on the list waiting for review.
         // Only transactions with an unknown transaction type (.unknown) need review.
         let isUncertain = p.transactionType == .unknown

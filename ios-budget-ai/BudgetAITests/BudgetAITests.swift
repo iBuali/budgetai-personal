@@ -1107,4 +1107,50 @@ struct BudgetAITests {
         #expect(reviewFilter.matches(pendingTx))
         #expect(!reviewFilter.matches(approvedTx))
     }
+
+    @Test func testAlSalamMaskedIBANTowardsEWABNotAssignedToIlaBank() async throws {
+        let context = makeCleanContext()
+        SMSUserRules.clearAll()
+
+        // User has ila Bank (first account) and BisB, but NO Al Salam Bank account
+        let ila = Account(name: "ila Bank", kind: .bank, institution: "ila", balance: 300.000)
+        ila.smsMatch = "0846"
+        let bisb = Account(name: "BisB Account", kind: .bank, institution: "BisB", balance: 500.000)
+        bisb.smsMatch = "9001"
+        context.insert(ila)
+        context.insert(bisb)
+        try context.save()
+
+        // Even if a stale sender rule existed in UserDefaults mapping "ila" -> "ila", it must NEVER match substrings in the body
+        SMSUserRules.rememberBank("ila", forSender: "ila", accountID: ila.id)
+
+        let alSalamSMS = "Dear Client, BHD 18.600 has been debited from your account BH69ALSA00219XXXXX0020 towards EWAB, your balance is BHD 5081.229 on 22/04/26 at 03:46. Thank you, Al Salam Bank"
+
+        let outcome = await SMSImporter.importText(alSalamSMS, context: context, forceApprove: true)
+        let tx = try #require(outcome.transaction)
+
+        // 1. Bank must be identified as Al Salam (from BH69ALSA... and "Al Salam Bank"), NEVER ila!
+        #expect(tx.smsBank == "Al Salam")
+        #expect(tx.smsBank != "ila")
+
+        // 2. Account suffix must be extracted as "0020" (trailing 4 digits of masked IBAN), NEVER "00219"
+        #expect(tx.smsAccountSuffix == "0020")
+
+        // 3. Merchant extracted from "towards EWAB" -> "EWAB", categorized as .bills
+        #expect(tx.merchant == "EWAB")
+        #expect(tx.category == .bills)
+        #expect(abs(tx.amount - 18.600) < 0.0001)
+        #expect(abs((tx.smsBalance ?? 0) - 5081.229) < 0.0001)
+
+        // 4. Since user has no Al Salam / 0020 account, accountID MUST be nil (Unknown) and transaction MUST be quarantined (isPending = true)
+        #expect(tx.accountID == nil)
+        #expect(tx.isPending == true)
+
+        // 5. ila Bank and BisB balances must remain 100% untouched!
+        #expect(abs(ila.balance - 300.000) < 0.0001)
+        #expect(abs(bisb.balance - 500.000) < 0.0001)
+
+        let reasons = tx.reviewReasons(accounts: [ila, bisb])
+        #expect(reasons.contains("Unmatched account in app"))
+    }
 }

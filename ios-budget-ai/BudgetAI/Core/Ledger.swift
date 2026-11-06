@@ -41,6 +41,13 @@ enum Ledger {
     static func approve(_ tx: MoneyTransaction, context: ModelContext) -> LedgerResult {
         guard tx.isPending else { return LedgerResult() }
         var result = LedgerResult()
+        if tx.accountID == nil {
+            if let matched = SMSParser.findMatchingAccount(forBank: tx.smsBank, senderOrPhone: tx.smsSender, digits: tx.smsAccountSuffix, in: context) {
+                tx.accountID = matched.id
+            } else if tx.smsBank == nil && tx.smsAccountSuffix == nil {
+                tx.accountID = defaultAccountID(context: context, hint: nil)
+            }
+        }
         tx.isPending = false
         applyBalance(tx, sign: 1, context: context)
         result.balanceSynced = syncBalanceFromSMS(tx, context: context)

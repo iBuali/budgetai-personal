@@ -233,7 +233,7 @@ struct TransactionRow: View {
                             return ("Unknown bank sender", "building.columns.fill")
                         }
                         if tx.accountID == nil {
-                            return ("Unmatched account", "creditcard.trianglebadge.exclamationmark")
+                            return ("Unknown account", "creditcard.trianglebadge.exclamationmark")
                         }
                         if tx.smsTransactionType == .unknown {
                             return ("Unknown type", "questionmark.circle.fill")
