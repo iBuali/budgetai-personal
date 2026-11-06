@@ -275,6 +275,7 @@ struct BudgetAITests {
     // MARK: - 6. User Corrections, Scoped Learning, and Sender-vs-Account Separation
 
     @Test func userCorrectionsUpdateBalancesAndScopeRulesProperly() async throws {
+        SMSUserRules.clearAll()
         let context = makeCleanContext()
         let nbb = Account(name: "NBB Current", kind: .bank, institution: "NBB", balance: 500.000)
         let bbk = Account(name: "BBK Savings", kind: .bank, institution: "BBK", balance: 200.000)
@@ -307,7 +308,7 @@ struct BudgetAITests {
             target.accountID = bbk.id
             target.amount = 12.500 // Also test editing transaction amount
         }
-        SMSUserRules.rememberTransactionRule(for: tx1)
+        SMSUserRules.rememberTransactionRule(for: tx1, saveBank: true)
 
         #expect(tx1.isPending == false)
         #expect(tx1.smsTransactionType == .expense)
@@ -693,7 +694,7 @@ struct BudgetAITests {
             sender: "17515151"
         )
         #expect(SMSUserRules.allClassificationRules().count == 1)
-        #expect(SMSUserRules.totalConditionsCount() == 2)
+        #expect(SMSUserRules.totalConditionsCount() == 1)
 
         let rule = try #require(SMSUserRules.allClassificationRules().first)
         #expect(rule.merchant == "Cafeteria")
@@ -703,7 +704,7 @@ struct BudgetAITests {
         // 3. Delete single classification rule
         SMSUserRules.removeClassificationRule(signature: rule.signature)
         #expect(SMSUserRules.allClassificationRules().count == 0)
-        #expect(SMSUserRules.totalConditionsCount() == 1)
+        #expect(SMSUserRules.totalConditionsCount() == 0)
 
         // 4. Clear all conditions
         SMSUserRules.clearAll()
