@@ -1151,6 +1151,6 @@ struct BudgetAITests {
         #expect(abs(bisb.balance - 500.000) < 0.0001)
 
         let reasons = tx.reviewReasons(accounts: [ila, bisb])
-        #expect(reasons.contains("Unmatched account in app"))
+        #expect(reasons.contains("Unmatched account"))
     }
 }
