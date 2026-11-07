@@ -656,9 +656,6 @@ enum SMSImporter {
         let allAccounts = (try? context.fetch(FetchDescriptor<Account>())) ?? []
         let targetAccount = target.flatMap { id in allAccounts.first(where: { $0.id == id }) }
         let effectiveBank = resolvedSMSBank ?? (targetAccount.flatMap { SMSParser.bankName(forAccount: $0) })
-        if tx.smsBank == nil, let effectiveBank {
-            tx.smsBank = effectiveBank
-        }
         let isExplicitDigitMatch: Bool = {
             if let explicit = explicitDigitMatchedAccount, targetAccount?.id == explicit.id {
                 return true
