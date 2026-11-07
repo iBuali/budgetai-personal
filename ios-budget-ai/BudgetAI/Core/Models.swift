@@ -545,10 +545,11 @@ final class MoneyTransaction {
     func reviewReasons(accounts: [Account]) -> [String] {
         guard source == .sms else { return isPending ? ["Waiting for approval"] : [] }
         var reasons: [String] = []
+        let hasMatchedAccount = accountID != nil && (accounts.isEmpty || accounts.contains(where: { $0.id == accountID }))
 
-        // Unknown bank sender
+        // Unknown bank sender (only if no user account matched)
         let bankClean = smsBank?.trimmingCharacters(in: .whitespacesAndNewlines)
-        if bankClean == nil || bankClean?.isEmpty == true || bankClean?.lowercased().contains("unknown") == true {
+        if !hasMatchedAccount && (bankClean == nil || bankClean?.isEmpty == true || bankClean?.lowercased().contains("unknown") == true) {
             reasons.append("Unknown sender bank")
         }
 
@@ -572,7 +573,7 @@ final class MoneyTransaction {
     var isUnmatchedOrUncertain: Bool {
         guard source == .sms else { return isPending }
         let bankClean = smsBank?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let bankUnknown = bankClean == nil || bankClean?.isEmpty == true || bankClean?.lowercased().contains("unknown") == true
+        let bankUnknown = accountID == nil && (bankClean == nil || bankClean?.isEmpty == true || bankClean?.lowercased().contains("unknown") == true)
         let accountUnmatched = accountID == nil
         let uncertain = smsConfidence == .low || smsTransactionType == .unknown
         return bankUnknown || accountUnmatched || uncertain || isPending

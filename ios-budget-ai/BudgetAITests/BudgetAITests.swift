@@ -1153,4 +1153,73 @@ struct BudgetAITests {
         let reasons = tx.reviewReasons(accounts: [ila, bisb])
         #expect(reasons.contains("Unmatched account"))
     }
+
+    @Test func testEditedAccountCardOrAccountDigitsRecognizedAcrossAllSMSTypes() async throws {
+        let context = makeCleanContext()
+        SMSUserRules.clearAll()
+
+        // User creates an account (even without setting institution) and edits it to put "3876" in "Card or account digits in SMS"
+        let myAccount = Account(name: "Personal Account", kind: .bank, institution: "", balance: 173.613)
+        myAccount.smsMatch = "3876"
+        let otherAccount = Account(name: "Other Account", kind: .bank, institution: "ila", balance: 500.000)
+        otherAccount.smsMatch = "9999"
+        context.insert(myAccount)
+        context.insert(otherAccount)
+        try context.save()
+
+        // 1. Exact user-reported SMS:
+        // "Fawri+ payment BHD5.000 received from IBAN 0001 to IBAN 3876 ref. ALS103KAU005SVOW on 2026/11/06 17:46. Balance BHD178.613. Tel 17515151"
+        let incomingFawriSMS = "Fawri+ payment BHD5.000 received from IBAN 0001 to IBAN 3876 ref. ALS103KAU005SVOW on 2026/11/06 17:46. Balance BHD178.613. Tel 17515151"
+        let parsed = try #require(SMSParser.parse(incomingFawriSMS, context: context))
+
+        #expect(parsed.transactionType == .transferIn)
+        #expect(parsed.isIncome == true)
+        #expect(parsed.accountSuffix == "3876")
+        #expect(parsed.recipientSuffix == "0001")
+        #expect(parsed.referenceNumber == "ALS103KAU005SVOW")
+        #expect(parsed.accountID == myAccount.id)
+
+        let out1 = await SMSImporter.importText(incomingFawriSMS, context: context, forceApprove: true)
+        let tx1 = try #require(out1.transaction)
+        #expect(tx1.accountID == myAccount.id)
+        #expect(tx1.isPending == false)
+        #expect(tx1.isIncome == true)
+        #expect(tx1.smsAccountSuffix == "3876")
+        #expect(tx1.smsRecipientSuffix == "0001")
+        #expect(tx1.smsReference == "ALS103KAU005SVOW")
+        #expect(abs(myAccount.balance - 178.613) < 0.0001)
+        #expect(tx1.reviewReasons(accounts: [myAccount, otherAccount]).isEmpty)
+
+        // 2. User edits account to hold both IBAN digits and Debit Card digits ("3876, 4821")
+        myAccount.smsMatch = "3876, 4821"
+        try context.save()
+
+        // Card purchase using card ending 4821
+        let cardSMS = "Purchase of BHD 8.613 with Debit Card *4821 at LULU HYPERMARKET on 2026/11/06 18:10. Balance BHD 170.000"
+        let out2 = await SMSImporter.importText(cardSMS, context: context, forceApprove: true)
+        let tx2 = try #require(out2.transaction)
+        #expect(tx2.accountID == myAccount.id)
+        #expect(tx2.isPending == false)
+        #expect(tx2.smsAccountSuffix == "4821")
+        #expect(abs(myAccount.balance - 170.000) < 0.0001)
+
+        // 3. Outgoing Fawri+ transfer from IBAN 3876 to IBAN 5544
+        let outgoingFawriSMS = "Fawri+ transfer of BHD 20.000 from IBAN 3876 to IBAN 5544 ref. BIB20269988 on 2026/11/06 19:00. Balance BHD 150.000"
+        let out3 = await SMSImporter.importText(outgoingFawriSMS, context: context, forceApprove: true)
+        let tx3 = try #require(out3.transaction)
+        #expect(tx3.accountID == myAccount.id)
+        #expect(tx3.isPending == false)
+        #expect(tx3.smsAccountSuffix == "3876")
+        #expect(tx3.smsRecipientSuffix == "5544")
+        #expect(abs(myAccount.balance - 150.000) < 0.0001)
+
+        // 4. Arabic SMS mentioning account 3876
+        let arabicSMS = "تم خصم مبلغ 10.000 د.ب من حساب 3876 لدى بتلكو. الرصيد المتاح 140.000 د.ب"
+        let out4 = await SMSImporter.importText(arabicSMS, context: context, forceApprove: true)
+        let tx4 = try #require(out4.transaction)
+        #expect(tx4.accountID == myAccount.id)
+        #expect(tx4.isPending == false)
+        #expect(tx4.smsAccountSuffix == "3876")
+        #expect(abs(myAccount.balance - 140.000) < 0.0001)
+    }
 }

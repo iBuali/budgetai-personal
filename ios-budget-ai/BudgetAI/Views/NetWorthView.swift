@@ -228,16 +228,17 @@ struct AccountEditor: View {
                 }
                 if kind == .bank || kind == .creditCard || kind == .cash {
                     Section {
-                        TextField(kind == .creditCard ? "Card number or last digits, e.g. 4821" : "Account or card digits, e.g. 4821", text: $smsMatch)
-                            .keyboardType(.numberPad)
+                        TextField(kind == .creditCard ? "Card number or last digits, e.g. 4821" : "Account or card digits, e.g. 3876 or 3876, 4821", text: $smsMatch)
+                            .keyboardType(.numbersAndPunctuation)
                             .onChange(of: smsMatch) { _, v in
-                                let digits = String(v.filter(\.isNumber).prefix(19))
-                                if digits != v { smsMatch = digits }
+                                let normalized = SMSParser.normalizeArabicDigits(v)
+                                let filtered = String(normalized.filter { $0.isNumber || $0 == "," || $0 == " " }.prefix(48))
+                                if filtered != v { smsMatch = filtered }
                             }
                     } header: {
                         Text(kind == .creditCard ? "Card number or digits in SMS" : "Card or account digits in SMS")
                     } footer: {
-                        Text(kind == .creditCard ? "Bank SMS messages mentioning this card number or its last digits will be routed to this credit card automatically." : "Bank messages mentioning these digits are filed to this account automatically.")
+                        Text(kind == .creditCard ? "Bank SMS messages mentioning this card number or its last digits will be routed to this credit card automatically." : "Bank messages mentioning these IBAN, account, or card digits are filed to this account automatically. Separate multiple numbers with a comma (e.g. 3876, 4821).")
                     }
                 }
                 if kind == .creditCard {
@@ -323,6 +324,27 @@ struct AccountEditor: View {
         target.paymentDueReminder = kind == .creditCard && paymentDueReminder
         target.paymentDueDate = paymentDueDate
         target.paymentReminderDaysBefore = reminderDaysBefore
+        let trimmedMatch = target.smsMatch.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedMatch.isEmpty {
+            let txs = (try? context.fetch(FetchDescriptor<MoneyTransaction>())) ?? []
+            for tx in txs where tx.source == .sms && tx.accountID == nil {
+                let raw = tx.rawText ?? ""
+                let reparsedSuffix = raw.isEmpty ? nil : SMSParser.extractSuffixes(in: raw).accountSuffix
+                let candidateSuffix = reparsedSuffix ?? tx.smsAccountSuffix
+                let matchedBySuffix = candidateSuffix.map { SMSParser.digitsMatch(accountMatch: trimmedMatch, query: $0) } ?? false
+                let matchedInText = !raw.isEmpty && SMSParser.findAccountInSMSText(raw, detectedBank: tx.smsBank, in: context)?.id == target.id
+                if matchedBySuffix || matchedInText {
+                    if let reparsedSuffix, !reparsedSuffix.isEmpty {
+                        tx.smsAccountSuffix = reparsedSuffix
+                    }
+                    if tx.isPending {
+                        tx.accountID = target.id
+                    } else {
+                        Ledger.edit(tx, context: context) { $0.accountID = target.id }
+                    }
+                }
+            }
+        }
         Ledger.recordSnapshot(context: context)
         try? context.save()
         let all = (try? context.fetch(FetchDescriptor<Account>())) ?? []

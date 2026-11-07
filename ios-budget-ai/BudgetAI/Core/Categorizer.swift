@@ -990,11 +990,13 @@ enum SMSParser {
             let ruleSubcat = userRule.subcategoryRaw.flatMap(SpendCategory.init(rawValue:))
             let resolvedBank = userRule.bank ?? bankInfo.bank
             let matchedBankAcc = context.flatMap { ctx in
-                if let d = suffixes.accountSuffix, let acc = findMatchingAccount(forBank: resolvedBank, senderOrPhone: effectiveSender, digits: d, in: ctx) {
+                if let d = suffixes.accountSuffix, let acc = findMatchingAccount(suffix: d, in: ctx) {
                     return acc
                 }
-                return findAccountInSMSText(normalized, detectedBank: resolvedBank, in: ctx)
-                    ?? findMatchingAccount(forBank: resolvedBank, senderOrPhone: effectiveSender, digits: suffixes.accountSuffix, in: ctx)
+                if let acc = findAccountInSMSText(normalized, detectedBank: resolvedBank, in: ctx) {
+                    return acc
+                }
+                return findMatchingAccount(forBank: resolvedBank, senderOrPhone: effectiveSender, digits: suffixes.accountSuffix, in: ctx)
             }
             let resolvedRuleAccountID: UUID? = userRule.accountIDString.flatMap(UUID.init(uuidString:))
                 ?? matchedBankAcc?.id
@@ -1074,11 +1076,13 @@ enum SMSParser {
         )
 
         let matchedSourceAccount = context.flatMap { ctx in
-            if let d = suffixes.accountSuffix, let acc = findMatchingAccount(forBank: bankInfo.bank, senderOrPhone: effectiveSender, digits: d, in: ctx) {
+            if let d = suffixes.accountSuffix, let acc = findMatchingAccount(suffix: d, in: ctx) {
                 return acc
             }
-            return findAccountInSMSText(singleLine, detectedBank: bankInfo.bank, in: ctx)
-                ?? findMatchingAccount(forBank: bankInfo.bank, senderOrPhone: effectiveSender, digits: suffixes.accountSuffix, in: ctx)
+            if let acc = findAccountInSMSText(singleLine, detectedBank: bankInfo.bank, in: ctx) {
+                return acc
+            }
+            return findMatchingAccount(forBank: bankInfo.bank, senderOrPhone: effectiveSender, digits: suffixes.accountSuffix, in: ctx)
         }
         let resolvedSourceAccountID = matchedSourceAccount?.id ?? senderRuleAccountID
 
@@ -1378,7 +1382,19 @@ enum SMSParser {
             }
         }
 
-        let card = context.flatMap { findCreditCardAccount(cardName: cardName, in: $0) }
+        let suffixes = extractSuffixes(in: singleLine)
+        let card = context.flatMap { ctx -> Account? in
+            if let d = suffixes.accountSuffix,
+               let byDigits = findMatchingAccount(suffix: d, in: ctx),
+               byDigits.kind == .creditCard {
+                return byDigits
+            }
+            if let byText = findAccountInSMSText(singleLine, detectedBank: bankInfo.bank, in: ctx),
+               byText.kind == .creditCard {
+                return byText
+            }
+            return findCreditCardAccount(cardName: cardName, in: ctx)
+        }
         let displayCard = card?.name ?? cardName.map { $0.capitalized } ?? "Visa card"
         let reason = card != nil
             ? "Credit card payment confirmation: paid \(displayCard) from your bank account. 'Available Bal' is the card's available limit, not the bank balance."
@@ -1393,7 +1409,7 @@ enum SMSParser {
             subcategory: nil,
             date: resolvedDate,
             accountHint: bankInfo.bank,
-            cardDigits: nil,
+            cardDigits: suffixes.accountSuffix,
             balance: balance,
             note: buildNote(rail: "Card payment", reference: reference),
             transactionType: .internalTransfer,
@@ -1402,8 +1418,8 @@ enum SMSParser {
             confidence: .high,
             classificationReason: reason,
             referenceNumber: reference,
-            accountSuffix: nil,
-            recipientSuffix: nil,
+            accountSuffix: suffixes.accountSuffix,
+            recipientSuffix: suffixes.recipientSuffix,
             timeString: timeString,
             sender: sender,
             toAccountID: card?.id,
@@ -1616,11 +1632,12 @@ enum SMSParser {
         // - "Fawri+ transfer of BHD ... from ... credited to your account"
         // - Arabic: "حوالة واردة" / "تحويل وارد" / "حوالة فوري+ واردة" / "تم إيداع حوالة" / "تم استلام تحويل"
         let incomingPatterns = [
-            "\\breceived\\s+(?:a\\s+)?(?:fawri\\+?|transfer)\\b",
-            "\\b(?:fawri\\+?|transfer)\\b.*\\breceived\\s+from\\b",
-            "\\byour\\s+(?:a/c|acct|account|iban)\\b.*\\b(?:has\\s+been\\s+)?credited\\b",
-            "\\bcredited\\s+to\\s+your\\s+(?:a/c|acct|account|iban)\\b",
-            "\\b(?:inward|incoming)\\s+(?:fawri\\+?|transfer|remittance)\\b",
+            "\\breceived\\s+(?:a\\s+)?(?:fawri\\+?|transfer|payment|amount)\\b",
+            "\\b(?:fawri\\+?|transfer|payment|amount)\\b.*\\breceived\\s+(?:from|in|into|to)\\b",
+            "\\breceived\\s+from\\s+(?:iban|a/c|acct|acc|account)\\b",
+            "\\byour\\s+(?:a/c|acct|acc|account|iban)\\b.*\\b(?:has\\s+been\\s+)?credited\\b",
+            "\\bcredited\\s+to\\s+your\\s+(?:a/c|acct|acc|account|iban)\\b",
+            "\\b(?:inward|incoming)\\s+(?:fawri\\+?|transfer|remittance|payment)\\b",
             "حوالة واردة", "تحويل وارد", "حوالة فوري\\+? واردة", "تم إيداع حوالة", "تم ايداع حوالة", "تم استلام حوالة", "تم استلام تحويل"
         ]
 
@@ -1678,20 +1695,63 @@ enum SMSParser {
         return stripped.lowercased()
     }
 
+    /// Extracts all distinct candidate digit strings configured in an account's `smsMatch`
+    /// (supports single 3-19 digit numbers, full 16-digit card numbers, masked IBANs, or comma/space-separated multiple suffixes like "3876, 4821").
+    static func accountMatchCandidates(_ raw: String) -> [String] {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+        var results: [String] = []
+
+        let whole = cleanAccountDigits(trimmed)
+        if !whole.isEmpty {
+            results.append(whole)
+        }
+
+        // Also support comma/slash/semicolon separated entries (e.g. "3876, 4821")
+        let explicitParts = trimmed.components(separatedBy: CharacterSet(charactersIn: ",;|/"))
+        if explicitParts.count > 1 {
+            for part in explicitParts {
+                let c = cleanAccountDigits(part)
+                if c.count >= 3 && !results.contains(c) {
+                    results.append(c)
+                }
+            }
+        } else {
+            // If user separated 2 or 3 distinct 3-6 digit suffixes by space (e.g. "3876 4821", not a 4x4 16-digit card number)
+            let spaceParts = trimmed.split(whereSeparator: \.isWhitespace).map(String.init)
+            if (2...3).contains(spaceParts.count), spaceParts.allSatisfy({ (3...6).contains($0.filter(\.isNumber).count) }) {
+                for part in spaceParts {
+                    let c = cleanAccountDigits(part)
+                    if c.count >= 3 && !results.contains(c) {
+                        results.append(c)
+                    }
+                }
+            }
+        }
+        return results
+    }
+
     /// Determines if an account's configured `smsMatch` matches the query digits or card number from an SMS.
     /// Handles exact matches, trailing suffix matches (e.g. user entered 16-digit card number and SMS has last 4 digits,
-    /// or user entered last 4 digits and SMS has card ending in those digits), and masked card prefixes/suffixes.
+    /// or user entered last 4 digits and SMS has card ending in those digits), masked card prefixes/suffixes,
+    /// and multiple comma/space-separated suffixes.
     static func digitsMatch(accountMatch: String, query: String) -> Bool {
-        let accClean = cleanAccountDigits(accountMatch)
         let qClean = cleanAccountDigits(query)
-        guard !accClean.isEmpty, !qClean.isEmpty else { return false }
-        if accClean == qClean { return true }
-        if accClean.hasSuffix(qClean) || qClean.hasSuffix(accClean) { return true }
-        // If either digits contains full or masked digits (at least 4 digits), compare trailing 4 digits
-        if accClean.count >= 4 && qClean.count >= 4 {
-            let accLast4 = String(accClean.suffix(4))
-            let qLast4 = String(qClean.suffix(4))
-            if accLast4 == qLast4 { return true }
+        guard !qClean.isEmpty else { return false }
+        let candidates = accountMatchCandidates(accountMatch)
+        guard !candidates.isEmpty else { return false }
+
+        for accClean in candidates {
+            guard !accClean.isEmpty else { continue }
+            if accClean == qClean { return true }
+            if min(accClean.count, qClean.count) >= 3 && (accClean.hasSuffix(qClean) || qClean.hasSuffix(accClean)) {
+                return true
+            }
+            if accClean.count >= 4 && qClean.count >= 4 {
+                let accLast4 = String(accClean.suffix(4))
+                let qLast4 = String(qClean.suffix(4))
+                if accLast4 == qLast4 { return true }
+            }
         }
         return false
     }
@@ -1745,13 +1805,14 @@ enum SMSParser {
         ]
 
         let creditPatterns = [
-            "\\breceived\\s+(?:a\\s+)?(?:fawri\\+?|transfer)\\b",
-            "\\b(?:fawri\\+?|transfer)\\b.*\\breceived\\s+from\\b",
-            "\\byour\\s+(?:a/c|acct|account|iban)\\b.*\\b(?:has\\s+been\\s+|was\\s+)?credited\\b",
-            "\\b(?:a/c|acct|account|iban)\\s*(?:ending\\s*)?[0-9*x•#]+\\s*(?:has\\s+been\\s+|was\\s+)?credited\\b",
+            "\\breceived\\s+(?:a\\s+)?(?:fawri\\+?|transfer|payment|amount)\\b",
+            "\\b(?:fawri\\+?|transfer|payment|amount)\\b.*\\breceived\\s+(?:from|in|into|to)\\b",
+            "\\breceived\\s+from\\s+(?:iban|a/c|acct|acc|account)\\b",
+            "\\byour\\s+(?:a/c|acct|acc|account|iban)\\b.*\\b(?:has\\s+been\\s+|was\\s+)?credited\\b",
+            "\\b(?:a/c|acct|acc|account|iban)\\s*(?:ending\\s*)?[0-9*x•#]+\\s*(?:has\\s+been\\s+|was\\s+)?credited\\b",
             "\\bcredited\\s+(?:to\\s+your|with)\\b",
             "\\bcredit\\s+(?:transaction|txn|alert|advice|amount|of|to)\\b",
-            "\\b(?:inward|incoming)\\s+(?:fawri\\+?|transfer|remittance)\\b",
+            "\\b(?:inward|incoming)\\s+(?:fawri\\+?|transfer|remittance|payment)\\b",
             "\\breceived\\s+in\\s+your\\b",
             "\\bdeposit(?:ed)?\\b",
             "حوالة واردة", "تحويل وارد", "حوالة فوري\\+? واردة", "تم إيداع", "تم ايداع", "تم استلام", "وارد لحسابك", "تمت إضافة"
@@ -1843,18 +1904,11 @@ enum SMSParser {
 
         // 1. Primary rule: When digits are provided (card number or account suffix from SMS),
         // MATCHING DIGITS HAS HIGHEST PRIORITY!
-        // A specific card or account number in the SMS should always route to the matching account
-        // (especially credit cards which may not have bank name in their title or institution).
+        // Any account where the user configured "Card or account digits in SMS" (`smsMatch`) matching `digits`
+        // is matched first, regardless of whether the account has a bank name or institution set.
         if let digits, !digits.isEmpty {
             let matchingDigitsAccounts = accounts.filter { acc in
-                guard digitsMatch(accountMatch: acc.smsMatch, query: digits) else { return false }
-                // Do not match a regular bank account if the SMS explicitly identifies a different bank
-                if hasBank, let b = trimmedBank, acc.kind != .creditCard,
-                   bankName(forAccount: acc) != nil,
-                   !accountMatchesBank(acc, bank: b) {
-                    return false
-                }
-                return true
+                digitsMatch(accountMatch: acc.smsMatch, query: digits)
             }
             if !matchingDigitsAccounts.isEmpty {
                 // a. If an account matches BOTH digits and the bank name/institution, that's top priority
@@ -1868,32 +1922,29 @@ enum SMSParser {
                 }
                 // c. Exact digit match
                 let cleanD = cleanAccountDigits(digits)
-                if let exact = matchingDigitsAccounts.first(where: { cleanAccountDigits($0.smsMatch) == cleanD }) {
+                if let exact = matchingDigitsAccounts.first(where: { accountMatchCandidates($0.smsMatch).contains(cleanD) }) {
                     return exact
                 }
                 return matchingDigitsAccounts.first
             }
         }
 
-        // 2. Bank matching (only when digits were not provided or no account had matching digits)
+        // 2. Bank matching (when digits were not provided or no account had matching digits)
         let sortedAccounts = accounts.sorted { ($0.kind.isLiquid ? 0 : 1) < ($1.kind.isLiquid ? 0 : 1) }
         if hasBank, let b = trimmedBank {
-            let matchingBankAccounts = sortedAccounts.filter { acc in
-                guard accountMatchesBank(acc, bank: b) else { return false }
-                // If the SMS specified an account suffix (e.g. 0020) and this account has a different suffix configured, don't match it
-                if let digits, !digits.isEmpty {
-                    let accDigits = cleanAccountDigits(acc.smsMatch)
-                    if !accDigits.isEmpty && !digitsMatch(accountMatch: acc.smsMatch, query: digits) {
-                        return false
-                    }
-                }
-                return true
-            }
+            let matchingBankAccounts = sortedAccounts.filter { accountMatchesBank($0, bank: b) }
             if !matchingBankAccounts.isEmpty {
                 if let senderOrPhone,
                    let savedAccID = SMSUserRules.accountID(forSender: senderOrPhone),
                    let savedInBank = matchingBankAccounts.first(where: { $0.id == savedAccID }) {
                     return savedInBank
+                }
+                // If multiple accounts exist for this bank, prefer one without a conflicting smsMatch
+                if let digits, !digits.isEmpty,
+                   let unconfiguredOrMatching = matchingBankAccounts.first(where: {
+                       $0.smsMatch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || digitsMatch(accountMatch: $0.smsMatch, query: digits)
+                   }) {
+                    return unconfiguredOrMatching
                 }
                 return matchingBankAccounts.first
             }
@@ -1902,13 +1953,8 @@ enum SMSParser {
         // 3. Check user-saved sender-to-account rule (only if bank was nil or compatible)
         if let senderOrPhone, let savedAccID = SMSUserRules.accountID(forSender: senderOrPhone),
            let acc = accounts.first(where: { $0.id == savedAccID }) {
-            let bankConflict = hasBank && !accountMatchesBank(acc, bank: trimmedBank!)
-            let digitsConflict: Bool = {
-                guard let digits, !digits.isEmpty else { return false }
-                let accDigits = cleanAccountDigits(acc.smsMatch)
-                return !accDigits.isEmpty && !digitsMatch(accountMatch: acc.smsMatch, query: digits)
-            }()
-            if !bankConflict && !digitsConflict {
+            let bankConflict = hasBank && bankName(forAccount: acc) != nil && !accountMatchesBank(acc, bank: trimmedBank!)
+            if !bankConflict {
                 return acc
             }
         }
@@ -1933,38 +1979,76 @@ enum SMSParser {
         return nil
     }
 
-    /// Scans raw SMS text to check if any registered account's `smsMatch` (full card number or card digits)
-    /// appears explicitly in the message. Strongly prioritizes `.creditCard` accounts when card terms appear,
-    /// and never matches short 3–4 digit substrings inside unrelated IBANs, balances, or dates.
+    /// Scans raw SMS text to check if any registered account's `smsMatch` (card/account/IBAN digits, 3–19 digits)
+    /// appears in the message as an account/card/IBAN token, while ignoring dates, times, amounts, balances,
+    /// helpline numbers, and middle-of-IBAN digits.
     static func findAccountInSMSText(_ text: String, detectedBank: String? = nil, in context: ModelContext) -> Account? {
         let accounts = (try? context.fetch(FetchDescriptor<Account>(sortBy: [SortDescriptor(\.createdAt)]))) ?? []
         guard !accounts.isEmpty else { return nil }
-        let cleanText = text.replacingOccurrences(of: "\n", with: " ")
+        let cleanText = normalizeText(text).replacingOccurrences(of: "\n", with: " ")
         let lowerText = cleanText.lowercased()
         let hasCardKeyword = lowerText.contains("card") || lowerText.contains("بطاق") || lowerText.contains("visa") || lowerText.contains("mastercard")
         let trimmedBank = detectedBank?.trimmingCharacters(in: .whitespacesAndNewlines)
         let hasBank = (trimmedBank?.isEmpty == false)
 
-        var matchedAccounts: [(account: Account, matchLength: Int)] = []
+        // Scrub dates, times, monetary amounts/balances, helpline phones, and external counterparty clauses
+        // so 3-6 digit account/card suffixes only match actual account/card/IBAN tokens in the SMS.
+        var scrubbed = cleanText
+        let scrubPatterns = [
+            // Dates and times (e.g. 2026/11/06, 22/04/26, 17:46)
+            "\\b[0-9]{1,4}[/\\-][0-9]{1,2}(?:[/\\-][0-9]{1,4})?\\b",
+            "\\b[0-2]?[0-9]:[0-5][0-9](?::[0-5][0-9])?\\b",
+            // Currency + amount / balance
+            "(?i)\\b(?:\(allCurrencyPattern))\\s*\\.?\\s*[0-9][0-9,]*(?:\\.[0-9]+)?",
+            "(?i)[0-9][0-9,]*(?:\\.[0-9]+)?\\s*(?:\(allCurrencyPattern))\\b",
+            "\\b[0-9][0-9,]*\\.[0-9]{2,3}\\b",
+            // Helpline / tel numbers
+            "(?i)\\b(?:tel|call|phone|contact|helpline|from|sender)\\s*[:.\\-]?\\s*(?:\\+?973\\s*|00973\\s*)?[0-9]{4}\\s*[0-9]{4}\\b"
+        ]
+        for pat in scrubPatterns {
+            scrubbed = scrubbed.replacingOccurrences(of: pat, with: " ", options: .regularExpression)
+        }
+        // Strip external counterparty IBAN/account so only the user's own account/card token remains primary
+        let isOutgoingCreditedToIBAN = lowerText.range(of: "\\bpayment\\b.*\\bwas\\s+credited\\s+to\\s+iban\\s+ending\\b", options: .regularExpression) != nil
+        let isIncoming = !isOutgoingCreditedToIBAN && lowerText.range(
+            of: "\\breceived\\s+(?:from|a\\s+|in|into|to)|\\bcredit\\s+transaction|\\b(?:has\\s+been|was)\\s+credited|\\bcredited\\s+(?:to\\s+your|with)|حوالة واردة|تحويل وارد|تم إيداع|تم ايداع|تم استلام",
+            options: .regularExpression
+        ) != nil
+        if isIncoming {
+            scrubbed = scrubbed.replacingOccurrences(
+                of: "(?i)(?:received\\s+from|\\bfrom)\\s+(?!your\\b)(?:iban|a/c|acct|acc\\.?|account)\\s*(?:ending(?:\\s+with|\\s+in)?|no\\.?|number|#)?\\s*[:#.\\-]?\\s*[A-Z0-9*xX•#\\-]+",
+                with: " ",
+                options: .regularExpression
+            )
+        } else {
+            scrubbed = scrubbed.replacingOccurrences(
+                of: "(?i)(?:credited\\s+to|transferred\\s+to|sent\\s+to|\\bto)\\s+(?!your\\b)(?:iban|a/c|acct|acc\\.?|account)\\s*(?:ending(?:\\s+with|\\s+in)?|no\\.?|number|#)?\\s*[:#.\\-]?\\s*[A-Z0-9*xX•#\\-]+",
+                with: " ",
+                options: .regularExpression
+            )
+        }
+
+        var matchedAccounts: [(account: Account, matchLength: Int, matchesBank: Bool)] = []
         for acc in accounts {
-            if hasBank, let b = trimmedBank, acc.kind != .creditCard,
-               bankName(forAccount: acc) != nil,
-               !accountMatchesBank(acc, bank: b) {
-                continue
-            }
-            let m = cleanAccountDigits(acc.smsMatch)
-            guard m.count >= 4 else { continue }
-            // Full account / card number (8+ digits) appearing verbatim in SMS text
-            if m.count >= 8 && cleanText.contains(m) {
-                matchedAccounts.append((acc, m.count))
-                continue
-            }
-            // If user configured a full 12-16 digit card number, check its last 4 digits as a standalone token when card keywords appear
-            if m.count >= 12 && (hasCardKeyword || acc.kind == .creditCard) {
-                let last4 = NSRegularExpression.escapedPattern(for: String(m.suffix(4)))
-                let tokenPattern = "(?:\\b|[xX*#•.])\(last4)\\b"
-                if cleanText.range(of: tokenPattern, options: .regularExpression) != nil {
-                    matchedAccounts.append((acc, 4))
+            let candidates = accountMatchCandidates(acc.smsMatch)
+            guard !candidates.isEmpty else { continue }
+            let bankMatch = hasBank ? accountMatchesBank(acc, bank: trimmedBank) : false
+
+            for m in candidates where m.count >= 3 {
+                // 1. Full account / card number (8+ digits) appearing verbatim in SMS text
+                if m.count >= 8 && cleanText.contains(m) {
+                    matchedAccounts.append((acc, m.count, bankMatch))
+                    break
+                }
+                // 2. Check trailing 4 digits if user entered an 8-19 digit card/account/IBAN number
+                let queryToken = m.count >= 8 ? String(m.suffix(4)) : m
+                let escaped = NSRegularExpression.escapedPattern(for: queryToken)
+                // Matches token at the end of a word or masked IBAN/card (e.g. "IBAN 3876", "*4821", "BH69ALSA00219XXXXX0020")
+                // Never matches middle digits like "00219" in "BH69ALSA00219XXXXX0020" because of trailing \b
+                let tokenPattern = "(?:^|[^0-9])\(escaped)\\b"
+                if scrubbed.range(of: tokenPattern, options: .regularExpression) != nil {
+                    matchedAccounts.append((acc, queryToken.count, bankMatch))
+                    break
                 }
             }
         }
@@ -1974,6 +2058,7 @@ enum SMSParser {
             return cardAcc.account
         }
         matchedAccounts.sort {
+            if $0.matchesBank != $1.matchesBank { return $0.matchesBank && !$1.matchesBank }
             if $0.matchLength != $1.matchLength { return $0.matchLength > $1.matchLength }
             if ($0.account.kind == .creditCard) != ($1.account.kind == .creditCard) {
                 return $0.account.kind == .creditCard
@@ -2009,13 +2094,13 @@ enum SMSParser {
 
     // MARK: - Field Extractors (Reference, Suffixes, Balance, Date/Time, Amount, Merchant)
 
-    /// Extracts transaction reference numbers such as "ref: BIB103KAK000KZUM", "Ref No: 123456", "رقم المرجع: ...".
+    /// Extracts transaction reference numbers such as "ref: BIB103KAK000KZUM", "ref. ALS103KAU005SVOW", "Ref No: 123456", "رقم المرجع: ...".
     static func referenceNumber(in raw: String) -> String? {
         let text = normalizeText(raw)
         let patterns = [
-            "(?i)\\b(?:ref(?:erence)?\\s*(?:no\\.?|number|id|#)?|txn\\s*(?:id|ref|no\\.?)|transaction\\s*(?:id|ref)|auth(?:orization)?\\s*(?:code|id))\\s*[:\\-#=]\\s*([A-Z0-9][A-Z0-9\\-]{3,30})\\b",
-            "(?i)\\b(?:ref(?:erence)?)\\s+([A-Z0-9][A-Z0-9\\-]{5,30})\\b",
-            "(?i)(?:رقم\\s*المرجع|المرجع|رقم\\s*العملية)\\s*[:\\-#=]?\\s*([A-Za-z0-9\\-]{4,30})\\b"
+            "(?i)\\b(?:ref(?:erence)?\\.?\\s*(?:no\\.?|number|id|#)?|txn\\s*(?:id|ref|no\\.?)|transaction\\s*(?:id|ref)|auth(?:orization)?\\s*(?:code|id))\\s*[:\\-#=.]\\s*([A-Z0-9][A-Z0-9\\-]{3,30})\\b",
+            "(?i)\\b(?:ref(?:erence)?\\.?)\\s+([A-Z0-9][A-Z0-9\\-]{5,30})\\b",
+            "(?i)(?:رقم\\s*المرجع|المرجع|رقم\\s*العملية)\\s*[:\\-#=.]?\\s*([A-Za-z0-9\\-]{4,30})\\b"
         ]
         for pattern in patterns {
             guard let regex = try? NSRegularExpression(pattern: pattern),
@@ -2029,18 +2114,46 @@ enum SMSParser {
         return nil
     }
 
-    /// Distinguishes the user's source account/card suffix (`accountSuffix`) from a recipient IBAN/account suffix (`recipientSuffix`).
+    /// Distinguishes the user's own account/card suffix (`accountSuffix`) from a counterparty/recipient IBAN/account suffix (`recipientSuffix`).
     static func extractSuffixes(in raw: String) -> (accountSuffix: String?, recipientSuffix: String?) {
         let text = normalizeText(raw).replacingOccurrences(of: "\n", with: " ")
+        let lower = text.lowercased()
+
+        // Detect whether this message is an INCOMING credit/transfer where "from <IBAN/account>" is the external sender
+        // and "to <IBAN/account>" is the user's own receiving account (e.g. "Fawri+ payment BHD5.000 received from IBAN 0001 to IBAN 3876").
+        let isOutgoingCreditedToIBAN = lower.range(of: "\\bpayment\\b.*\\bwas\\s+credited\\s+to\\s+iban\\s+ending\\b", options: .regularExpression) != nil
+        let isIncomingContext: Bool = {
+            if isOutgoingCreditedToIBAN { return false }
+            let incomingSignals = [
+                "\\breceived\\s+from\\b",
+                "\\breceived\\s+(?:a\\s+)?(?:fawri\\+?|transfer|payment|amount)\\b",
+                "\\breceived\\s+(?:in|into|to)\\b",
+                "\\bcredit\\s+(?:transaction|txn|alert|advice|amount|of)\\b",
+                "\\b(?:has\\s+been|was|is)\\s+credited\\b",
+                "\\bcredited\\s+(?:to\\s+your|with)\\b",
+                "\\b(?:inward|incoming)\\s+(?:fawri\\+?|transfer|remittance|payment)\\b",
+                "حوالة واردة", "تحويل وارد", "حوالة فوري\\+? واردة", "تم إيداع", "تم ايداع", "تم استلام", "وارد لحسابك"
+            ]
+            return incomingSignals.contains(where: { lower.range(of: $0, options: .regularExpression) != nil })
+        }()
 
         var recipientSuffix: String?
-        let recipientPatterns = [
-            "(?i)(?:credited\\s+to|transferred\\s+to|sent\\s+to|\\bto)\\s+(?!your\\b)(?:iban|a/c|acct|account)\\s*(?:ending(?:\\s+with|\\s+in)?|no\\.?|number)?\\s*[:\\-]?\\s*(?:[A-Z]{2}[0-9A-Z*xX•#\\-]*([0-9]{4})|([0-9]{3,6}))\\b",
-            "(?i)(?:beneficiary|recipient)\\s+(?:iban|a/c|acct|account)?\\s*(?:ending(?:\\s+with|\\s+in)?|no\\.?|number)?\\s*[:\\-]?\\s*(?:[A-Z]{2}[0-9A-Z*xX•#\\-]*([0-9]{4})|([0-9]{3,6}))\\b",
-            "(?i)\\biban\\s+ending\\s+(?:with\\s+|in\\s+)?[xX*#•]*([0-9]{3,6})\\b",
-            "(?i)(?:إلى|الى|لصالح)\\s*(?!حسابك)(?:حساب|آيبان|ايبان)\\s*(?:ينتهي\\s*بـ?|رقم)?\\s*[:\\-]?\\s*(?:[A-Z]{2}[0-9A-Z*xX•#\\-]*([0-9]{4})|([0-9]{3,6}))\\b"
-        ]
-        for pattern in recipientPatterns {
+        let counterpartyPatterns: [String] = isIncomingContext
+            ? [
+                // Incoming transfer: "received from IBAN 0001" or "from account 0001" (when NOT "from your") is the external sender
+                "(?i)(?:received\\s+from|\\bfrom)\\s+(?!your\\b)(?:iban|a/c|acct|acc\\.?|account)\\s*(?:ending(?:\\s+with|\\s+in)?|no\\.?|number|#)?\\s*[:\\-]?\\s*(?:[A-Z]{2}[0-9A-Z*xX•#\\-]*([0-9]{4})|[xX*#•.]*([0-9]{3,6}))\\b",
+                "(?i)(?:sender)\\s+(?:iban|a/c|acct|acc\\.?|account)?\\s*(?:ending(?:\\s+with|\\s+in)?|no\\.?|number|#)?\\s*[:\\-]?\\s*(?:[A-Z]{2}[0-9A-Z*xX•#\\-]*([0-9]{4})|[xX*#•.]*([0-9]{3,6}))\\b",
+                "(?i)(?:من)\\s*(?!حسابك)(?:حساب|آيبان|ايبان|الأيبان|الايبان)\\s*(?:ينتهي\\s*بـ?|رقم)?\\s*[:\\-]?\\s*(?:[A-Z]{2}[0-9A-Z*xX•#\\-]*([0-9]{4})|[xX*#•.]*([0-9]{3,6}))\\b"
+            ]
+            : [
+                // Outgoing transfer: "credited to IBAN ending 0846", "to IBAN 0846", "beneficiary account 0846" is the external recipient
+                "(?i)(?:credited\\s+to|transferred\\s+to|sent\\s+to|\\bto)\\s+(?!your\\b)(?:iban|a/c|acct|acc\\.?|account)\\s*(?:ending(?:\\s+with|\\s+in)?|no\\.?|number|#)?\\s*[:\\-]?\\s*(?:[A-Z]{2}[0-9A-Z*xX•#\\-]*([0-9]{4})|[xX*#•.]*([0-9]{3,6}))\\b",
+                "(?i)(?:beneficiary|recipient)\\s+(?:iban|a/c|acct|acc\\.?|account)?\\s*(?:ending(?:\\s+with|\\s+in)?|no\\.?|number|#)?\\s*[:\\-]?\\s*(?:[A-Z]{2}[0-9A-Z*xX•#\\-]*([0-9]{4})|[xX*#•.]*([0-9]{3,6}))\\b",
+                "(?i)\\biban\\s+ending\\s+(?:with\\s+|in\\s+)?[xX*#•]*([0-9]{3,6})\\b",
+                "(?i)(?:إلى|الى|لصالح)\\s*(?!حسابك)(?:حساب|آيبان|ايبان|الأيبان|الايبان)\\s*(?:ينتهي\\s*بـ?|رقم)?\\s*[:\\-]?\\s*(?:[A-Z]{2}[0-9A-Z*xX•#\\-]*([0-9]{4})|[xX*#•.]*([0-9]{3,6}))\\b"
+            ]
+
+        for pattern in counterpartyPatterns {
             if let regex = try? NSRegularExpression(pattern: pattern),
                let m = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) {
                 for groupIdx in 1..<m.numberOfRanges {
@@ -2053,37 +2166,50 @@ enum SMSParser {
             }
         }
 
-        // Remove recipient clause before searching for source card/account suffix so recipient IBAN is never confused with user's card/account
-        let textWithoutRecipient = text.replacingOccurrences(
-            of: "(?i)(?:credited\\s+to|transferred\\s+to|sent\\s+to|\\bto)\\s+(?!your\\b)(?:iban|a/c|acct|account)\\s*(?:ending(?:\\s+with|\\s+in)?|no\\.?|number)?\\s*[:\\-]?\\s*(?:[A-Z]{2}[0-9A-Z*xX•#\\-]*?)?[0-9]{3,6}\\b",
-            with: " ",
-            options: .regularExpression
-        )
+        // Remove external counterparty clause before searching for the user's own account/card suffix
+        let textWithoutCounterparty: String = {
+            if isIncomingContext {
+                return text.replacingOccurrences(
+                    of: "(?i)(?:received\\s+from|\\bfrom)\\s+(?!your\\b)(?:iban|a/c|acct|acc\\.?|account)\\s*(?:ending(?:\\s+with|\\s+in)?|no\\.?|number|#)?\\s*[:\\-]?\\s*(?:[A-Z]{2}[0-9A-Z*xX•#\\-]*?)?[0-9]{3,6}\\b",
+                    with: " ",
+                    options: .regularExpression
+                )
+            } else {
+                return text.replacingOccurrences(
+                    of: "(?i)(?:credited\\s+to|transferred\\s+to|sent\\s+to|\\bto)\\s+(?!your\\b)(?:iban|a/c|acct|acc\\.?|account)\\s*(?:ending(?:\\s+with|\\s+in)?|no\\.?|number|#)?\\s*[:\\-]?\\s*(?:[A-Z]{2}[0-9A-Z*xX•#\\-]*?)?[0-9]{3,6}\\b",
+                    with: " ",
+                    options: .regularExpression
+                )
+            }
+        }()
 
+        let acctNouns = "(?:credit\\s+card|debit\\s+card|prepaid\\s+card|visa(?:\\s+card)?|mastercard|card|a/c|acct|acc\\.?|account|iban)"
         var accountSuffix: String?
         let sourcePatterns = [
             // Full or masked GCC IBAN (e.g. "BH69ALSA00219XXXXX0020", "from your account BH69ALSA00219XXXXX0020") -> always extracts trailing 4 digits ("0020")
             "(?i)\\b(?:BH|SA|AE|KW|QA|OM)[0-9*xX•#]{2}[A-Z*xX•#]{4}[0-9A-Z*xX•#\\-]*([0-9]{4})\\b",
             "(?i)\\b(?:BH|SA|AE|KW|QA|OM)[0-9*xX•#]{2}[A-Z*xX•#]{4}[0-9*xX•#\\-]*?[xX*#•]+([0-9]{3,6})\\b",
-            // "Your credit card ending 1234", "using card no: 1234", "using visa card ending with 1234"
-            "(?i)(?:your|using)\\s+(?:credit\\s+card|debit\\s+card|prepaid\\s+card|visa\\s+card|mastercard|card|a/c|acct|account|iban)\\s*(?:ending(?:\\s+with|\\s+in)?|no\\.?|number|#)?\\s*[:#=.()\\-]*\\s*(?:[0-9]{2,12}[\\s\\-]*[xX*#•]{1,10}[\\s\\-]*|(?:xx|[xX*#•.])*)+([0-9]{3,6})\\b(?![\\s\\-]*[xX*#•]+[\\s\\-]*[0-9])",
+            // "Your credit card ending 1234", "to IBAN 3876", "to account 0846", "using card no: 1234", "in your account 3876"
+            "(?i)(?:your|using|to|in|into|on)\\s+(?:your\\s+)?\(acctNouns)\\s*(?:ending(?:\\s+with|\\s+in)?|no\\.?|number|#)?\\s*[:#=.()\\-]*\\s*(?:[0-9]{2,12}[\\s\\-]*[xX*#•]{1,10}[\\s\\-]*|(?:xx|[xX*#•.])*)+([0-9]{3,19})\\b(?![\\s\\-]*[xX*#•]+[\\s\\-]*[0-9])",
             // "from your credit card ending 1234", "from card 1234", "from your account 00219XXXXX0020"
-            "(?i)(?:from)\\s+(?:your\\s+)?(?:credit\\s+card|debit\\s+card|prepaid\\s+card|visa\\s+card|mastercard|card|a/c|acct|account|iban)\\s*(?:ending(?:\\s+with|\\s+in)?|no\\.?|number|#)?\\s*[:#=.()\\-]*\\s*(?:[0-9]{2,12}[\\s\\-]*[xX*#•]{1,10}[\\s\\-]*|(?:xx|[xX*#•.])*)+([0-9]{3,6})\\b(?![\\s\\-]*[xX*#•]+[\\s\\-]*[0-9])",
-            // "credit card ending in 1234", "card ending 1234"
-            "(?i)(?:credit\\s+card|debit\\s+card|prepaid\\s+card|visa\\s+card|mastercard|card|a/c|acct|account)\\s+ending\\s*(?:with|in)?\\s*[xX*#•.]*([0-9]{3,6})\\b",
-            // "Card 4532XXXXXXXX1234" or "4532 **** **** 1234" or "Card ..1234" or "Card: 1234" or "Card No. 1234" or "ACCT *7711"
-            "(?i)(?:credit\\s+card|debit\\s+card|prepaid\\s+card|visa\\s+card|mastercard|card|a/c|acct|account|iban)\\s*(?:no\\.?|number|#)?\\s*[:#=.()*xX•#\\-]*\\s*(?:[0-9]{2,12}[\\s\\-]*[xX*#•]{1,10}[\\s\\-]*|[xX*#•.]{1,12}[\\s\\-]*)?([0-9]{3,6})\\b(?![\\s\\-]*[xX*#•]+[\\s\\-]*[0-9])",
-            // "card: 1234", "card #1234", "card - 1234", "acct *1234"
-            "(?i)\\b(?:credit\\s*card|card|acct)\\s*[:#=.()*xX•#\\-]\\s*([0-9]{3,6})\\b(?![\\s\\-]*[xX*#•]+[\\s\\-]*[0-9])",
+            "(?i)(?:from)\\s+(?:your\\s+)?\(acctNouns)\\s*(?:ending(?:\\s+with|\\s+in)?|no\\.?|number|#)?\\s*[:#=.()\\-]*\\s*(?:[0-9]{2,12}[\\s\\-]*[xX*#•]{1,10}[\\s\\-]*|(?:xx|[xX*#•.])*)+([0-9]{3,19})\\b(?![\\s\\-]*[xX*#•]+[\\s\\-]*[0-9])",
+            // "credit card ending in 1234", "card ending 1234", "IBAN ending 3876", "account ending 3876"
+            "(?i)\(acctNouns)\\s+ending\\s*(?:with|in)?\\s*[:#=.()\\-]*\\s*[xX*#•.]*([0-9]{3,19})\\b",
+            // "Card 4532XXXXXXXX1234" or "4532 **** **** 1234" or "Card ..1234" or "Card: 1234" or "IBAN 3876" or "ACCT *7711"
+            "(?i)\(acctNouns)\\s*(?:no\\.?|number|#)?\\s*[:#=.()*xX•#\\-]*\\s*(?:[0-9]{2,12}[\\s\\-]*[xX*#•]{1,10}[\\s\\-]*|[xX*#•.]{1,12}[\\s\\-]*)?([0-9]{3,19})\\b(?![\\s\\-]*[xX*#•]+[\\s\\-]*[0-9])",
+            // "card: 1234", "card #1234", "card - 1234", "acct *1234", "iban *3876"
+            "(?i)\\b(?:credit\\s*card|card|acct|acc|a/c|iban)\\s*[:#=.()*xX•#\\-]\\s*([0-9]{3,19})\\b(?![\\s\\-]*[xX*#•]+[\\s\\-]*[0-9])",
+            // Standalone masked card or account token (e.g. "4532XXXXXXXX4821", "4532 **** 4821")
+            "\\b[0-9]{4,6}[\\s\\-]*[xX*#•]{2,10}[\\s\\-]*([0-9]{3,6})\\b",
             // Arabic:
-            // "بطاقة ائتمانية رقم 1234" / "بطاقتك الائتمانية المنتهية بـ 1234" / "بطاقة مدى 1234" / "البطاقة رقم 9921"
-            "(?i)(?:البطاقة|بطاقة|بطاقتك|الحساب|حساب|حسابك)\\s*(?:الائتمانية|ائتمانية|مدى|مسبقة\\s*الدفع)?\\s*(?:رقم|مدى|ائتمانية|ينتهي\\s*بـ?|تنتهي\\s*بـ?|المنتهية\\s*بـ?|المنتهي\\s*بـ?|تنتهي\\s*في|ينتهي\\s*في)?\\s*[:#=.()\\-]*\\s*(?:[0-9]{2,12}[\\s\\-]*[xX*#•]{1,10}[\\s\\-]*|[xX*#•.]*)([0-9]{3,6})\\b"
+            // "بطاقة ائتمانية رقم 1234" / "بطاقتك الائتمانية المنتهية بـ 1234" / "حساب 3876" / "آيبان 3876"
+            "(?i)(?:البطاقة|بطاقة|بطاقتك|الحساب|حساب|حسابك|آيبان|ايبان|الأيبان|الايبان)\\s*(?:الائتمانية|ائتمانية|مدى|مسبقة\\s*الدفع)?\\s*(?:رقم|مدى|ائتمانية|ينتهي\\s*بـ?|تنتهي\\s*بـ?|المنتهية\\s*بـ?|المنتهي\\s*بـ?|تنتهي\\s*في|ينتهي\\s*في)?\\s*[:#=.()\\-]*\\s*(?:[0-9]{2,12}[\\s\\-]*[xX*#•]{1,10}[\\s\\-]*|[xX*#•.]*)([0-9]{3,19})\\b"
         ]
         for pattern in sourcePatterns {
             if let regex = try? NSRegularExpression(pattern: pattern),
-               let m = regex.firstMatch(in: textWithoutRecipient, range: NSRange(textWithoutRecipient.startIndex..., in: textWithoutRecipient)),
-               let r = Range(m.range(at: 1), in: textWithoutRecipient) {
-                accountSuffix = String(textWithoutRecipient[r])
+               let m = regex.firstMatch(in: textWithoutCounterparty, range: NSRange(textWithoutCounterparty.startIndex..., in: textWithoutCounterparty)),
+               let r = Range(m.range(at: 1), in: textWithoutCounterparty) {
+                accountSuffix = String(textWithoutCounterparty[r])
                 break
             }
         }
@@ -2387,6 +2513,7 @@ enum SMSParser {
 
         let stops = [
             ", your balance", " your balance", ", balance", " balance",
+            " to iban", " to account", " to a/c", " to acct", " ref.",
             " on ", " dated", ". ", ", ", "، ", " using", " with", " via", " ref", " card",
             " from ", " avl", " available", " bal", " a/c", " acct", " في ", " بتاريخ ", " بطاقة ",
             " الرصيد", " رصيد", " رقم ", " بنجاح", " يوم "
