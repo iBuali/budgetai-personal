@@ -231,7 +231,7 @@ struct AccountEditor: View {
                         TextField(kind == .creditCard ? "Card number or last digits, e.g. 4821" : "Account or card digits, e.g. 3876 or 3876, 4821", text: $smsMatch)
                             .keyboardType(.numbersAndPunctuation)
                             .onChange(of: smsMatch) { _, v in
-                                let normalized = SMSParser.normalizeArabicDigits(v)
+                                let normalized = SMSParser.normalizeText(v)
                                 let filtered = String(normalized.filter { $0.isNumber || $0 == "," || $0 == " " }.prefix(48))
                                 if filtered != v { smsMatch = filtered }
                             }
