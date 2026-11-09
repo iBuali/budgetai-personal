@@ -500,10 +500,16 @@ final class SMSLabStore {
             regressionTotal: publishReport.totalApprovedCases
         )
 
-        // Keep draft rules in workingPack while syncing version number
-        workingPack.version = entry.version
-        workingPack.publishedAt = entry.publishedAt
-        workingPack.notes = entry.notes
+        // Keep draft rules in workingPack while syncing approved rules and version metadata from livePack
+        let draftsSender = workingPack.senderBanks.filter { $0.status == .draft }
+        let draftsPatterns = workingPack.patterns.filter { $0.status == .draft }
+        let draftsKeywords = workingPack.categoryKeywords.filter { $0.status == .draft }
+
+        var synced = SMSKnowledgeStore.livePack
+        synced.senderBanks.append(contentsOf: draftsSender)
+        synced.patterns.append(contentsOf: draftsPatterns)
+        synced.categoryKeywords.append(contentsOf: draftsKeywords)
+        workingPack = synced
         saveWorkingPack()
         versionHistory = SMSKnowledgeStore.history()
         evaluateAllAndRunRegression()

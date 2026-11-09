@@ -33,6 +33,22 @@ struct SMSSenderBankRule: Codable, Equatable, Hashable, Identifiable {
     var status: SMSRuleStatus = .draft
     var createdAt: Date = .now
     var note: String = ""
+
+    static func == (lhs: SMSSenderBankRule, rhs: SMSSenderBankRule) -> Bool {
+        lhs.id == rhs.id &&
+        lhs.sender == rhs.sender &&
+        lhs.bank == rhs.bank &&
+        lhs.status == rhs.status &&
+        lhs.note == rhs.note
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+        hasher.combine(sender)
+        hasher.combine(bank)
+        hasher.combine(status)
+        hasher.combine(note)
+    }
 }
 
 /// SMS pattern: a regular expression matched against the normalized, lower-cased, single-line SMS.
@@ -57,6 +73,38 @@ struct SMSPatternRule: Codable, Equatable, Hashable, Identifiable {
     var createdAt: Date = .now
     var sourceCaseIDs: [String] = []
     var note: String = ""
+
+    static func == (lhs: SMSPatternRule, rhs: SMSPatternRule) -> Bool {
+        lhs.id == rhs.id &&
+        lhs.name == rhs.name &&
+        lhs.pattern == rhs.pattern &&
+        lhs.bankScope == rhs.bankScope &&
+        lhs.setBank == rhs.setBank &&
+        lhs.setType == rhs.setType &&
+        lhs.setCategory == rhs.setCategory &&
+        lhs.setMerchant == rhs.setMerchant &&
+        lhs.skipAsNonTransaction == rhs.skipAsNonTransaction &&
+        lhs.priority == rhs.priority &&
+        lhs.status == rhs.status &&
+        lhs.sourceCaseIDs == rhs.sourceCaseIDs &&
+        lhs.note == rhs.note
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+        hasher.combine(name)
+        hasher.combine(pattern)
+        hasher.combine(bankScope)
+        hasher.combine(setBank)
+        hasher.combine(setType)
+        hasher.combine(setCategory)
+        hasher.combine(setMerchant)
+        hasher.combine(skipAsNonTransaction)
+        hasher.combine(priority)
+        hasher.combine(status)
+        hasher.combine(sourceCaseIDs)
+        hasher.combine(note)
+    }
 
     var capturesAmount: Bool { pattern.contains("(?<amount>") }
     var capturesAccount: Bool { pattern.contains("(?<account>") }
@@ -83,6 +131,22 @@ struct SMSCategoryKeywordRule: Codable, Equatable, Hashable, Identifiable {
     var status: SMSRuleStatus = .draft
     var createdAt: Date = .now
     var note: String = ""
+
+    static func == (lhs: SMSCategoryKeywordRule, rhs: SMSCategoryKeywordRule) -> Bool {
+        lhs.id == rhs.id &&
+        lhs.keyword == rhs.keyword &&
+        lhs.category == rhs.category &&
+        lhs.status == rhs.status &&
+        lhs.note == rhs.note
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+        hasher.combine(keyword)
+        hasher.combine(category)
+        hasher.combine(status)
+        hasher.combine(note)
+    }
 }
 
 struct SMSKnowledgePack: Codable, Equatable {
