@@ -473,7 +473,9 @@ enum SMSLabImporter {
     }
 
     private static func decodeString(from data: Data) -> String? {
-        for enc: String.Encoding in [.utf8, .utf16, .unicode, .windowsCP1256, .isoLatin1] {
+        let arabicEncoding = String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(CFStringEncoding(CFStringEncodings.windowsArabic.rawValue)))
+        let encodings: [String.Encoding] = [.utf8, .utf16, .unicode, arabicEncoding, .isoLatin1]
+        for enc in encodings {
             if let s = String(data: data, encoding: enc) { return s }
         }
         return nil

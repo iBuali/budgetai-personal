@@ -422,9 +422,9 @@ enum SMSKnowledgeStore {
     }
 
     static func exportURL(for version: Int? = nil) throws -> URL {
-        let pack = version.flatMap { pack(version: $0) } ?? livePack
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("BudgetAI-SMS-Knowledge-v\(pack.version).json")
-        try encoder.encode(pack).write(to: url, options: .atomic)
+        let exportPack = version.flatMap { pack(version: $0) } ?? livePack
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("BudgetAI-SMS-Knowledge-v\(exportPack.version).json")
+        try encoder.encode(exportPack).write(to: url, options: .atomic)
         return url
     }
 
