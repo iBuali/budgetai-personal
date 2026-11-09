@@ -511,7 +511,7 @@ enum SMSLabImporter {
             Seed(
                 sender: "17515151",
                 text: "Dear ISA, Thank you for paying BHD 457.558 on 24/10 for your VISA INFINITE card. Available Bal BHD 5000. Tel 17515151",
-                expected: LabExpected(bank: "BisB", amount: 457.558, type: SMSTransactionType.internalTransfer.rawValue, direction: SMSDirection.outgoing.rawValue, category: SpendCategory.visaTransfer.rawValue)
+                expected: LabExpected(bank: "BisB", amount: 457.558, type: SMSTransactionType.internalTransfer.rawValue, direction: SMSDirection.internalMove.rawValue, category: SpendCategory.visaTransfer.rawValue)
             ),
             // 4. BBK POS Purchase at Talabat
             Seed(
