@@ -552,6 +552,21 @@ enum SMSImporter {
         // (e.g., when a transfer between two accounts generates one "Internal Transfer" SMS and one "Transfer Out" SMS at the same date & time).
         let rawParsedType = p.transactionType
         if !isCardPayment,
+           let sameRefMerged = mergeSameReferenceSameAccountSMSIfNeeded(
+               parsed: p,
+               rawSMS: trimmed,
+               resolvedBank: resolvedSMSBank,
+               resolvedSender: resolvedSender,
+               matchingDigits: matchingDigits,
+               targetAccountID: target,
+               usedAI: usedAI,
+               forceApprove: forceApprove,
+               context: context
+           ) {
+            return sameRefMerged
+        }
+
+        if !isCardPayment,
            (rawParsedType.isTransferType
             || p.category == .internalTransfer
             || p.category == .transfers
@@ -750,6 +765,172 @@ enum SMSImporter {
             balanceSynced: result.balanceSynced,
             message: summary
         )
+    }
+
+    // MARK: - Same-Reference, Same-Time, Same-Account Merging (Highest Amount + Lowest Balance)
+
+    private static func isGenericSMSMerchant(_ merchant: String) -> Bool {
+        let lower = merchant.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let generics: Set<String> = [
+            "fawri+ transfer", "fawri transfer", "benefitpay · fawri+ transfer", "benefitpay · fawri transfer",
+            "bank transfer", "transfer", "expense", "card purchase", "income", "bank fee", "outgoing charges",
+            "outgoing transfer", "incoming transfer", "incoming credit", "internal transfer"
+        ]
+        return lower.isEmpty || generics.contains(lower) || lower.hasSuffix(" fee")
+            || lower.hasSuffix(" transfer out") || lower.hasSuffix(" transfer in")
+            || lower.hasSuffix("(needs review)")
+    }
+
+    /// When two SMS messages share the same reference number, same date & time, and belong to the same account
+    /// (for example, one debit alert with BHD 170.110 inc VAT + intermediate balance BHD 5,392.064,
+    /// and a second Fawri+ completion alert with BHD 170.000 + final balance BHD 5,222.064),
+    /// automatically merges them into a single transaction using the highest debited/transfer amount
+    /// and the lowest balance amount.
+    private static func mergeSameReferenceSameAccountSMSIfNeeded(
+        parsed: ParsedSMS,
+        rawSMS: String,
+        resolvedBank: String?,
+        resolvedSender: String?,
+        matchingDigits: String?,
+        targetAccountID: UUID?,
+        usedAI: Bool,
+        forceApprove: Bool,
+        context: ModelContext
+    ) -> SMSImportOutcome? {
+        let incomingRef = parsed.referenceNumber?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !incomingRef.isEmpty else { return nil }
+
+        let incomingDate = parsed.date ?? .now
+        let startWindow = incomingDate.addingTimeInterval(-86_400)
+        let endWindow = incomingDate.addingTimeInterval(86_400)
+        let descriptor = FetchDescriptor<MoneyTransaction>(
+            predicate: #Predicate { $0.date >= startWindow && $0.date <= endWindow },
+            sortBy: [SortDescriptor(\.date, order: .reverse)]
+        )
+        let candidates = (try? context.fetch(descriptor)) ?? []
+        guard !candidates.isEmpty else { return nil }
+
+        let incomingTime = parsed.timeString ?? SMSParser.extractDateAndTime(in: rawSMS).time
+        let incomingIsIncome = parsed.transactionType.isIncomeDirection
+
+        for existing in candidates where existing.source == .sms {
+            let existingRef = existing.smsReference?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !existingRef.isEmpty,
+                  existingRef.caseInsensitiveCompare(incomingRef) == .orderedSame else { continue }
+
+            // Must have the same transaction direction (e.g., both outgoing debits/transfers from the same account)
+            guard existing.isIncome == incomingIsIncome,
+                  existing.smsTransactionType != .internalTransfer,
+                  existing.category != .internalTransfer else { continue }
+
+            // Check same date & time
+            let timeDiff = abs(existing.date.timeIntervalSince(incomingDate))
+            let existingTime = existing.rawText.flatMap { SMSParser.extractDateAndTime(in: $0).time }
+            let isSameDateAndTime: Bool = {
+                if let t1 = existingTime, let t2 = incomingTime {
+                    return (t1 == t2 && Calendar.current.isDate(existing.date, inSameDayAs: incomingDate)) || timeDiff <= 180
+                }
+                if timeDiff <= 180 {
+                    return true
+                }
+                return Calendar.current.isDate(existing.date, inSameDayAs: incomingDate) && (existingTime == nil || incomingTime == nil)
+            }()
+            guard isSameDateAndTime else { continue }
+
+            // Must belong to the same account (either both resolved to the same accountID, or one resolved and the other was nil without conflicting suffix)
+            if let exAcc = existing.accountID, let newAcc = targetAccountID, exAcc != newAcc {
+                continue
+            }
+            if let s1 = existing.smsAccountSuffix, !s1.isEmpty,
+               let s2 = parsed.accountSuffix, !s2.isEmpty,
+               !SMSParser.digitsMatch(accountMatch: s1, query: s2) {
+                continue
+            }
+
+            let amountDiffers = abs(existing.amount - parsed.amount) >= 0.0005
+            let balanceDiffers: Bool = {
+                guard let b1 = existing.smsBalance, let b2 = parsed.balance else { return false }
+                return abs(b1 - b2) >= 0.0005
+            }()
+            guard amountDiffers || balanceDiffers else { continue }
+
+            let highestAmount = max(existing.amount, parsed.amount)
+            let lowestBalance: Double? = {
+                if let b1 = existing.smsBalance, let b2 = parsed.balance {
+                    return min(b1, b2)
+                }
+                return existing.smsBalance ?? parsed.balance
+            }()
+            let mergedAccountID = existing.accountID ?? targetAccountID
+            let mergedBank = existing.smsBank ?? resolvedBank
+            let mergedSender = existing.smsSender ?? resolvedSender?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let mergedAccountSuffix = existing.smsAccountSuffix ?? parsed.accountSuffix ?? matchingDigits
+            let mergedRecipientSuffix = existing.smsRecipientSuffix ?? parsed.recipientSuffix
+
+            let existingRawText = existing.rawText ?? ""
+            let combinedRawSMS: String = {
+                if existingRawText.isEmpty { return rawSMS }
+                if rawSMS.isEmpty || existingRawText == rawSMS { return existingRawText }
+                if existingRawText.contains(rawSMS) { return existingRawText }
+                return "\(existingRawText)\n\n---\n\n\(rawSMS)"
+            }()
+
+            Ledger.edit(existing, context: context) { tx in
+                tx.amount = highestAmount
+                tx.smsBalance = lowestBalance
+                if let mergedAccountID { tx.accountID = mergedAccountID }
+                if let mergedBank { tx.smsBank = mergedBank }
+                if let mergedSender { tx.smsSender = mergedSender }
+                if let mergedAccountSuffix { tx.smsAccountSuffix = mergedAccountSuffix }
+                if let mergedRecipientSuffix { tx.smsRecipientSuffix = mergedRecipientSuffix }
+
+                if isGenericSMSMerchant(tx.merchant) && !isGenericSMSMerchant(parsed.merchant) {
+                    tx.merchant = parsed.merchant
+                } else if isGenericSMSMerchant(tx.merchant), let recip = mergedRecipientSuffix {
+                    tx.merchant = "IBAN ending \(recip)"
+                }
+
+                tx.rawText = combinedRawSMS
+                tx.isPossibleDuplicate = false
+                tx.smsConfidence = .high
+                tx.smsClassificationReason = "Merged SMS with same reference (\(incomingRef)), date & time, and account using highest amount and lowest balance"
+            }
+
+            var syncedBalance: Double? = nil
+            let allAccounts = (try? context.fetch(FetchDescriptor<Account>())) ?? []
+            let mergedTargetAccount = existing.accountID.flatMap { id in allAccounts.first(where: { $0.id == id }) }
+            let hasValidAccountAndBank = mergedTargetAccount != nil
+                && ((existing.smsBank?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
+                    || !(mergedTargetAccount?.smsMatch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true))
+
+            if existing.isPending && hasValidAccountAndBank && existing.smsTransactionType != .unknown && (forceApprove || AppSettings.smsAutoApprove) {
+                let approveRes = Ledger.approve(existing, context: context)
+                syncedBalance = approveRes.balanceSynced
+            } else if !existing.isPending {
+                syncedBalance = Ledger.syncBalanceFromSMS(existing, context: context)
+            }
+
+            let code = AppSettings.currency
+            let typeLabel = (existing.smsTransactionType ?? parsed.transactionType).title
+            var summary = "\(typeLabel) \(Money.format(existing.amount, code)) · \(existing.merchant)"
+            if let synced = syncedBalance {
+                summary += ". Balance matched to bank: \(Money.format(synced, code))"
+            }
+            summary += " (merged same-reference SMS)"
+            return SMSImportOutcome(
+                transaction: existing,
+                batchTransactions: [existing],
+                usedAI: usedAI,
+                learnedMerchant: false,
+                flaggedDuplicate: true,
+                alerts: [],
+                pending: existing.isPending,
+                balanceSynced: syncedBalance,
+                message: summary
+            )
+        }
+
+        return nil
     }
 
     // MARK: - Simultaneous Inter-Account Transfer Deduplication & Merging

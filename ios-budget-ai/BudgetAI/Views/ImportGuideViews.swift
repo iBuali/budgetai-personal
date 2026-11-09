@@ -80,6 +80,18 @@ struct SMSImportSettingsSection: View {
     var body: some View {
         Section {
             NavigationLink {
+                SMSTestingLabView()
+            } label: {
+                HStack {
+                    Label("SMS Testing Lab + Self-Learning", systemImage: "flask.fill")
+                    Spacer()
+                    let liveV = SMSKnowledgeStore.livePack.version
+                    Text(liveV > 0 ? "Live v\(liveV)" : "Built-in")
+                        .font(.subheadline)
+                        .foregroundStyle(Theme.secondaryInk)
+                }
+            }
+            NavigationLink {
                 SMSSavedConditionsView()
             } label: {
                 HStack {

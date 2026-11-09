@@ -78,6 +78,8 @@ enum SMSUserRules {
 
     /// Matches a user-saved sender bank rule against the explicit `sender` parameter OR inside the `rawSMS` body.
     static func matchSenderRule(in rawSMS: String? = nil, sender: String?) -> (senderKey: String, bank: String, accountID: UUID?)? {
+        // SMS Testing Lab runs ignore the device owner's personal corrections for reproducible results.
+        if SMSKnowledge.excludePersonalRules { return nil }
         let map = (UserDefaults.standard.dictionary(forKey: senderBankKey) as? [String: String]) ?? [:]
         guard !map.isEmpty else { return nil }
         let accMap = (UserDefaults.standard.dictionary(forKey: senderAccountKey) as? [String: String]) ?? [:]
@@ -284,6 +286,7 @@ enum SMSUserRules {
     }
 
     static func matchingRule(forRawSMS rawSMS: String, sender: String? = nil, bank: String? = nil, counterparty: String? = nil) -> ClassificationRule? {
+        if SMSKnowledge.excludePersonalRules { return nil }
         let trimmed = rawSMS.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         let party = counterparty ?? SMSParser.extractRecipientOrMerchantKey(in: trimmed)
@@ -499,6 +502,11 @@ enum Categorizer {
             }
         }
 
+        // Published classification keywords (SMS Testing Lab → Publish to Budget AI).
+        if let published = SMSKnowledge.active.category(forText: t) {
+            return published.category
+        }
+
         for (category, words) in rules where words.contains(where: { t.contains($0) }) {
             return category
         }
@@ -587,6 +595,8 @@ struct ParsedSMS {
     var matchedUserRule: Bool = false
     /// True when `balance` is a credit card's available limit (e.g. "Available Bal" in a Visa payment SMS), not a bank balance.
     var balanceIsCardLimit: Bool = false
+    /// ID of the published knowledge pattern (SMS Testing Lab) that shaped this result, if any.
+    var knowledgeRuleID: String? = nil
 
     var requiresReview: Bool {
         confidence == .low || transactionType == .unknown
@@ -632,6 +642,19 @@ enum SMSParser {
     /// Returns a human-readable reason if the SMS is an OTP, declined transaction, or non-transaction alert.
     static func nonTransactionReason(_ raw: String) -> String? {
         let text = normalizeText(raw).lowercased()
+
+        // Published knowledge: explicit skip patterns win; a published transaction pattern
+        // overrides the built-in keyword filters (e.g. a merchant name that contains "OTP").
+        let knowledge = SMSKnowledge.active
+        if !knowledge.isEmpty {
+            let matchText = SMSKnowledge.matchText(raw)
+            if let skip = knowledge.firstMatch(in: matchText, bank: nil, where: { $0.skipAsNonTransaction }) {
+                return "Skipped: matched published knowledge rule '\(skip.rule.name)' (\(knowledge.label))."
+            }
+            if knowledge.firstMatch(in: matchText, bank: nil, where: { $0.transactionType != nil && !$0.skipAsNonTransaction && ($0.bankScope ?? "").isEmpty }) != nil {
+                return nil
+            }
+        }
 
         let otpKeywords = [
             "otp", "one time password", "one-time password", "verification code", "security code",
@@ -783,8 +806,8 @@ enum SMSParser {
             }
         }
 
-        // 2. Check explicit Tel / Call / Phone / From / Sender header or footer in the SMS
-        let telPattern = "(?i)\\b(?:tel|call|phone|contact|helpline|from|sender)\\s*[:\\-]?\\s*(?:\\+?973\\s*|00973\\s*)?([0-9]{4}\\s*[0-9]{4})\\b"
+        // 2. Check explicit Tel / Call / Phone / Enquiry / From / Sender header or footer in the SMS
+        let telPattern = "(?i)\\b(?:tel|call|phone|contact|helpline|enquiry|inquiry|from|sender)\\s*[:\\-]?\\s*(?:\\+?973\\s*|00973\\s*)?([0-9]{4}\\s*[0-9]{4})\\b"
         if let regex = try? NSRegularExpression(pattern: telPattern),
            let m = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
            let r = Range(m.range(at: 1), in: text) {
@@ -812,6 +835,14 @@ enum SMSParser {
             return (ibanInfo.bank, .high, "Identified \(ibanInfo.bank) from source IBAN code '\(ibanInfo.code)'")
         }
 
+        // 1b. Published knowledge: curated bank SMS formats (regression-tested in the SMS Testing Lab)
+        let knowledge = SMSKnowledge.active
+        if !knowledge.isEmpty,
+           let hit = knowledge.firstMatch(in: SMSKnowledge.matchText(text), bank: nil, where: { $0.identifiesBank }),
+           let publishedBank = hit.rule.setBank {
+            return (publishedBank, .high, "Identified \(publishedBank) from published SMS format '\(hit.rule.name)' (knowledge \(knowledge.label))")
+        }
+
         // 2. Explicit bank name in the SMS text (e.g. "Thank you, Al Salam Bank", "BisB", "ila Bank")
         // Note: Do NOT infer "BenefitPay" merely from "Fawri+" or "Fawri" because all Bahrain banks send Fawri+ alerts.
         if let bodyBank = matchExplicitBankName(in: lower, allowBenefitPay: true) {
@@ -832,6 +863,11 @@ enum SMSParser {
                 }
                 return (bank, .high, "Identified \(bank) via verified phone \(phone)")
             }
+        }
+
+        // 3b. Published knowledge: sender ID → bank formats
+        if let publishedBank = knowledge.bank(forSender: effectiveSender) {
+            return (publishedBank, .high, "Identified \(publishedBank) from published sender format '\(effectiveSender ?? "")' (knowledge \(knowledge.label))")
         }
 
         // 4. Verified Sender ID / Phone number match
@@ -928,17 +964,31 @@ enum SMSParser {
         guard !normalized.isEmpty else { return nil }
         guard nonTransactionReason(normalized) == nil else { return nil }
 
-        guard let (amt, currency) = amount(in: normalized), amt > 0 else { return nil }
+        let effectiveSender = extractSenderOrPhone(in: normalized, explicitSender: sender)
+        let bankInfo = identifyBank(in: normalized, sender: effectiveSender)
+
+        // Published knowledge pattern (versioned rule pack from the SMS Testing Lab).
+        let knowledge = SMSKnowledge.active
+        let knowledgeMatch: SMSKnowledgeMatch? = knowledge.isEmpty ? nil : knowledge.firstMatch(
+            in: SMSKnowledge.matchText(normalized),
+            bank: bankInfo.bank,
+            where: { $0.affectsClassification }
+        )
+
+        let builtInAmount = amount(in: normalized)
+        let amountResult: (Double, String?)? = knowledgeMatch?.amount.map { ($0, builtInAmount?.1) } ?? builtInAmount
+        guard let (amt, currency) = amountResult, amt > 0 else { return nil }
         let singleLine = normalized.replacingOccurrences(of: "\n", with: " ")
         let lower = singleLine.lowercased()
 
-        let effectiveSender = extractSenderOrPhone(in: normalized, explicitSender: sender)
         let ref = referenceNumber(in: singleLine)
         let bal = balance(in: normalized)
         let (parsedDate, parsedTime) = extractDateAndTime(in: singleLine)
-        let bankInfo = identifyBank(in: normalized, sender: effectiveSender)
         let rail = detectRail(in: singleLine)
-        let suffixes = extractSuffixes(in: singleLine)
+        var suffixes = extractSuffixes(in: singleLine)
+        if let publishedAccount = knowledgeMatch?.account {
+            suffixes.accountSuffix = publishedAccount
+        }
         let senderRuleAccountID: UUID? = {
             if let rawSavedID = SMSUserRules.accountID(forSender: effectiveSender, in: normalized) {
                 if let context, let acc = Ledger.account(rawSavedID, context: context) {
@@ -1047,7 +1097,7 @@ enum SMSParser {
         // 2b. Credit card (Visa) payment confirmation, e.g.
         // "Dear ISA, Thank you for paying BHD 457.558 on 24/10 for your VISA INFINITE card. Available Bal BHD 5000. Tel 17515151"
         // The money left the user's bank account and paid down the card; "Available Bal" is the card's available limit.
-        if var cardPayment = parseCreditCardPayment(
+        if knowledgeMatch?.type == nil, var cardPayment = parseCreditCardPayment(
             singleLine: singleLine,
             lower: lower,
             amount: amt,
@@ -1065,15 +1115,25 @@ enum SMSParser {
         }
 
         // 3. Classify the transaction using complete message structure and account context
-        let classification = classifyTransaction(
-            normalized: normalized,
-            singleLine: singleLine,
-            lower: lower,
-            rail: rail,
-            suffixes: suffixes,
-            bank: bankInfo.bank,
-            context: context
-        )
+        //    (a matching published knowledge pattern supplies the type directly).
+        let classification: ClassificationOutcome
+        if let knowledgeMatch, let publishedType = knowledgeMatch.type {
+            classification = ClassificationOutcome(
+                type: publishedType,
+                confidence: .high,
+                reason: "Matched published SMS pattern '\(knowledgeMatch.rule.name)' (knowledge \(knowledge.label))"
+            )
+        } else {
+            classification = classifyTransaction(
+                normalized: normalized,
+                singleLine: singleLine,
+                lower: lower,
+                rail: rail,
+                suffixes: suffixes,
+                bank: bankInfo.bank,
+                context: context
+            )
+        }
 
         let matchedSourceAccount = context.flatMap { ctx in
             if let d = suffixes.accountSuffix, let acc = findMatchingAccount(suffix: d, in: ctx) {
@@ -1093,7 +1153,8 @@ enum SMSParser {
         let customReason = classification.reason
 
         let isIncome = txType.isIncomeDirection
-        let extractedMerchant = customCounterparty
+        let extractedMerchant = knowledgeMatch?.merchant
+            ?? customCounterparty
             ?? merchant(in: normalized, isIncome: isIncome, rail: rail, recipientSuffix: suffixes.recipientSuffix)
             ?? defaultMerchant(for: txType, rail: rail, recipientSuffix: suffixes.recipientSuffix)
 
@@ -1139,6 +1200,11 @@ enum SMSParser {
             category = .other
         }
 
+        if let publishedCategory = knowledgeMatch?.category {
+            category = publishedCategory
+            subcategory = nil
+        }
+
         return ParsedSMS(
             amount: amt,
             currency: currency,
@@ -1163,7 +1229,8 @@ enum SMSParser {
             sender: effectiveSender,
             accountID: resolvedSourceAccountID,
             toAccountID: resolvedToAccountID,
-            goalID: resolvedGoalID
+            goalID: resolvedGoalID,
+            knowledgeRuleID: knowledgeMatch?.rule.id
         )
     }
 
@@ -2002,8 +2069,9 @@ enum SMSParser {
             "(?i)\\b(?:\(allCurrencyPattern))\\s*\\.?\\s*[0-9][0-9,]*(?:\\.[0-9]+)?",
             "(?i)[0-9][0-9,]*(?:\\.[0-9]+)?\\s*(?:\(allCurrencyPattern))\\b",
             "\\b[0-9][0-9,]*\\.[0-9]{2,3}\\b",
-            // Helpline / tel numbers
-            "(?i)\\b(?:tel|call|phone|contact|helpline|from|sender)\\s*[:.\\-]?\\s*(?:\\+?973\\s*|00973\\s*)?[0-9]{4}\\s*[0-9]{4}\\b"
+            // Helpline / tel / enquiry numbers and transaction references
+            "(?i)\\b(?:tel|call|phone|contact|helpline|enquiry|inquiry|from|sender)\\s*[:.\\-]?\\s*(?:\\+?973\\s*|00973\\s*)?[0-9]{4}\\s*[0-9]{4}\\b",
+            "(?i)\\b(?:ref(?:erence)?\\.?\\s*(?:no\\.?|number|id|#)?|txn\\s*(?:id|ref|no\\.?)|transaction\\s*(?:id|ref))\\s*[:\\-#=.]?\\s*[A-Z0-9][A-Z0-9\\-]{3,30}\\b"
         ]
         for pat in scrubPatterns {
             scrubbed = scrubbed.replacingOccurrences(of: pat, with: " ", options: .regularExpression)
@@ -2149,7 +2217,7 @@ enum SMSParser {
                 // Outgoing transfer: "credited to IBAN ending 0846", "to IBAN 0846", "beneficiary account 0846" is the external recipient
                 "(?i)(?:credited\\s+to|transferred\\s+to|sent\\s+to|\\bto)\\s+(?!your\\b)(?:iban|a/c|acct|acc\\.?|account)\\s*(?:ending(?:\\s+with|\\s+in)?|no\\.?|number|#)?\\s*[:\\-]?\\s*(?:[A-Z]{2}[0-9A-Z*xX•#\\-]*([0-9]{4})|[xX*#•.]*([0-9]{3,6}))\\b",
                 "(?i)(?:beneficiary|recipient)\\s+(?:iban|a/c|acct|acc\\.?|account)?\\s*(?:ending(?:\\s+with|\\s+in)?|no\\.?|number|#)?\\s*[:\\-]?\\s*(?:[A-Z]{2}[0-9A-Z*xX•#\\-]*([0-9]{4})|[xX*#•.]*([0-9]{3,6}))\\b",
-                "(?i)\\biban\\s+ending\\s+(?:with\\s+|in\\s+)?[xX*#•]*([0-9]{3,6})\\b",
+                "(?i)(?<!your\\s)(?<!from\\s)\\biban\\s+ending\\s+(?:with\\s+|in\\s+)?[xX*#•]*([0-9]{3,6})\\b",
                 "(?i)(?:إلى|الى|لصالح)\\s*(?!حسابك)(?:حساب|آيبان|ايبان|الأيبان|الايبان)\\s*(?:ينتهي\\s*بـ?|رقم)?\\s*[:\\-]?\\s*(?:[A-Z]{2}[0-9A-Z*xX•#\\-]*([0-9]{4})|[xX*#•.]*([0-9]{3,6}))\\b"
             ]
 
@@ -2170,13 +2238,13 @@ enum SMSParser {
         let textWithoutCounterparty: String = {
             if isIncomingContext {
                 return text.replacingOccurrences(
-                    of: "(?i)(?:received\\s+from|\\bfrom)\\s+(?!your\\b)(?:iban|a/c|acct|acc\\.?|account)\\s*(?:ending(?:\\s+with|\\s+in)?|no\\.?|number|#)?\\s*[:\\-]?\\s*(?:[A-Z]{2}[0-9A-Z*xX•#\\-]*?)?[0-9]{3,6}\\b",
+                    of: "(?i)(?:received\\s+from|\\bfrom)\\s+(?!your\\b)(?:iban|a/c|acct|acc\\.?|account)\\s*(?:ending(?:\\s+with|\\s+in)?|no\\.?|number|#)?\\s*[:\\-]?\\s*(?:[A-Z]{2}[0-9A-Z*xX•#\\-]*?|[xX*#•.]*)?[0-9]{3,6}\\b",
                     with: " ",
                     options: .regularExpression
                 )
             } else {
                 return text.replacingOccurrences(
-                    of: "(?i)(?:credited\\s+to|transferred\\s+to|sent\\s+to|\\bto)\\s+(?!your\\b)(?:iban|a/c|acct|acc\\.?|account)\\s*(?:ending(?:\\s+with|\\s+in)?|no\\.?|number|#)?\\s*[:\\-]?\\s*(?:[A-Z]{2}[0-9A-Z*xX•#\\-]*?)?[0-9]{3,6}\\b",
+                    of: "(?i)(?:credited\\s+to|transferred\\s+to|sent\\s+to|\\bto)\\s+(?!your\\b)(?:iban|a/c|acct|acc\\.?|account)\\s*(?:ending(?:\\s+with|\\s+in)?|no\\.?|number|#)?\\s*[:\\-]?\\s*(?:[A-Z]{2}[0-9A-Z*xX•#\\-]*?|[xX*#•.]*)?[0-9]{3,6}\\b",
                     with: " ",
                     options: .regularExpression
                 )

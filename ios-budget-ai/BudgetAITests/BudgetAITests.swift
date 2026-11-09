@@ -24,6 +24,7 @@ struct BudgetAITests {
         UserDefaults.standard.removeObject(forKey: Keys.smsAutoApprove)
         UserDefaults.standard.removeObject(forKey: Keys.smsSyncBalance)
         SMSUserRules.clearAll()
+        SMSKnowledgeStore.resetAll()
         return context
     }
 
@@ -1221,5 +1222,179 @@ struct BudgetAITests {
         #expect(tx4.isPending == false)
         #expect(tx4.smsAccountSuffix == "3876")
         #expect(abs(myAccount.balance - 140.000) < 0.0001)
+    }
+
+    @Test func testSameReferenceSameDateTimeSameAccountMergesHighestAmountAndLowestBalance() async throws {
+        let context = makeCleanContext()
+        SMSUserRules.clearAll()
+
+        let ilaAccount = Account(name: "ila Bank", kind: .bank, institution: "ila", balance: 5392.174)
+        ilaAccount.smsMatch = "1101"
+        context.insert(ilaAccount)
+        try context.save()
+
+        let sms1 = "An amount of BHD 170.110 inc VAT has been debited from your IBAN ending 1101 on 07/11/2026 11:26 for Outgoing Charges on Fawri+ Ref: ABCO261107054458 Balance BHD 5,392.064"
+        let sms2 = "Success! Fawri+ transfer of BHD 170.000 to IBAN **0020 is completed on 07/11/2026 11:26 Ref ABCO261107054458 Balance BHD 5,222.064 Enquiry 17123456"
+
+        // Order A: sms1 (170.110, Bal 5,392.064) arrives first, sms2 (170.000, Bal 5,222.064) arrives second
+        _ = await SMSImporter.importText(sms1, context: context, forceApprove: true)
+        let mergedOut = await SMSImporter.importText(sms2, context: context, forceApprove: true)
+
+        let allTxs = try context.fetch(FetchDescriptor<MoneyTransaction>())
+        #expect(allTxs.count == 1)
+        let tx = try #require(mergedOut.transaction)
+        #expect(tx.accountID == ilaAccount.id)
+        #expect(abs(tx.amount - 170.110) < 0.0001) // Highest debited/transfer amount
+        #expect(abs((tx.smsBalance ?? 0) - 5222.064) < 0.0001) // Lowest balance amount
+        #expect(abs(ilaAccount.balance - 5222.064) < 0.0001)
+        #expect(tx.smsReference == "ABCO261107054458")
+        #expect(tx.smsAccountSuffix == "1101")
+        #expect(tx.smsRecipientSuffix == "0020")
+        #expect(tx.merchant == "IBAN ending 0020")
+        #expect(tx.smsBank == "ila")
+        #expect(tx.isPending == false)
+        #expect(tx.isPossibleDuplicate == false)
+
+        // Order B: Reverse order (sms2 with 170.000 arrives first, sms1 with 170.110 arrives second)
+        let sms2Reverse = "Success! Fawri+ transfer of BHD 170.000 to IBAN **0020 is completed on 07/11/2026 12:30 Ref ABCO261107099999 Balance BHD 5,051.954 Enquiry 17123456"
+        let sms1Reverse = "An amount of BHD 170.110 inc VAT has been debited from your IBAN ending 1101 on 07/11/2026 12:30 for Outgoing Charges on Fawri+ Ref: ABCO261107099999 Balance BHD 5,221.954"
+
+        _ = await SMSImporter.importText(sms2Reverse, context: context, forceApprove: true)
+        let mergedReverseOut = await SMSImporter.importText(sms1Reverse, context: context, forceApprove: true)
+
+        let allTxsAfterReverse = try context.fetch(FetchDescriptor<MoneyTransaction>())
+        #expect(allTxsAfterReverse.count == 2)
+        let txReverse = try #require(mergedReverseOut.transaction)
+        #expect(txReverse.accountID == ilaAccount.id)
+        #expect(abs(txReverse.amount - 170.110) < 0.0001) // Highest debited/transfer amount
+        #expect(abs((txReverse.smsBalance ?? 0) - 5051.954) < 0.0001) // Lowest balance amount
+        #expect(abs(ilaAccount.balance - 5051.954) < 0.0001)
+        #expect(txReverse.smsReference == "ABCO261107099999")
+        #expect(txReverse.smsAccountSuffix == "1101")
+        #expect(txReverse.smsRecipientSuffix == "0020")
+        #expect(txReverse.merchant == "IBAN ending 0020")
+    }
+
+    // MARK: - 14. SMS Testing Lab + Self-Learning + Publish Knowledge Tests
+
+    @Test func testSMSTestingLabBulkImportSelfLearningPublishAndRollback() async throws {
+        let context = makeCleanContext()
+        let tempRoot = FileManager.default.temporaryDirectory.appendingPathComponent("SMSLabTest_\(UUID().uuidString)", isDirectory: true)
+        SMSKnowledgeStore.baseDirectoryOverride = tempRoot.appendingPathComponent("Knowledge", isDirectory: true)
+        SMSLabStore.baseDirectoryOverride = tempRoot.appendingPathComponent("Lab", isDirectory: true)
+        defer {
+            SMSKnowledgeStore.resetAll()
+            SMSKnowledgeStore.baseDirectoryOverride = nil
+            SMSLabStore.baseDirectoryOverride = nil
+            try? FileManager.default.removeItem(at: tempRoot)
+        }
+
+        let lab = SMSLabStore(loadFromDisk: false)
+        lab.resetAllForTesting()
+
+        // 1. Load Bahrain Sample Pack (18 messages across BisB, BBK, NBB, ila, Al Salam, KFH, BenefitPay, AUB)
+        let loadResult = lab.loadBahrainSamplePack()
+        #expect(loadResult.added == 18)
+        #expect(lab.samples.count == 18)
+
+        // Verify live transactions in SwiftData are completely untouched (isolated sandbox)
+        let liveTxsBefore = try context.fetch(FetchDescriptor<MoneyTransaction>())
+        #expect(liveTxsBefore.isEmpty)
+
+        // Before self-learning, the 3 challenge cases (shortcode 88188 -> BBK, MANAMA ROASTERY -> dining, compact BisB debit) fail
+        let initialStats = lab.stats
+        #expect(initialStats.total == 18)
+        #expect(initialStats.failed == 3)
+        #expect(initialStats.passed == 15)
+
+        // 2. Approved permanent test cases must never be overwritten automatically
+        let sampleToProtect = try #require(lab.samples.first(where: { $0.isTestCase }))
+        let originalBank = sampleToProtect.expected.bank
+        let overwriteAttempt = lab.updateSample(
+            id: sampleToProtect.id,
+            expected: LabExpected(bank: "FakeBank"),
+            allowOverwriteApproved: false
+        )
+        #expect(overwriteAttempt == false)
+        #expect(lab.samples.first(where: { $0.id == sampleToProtect.id })?.expected.bank == originalBank)
+
+        // 3. Self-Learning: generate rules from approved corrections
+        let proposal = lab.generateRulesFromCorrections()
+        #expect(proposal.count == 3)
+        #expect(proposal.senderBanks.count == 1)
+        #expect(proposal.keywords.count == 1)
+        #expect(proposal.patterns.count == 1)
+
+        // With draft preview enabled, all 18 test cases now pass and 0 regressions occur!
+        #expect(lab.stats.failed == 0)
+        #expect(lab.stats.passed == 18)
+        #expect(lab.stats.improvements == 3)
+        #expect(lab.regressionReport.isSafeToPublish == true)
+        #expect(lab.regressionReport.newlyFixed.count == 3)
+
+        // 4. Before publishing, production SMSParser does not yet have the draft rules
+        let shortcodeSMS = "Card ending 9081 used for BHD 11.200 at CAREEM RIDE on 29/10/2026 20:15. Avl Bal BHD 801.100."
+        let prePublishParsed = try #require(SMSParser.parse(shortcodeSMS, sender: "88188", context: nil))
+        #expect(prePublishParsed.detectedBank == nil)
+
+        // 5. Approve all draft rules and Publish to Budget AI (v1)
+        lab.approveAllDraftRules()
+        #expect(lab.unpublishedChanges.count == 3)
+        let v1Entry = try lab.publishToBudgetAI(notes: "Release v1: BBK 88188 shortcode, Manama Roastery dining, BisB compact debit")
+        #expect(v1Entry.version == 1)
+        #expect(SMSKnowledgeStore.livePack.version == 1)
+        #expect(lab.unpublishedChanges.isEmpty)
+
+        // 6. Verify production SMSParser now uses the published knowledge for all 3 learned cases!
+        let postPublishShortcode = try #require(SMSParser.parse(shortcodeSMS, sender: "88188", context: nil))
+        #expect(postPublishShortcode.detectedBank == "BBK")
+
+        let roasterySMS = "NBB: Your card ending 3310 was used for BHD 3.800 at MANAMA ROASTERY on 29/10/2026 09:30. Avl Bal BHD 486.300."
+        let postPublishRoastery = try #require(SMSParser.parse(roasterySMS, sender: "NBB", context: nil))
+        #expect(postPublishRoastery.category == .dining)
+
+        let compactBisbSMS = "BisB Alert: BHD 15.000 on card 4412 at ZARA CITY CENTRE 29/10/2026 21:00. Bal BHD 229.445."
+        let postPublishCompact = try #require(SMSParser.parse(compactBisbSMS, sender: "BisB", context: nil))
+        #expect(postPublishCompact.transactionType == .expense)
+        #expect(postPublishCompact.category == .shopping)
+        #expect(postPublishCompact.knowledgeRuleID != nil)
+
+        // 7. Publish a v2 with an additional keyword rule, then roll back to v1
+        lab.addOrUpdateKeywordRule(SMSCategoryKeywordRule(keyword: "bahrain padel club", category: SpendCategory.entertainment.rawValue, status: .approved))
+        let v2Entry = try lab.publishToBudgetAI(notes: "Release v2: Added Bahrain Padel Club")
+        #expect(v2Entry.version == 2)
+        #expect(Categorizer.guess("BAHRAIN PADEL CLUB") == .entertainment)
+
+        let rollbackEntry = try lab.rollbackToVersion(1, notes: "Rollback to v1")
+        #expect(rollbackEntry.version == 3)
+        #expect(rollbackEntry.restoredFrom == 1)
+        #expect(Categorizer.guess("BAHRAIN PADEL CLUB") == nil)
+        #expect(Categorizer.guess("MANAMA ROASTERY") == .dining)
+    }
+
+    @Test func testSMSLabBulkCSVAndTXTImport() throws {
+        let csv = """
+        sender,sms,bank,amount,type,direction,account,category,approved
+        BBK,"BBK: Your debit card ending 1234 was debited for BHD 9.500 at COSTA COFFEE on 29/10/2026.",BBK,9.500,expense,outgoing,1234,dining,true
+        NBB,"NBB: Salary of BHD 950.000 has been credited to your account ending 7788.",NBB,950.000,income,incoming,7788,income,false
+        """
+        let csvSummary = try SMSLabImporter.importRawText(csv, sourceName: "test.csv")
+        #expect(csvSummary.format == .csv)
+        #expect(csvSummary.importedSamples.count == 2)
+        #expect(csvSummary.labeledCount == 2)
+        #expect(csvSummary.importedSamples[0].expected.bank == "BBK")
+        #expect(csvSummary.importedSamples[0].expected.amount == 9.500)
+        #expect(csvSummary.importedSamples[0].expected.account == "1234")
+        #expect(csvSummary.importedSamples[0].isTestCase == true)
+
+        let txt = """
+        [BisB] Your BisB card ending 4412 was used for BHD 4.000 at STARBUCKS on 29/10/2026.
+        [ila] ila Bank: Apple Pay purchase of BHD 7.250 at CARREFOUR using card ending 7721.
+        """
+        let txtSummary = try SMSLabImporter.importRawText(txt, sourceName: "batch.txt")
+        #expect(txtSummary.format == .txt)
+        #expect(txtSummary.importedSamples.count == 2)
+        #expect(txtSummary.importedSamples[0].sender == "BisB")
+        #expect(txtSummary.importedSamples[1].sender == "ila")
     }
 }
