@@ -65,6 +65,9 @@ struct HomeView: View {
                     billToPay = nil
                 }
             }
+            .onAppear {
+                SMSImporter.reconcileExistingTransactions(context: context)
+            }
         }
     }
 
@@ -235,7 +238,7 @@ struct HomeView: View {
     private var duplicatesBanner: some View {
         let pendingCount = transactions.filter(\.isPending).count
         if pendingCount > 0 {
-            Button { appState.tab = .transactions } label: {
+            Button { appState.openTransactions(filter: .review) } label: {
                 HStack(spacing: 12) {
                     IconBadge(symbol: "clock.fill", color: Theme.warning, size: 38)
                     Text("\(pendingCount) SMS transaction\(pendingCount == 1 ? "" : "s") to approve")
@@ -250,7 +253,7 @@ struct HomeView: View {
         }
         let count = transactions.filter(\.isPossibleDuplicate).count
         if count > 0 {
-            Button { appState.tab = .transactions } label: {
+            Button { appState.openTransactions(filter: .review) } label: {
                 HStack(spacing: 12) {
                     IconBadge(symbol: "exclamationmark.2", color: Theme.negative, size: 38)
                     Text("\(count) possible duplicate\(count == 1 ? "" : "s") to review")

@@ -221,9 +221,9 @@ struct AccountEditor: View {
                     Toggle("Include in net worth", isOn: $includeInNetWorth)
                 } footer: {
                     if !includeInNetWorth {
-                        Text("Excluded from your net worth total.")
+                        Text("Excluded from your net worth total and Spendable balance in Safe to Spend.")
                     } else {
-                        Text(kind.isLiquid ? "Counts toward your cash & bank balance, net worth, and Safe to Spend." : (kind.isLiability ? "Subtracted from your net worth." : "Counts toward your net worth."))
+                        Text(kind.isLiability ? "Subtracted from your net worth and Safe to Spend." : "Counts toward your assets, net worth, and Spendable balance in Safe to Spend.")
                     }
                 }
                 if kind == .bank || kind == .creditCard || kind == .cash {
@@ -345,6 +345,7 @@ struct AccountEditor: View {
                 }
             }
         }
+        SMSImporter.reconcileExistingTransactions(context: context)
         Ledger.recordSnapshot(context: context)
         try? context.save()
         let all = (try? context.fetch(FetchDescriptor<Account>())) ?? []

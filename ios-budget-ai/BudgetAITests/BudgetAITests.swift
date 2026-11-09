@@ -424,15 +424,23 @@ struct BudgetAITests {
     @Test func accountIncludeInNetWorthToggle() throws {
         let checking = Account(name: "NBB Current", kind: .bank, institution: "NBB", balance: 400.000, includeInNetWorth: true)
         let hiddenSavings = Account(name: "Side Vault", kind: .bank, institution: "ila", balance: 600.000, includeInNetWorth: false)
+        let investment = Account(name: "Portfolio", kind: .investment, institution: "SICO", balance: 250.000, includeInNetWorth: true)
         let carLoan = Account(name: "Car Loan", kind: .loan, institution: "BBK", balance: 150.000, includeInNetWorth: false)
 
-        let finance = Finance(transactions: [], accounts: [checking, hiddenSavings, carLoan])
+        let finance = Finance(transactions: [], accounts: [checking, hiddenSavings, investment, carLoan])
         // Liquid balance (Cash & bank) still counts all liquid cash & bank accounts (400 + 600 = 1000)
         #expect(abs(finance.liquidBalance - 1000.000) < 0.0001)
-        // Net worth only counts accounts with includeInNetWorth == true (400)
-        #expect(abs(finance.totalAssets - 400.000) < 0.0001)
+        // Net worth and Safe to Spend spendable balance are linked to Assets with includeInNetWorth == true (400 + 250 = 650)
+        #expect(abs(finance.totalAssets - 650.000) < 0.0001)
+        #expect(abs(finance.safeToSpend.spendable - 650.000) < 0.0001)
         #expect(abs(finance.totalLiabilities - 0.000) < 0.0001)
-        #expect(abs(finance.netWorth - 400.000) < 0.0001)
+        #expect(abs(finance.netWorth - 650.000) < 0.0001)
+
+        // Including hiddenSavings in net worth updates Safe to Spend spendable balance (650 + 600 = 1250)
+        hiddenSavings.includeInNetWorth = true
+        let financeIncluded = Finance(transactions: [], accounts: [checking, hiddenSavings, investment, carLoan])
+        #expect(abs(financeIncluded.totalAssets - 1250.000) < 0.0001)
+        #expect(abs(financeIncluded.safeToSpend.spendable - 1250.000) < 0.0001)
     }
 
     // MARK: - 9. Visa Credit Card Payment SMS
@@ -1107,6 +1115,19 @@ struct BudgetAITests {
         reviewFilter.kind = .review
         #expect(reviewFilter.matches(pendingTx))
         #expect(!reviewFilter.matches(approvedTx))
+
+        // Duplicate transactions must also appear in the Needs Review filter tab
+        let duplicateTx = MoneyTransaction(amount: 25, isIncome: false, merchant: "Duplicate Store", category: .shopping, date: .now, source: .sms, accountID: acc.id)
+        duplicateTx.isPending = false
+        duplicateTx.isPossibleDuplicate = true
+        context.insert(duplicateTx)
+        #expect(reviewFilter.matches(duplicateTx))
+
+        // Home page redirect helper sets tab to .transactions and requestedTransactionsFilter to .review
+        let state = AppState()
+        state.openTransactions(filter: .review)
+        #expect(state.tab == .transactions)
+        #expect(state.requestedTransactionsFilter == .review)
     }
 
     @Test func testAlSalamMaskedIBANTowardsEWABNotAssignedToIlaBank() async throws {
@@ -1273,6 +1294,46 @@ struct BudgetAITests {
         #expect(txReverse.smsAccountSuffix == "1101")
         #expect(txReverse.smsRecipientSuffix == "0020")
         #expect(txReverse.merchant == "IBAN ending 0020")
+
+        // Order C: Pasting both SMS messages together separated by a single newline (without blank lines)
+        let smsBatch1 = "An amount of BHD 170.110 inc VAT has been debited from your IBAN ending 1101 on 07/11/2026 14:15 for Outgoing Charges on Fawri+ Ref: ABCO261107077777 Balance BHD 4,881.844"
+        let smsBatch2 = "Success! Fawri+ transfer of BHD 170.000 to IBAN **0020 is completed on 07/11/2026 14:15 Ref ABCO261107077777 Balance BHD 4,711.844 Enquiry 17123456"
+        let combinedPaste = "\(smsBatch1)\n\(smsBatch2)"
+        #expect(SMSParser.splitBatch(combinedPaste).count == 2)
+
+        let batchOutcome = await SMSImporter.importText(combinedPaste, context: context, forceApprove: true)
+        #expect(batchOutcome.batchTransactions.count == 1)
+        #expect(batchOutcome.flaggedDuplicate == false)
+        let txBatch = try #require(batchOutcome.transaction)
+        #expect(abs(txBatch.amount - 170.110) < 0.0001)
+        #expect(abs((txBatch.smsBalance ?? 0) - 4711.844) < 0.0001)
+        #expect(abs(ilaAccount.balance - 4711.844) < 0.0001)
+    }
+
+    @Test func testDuplicateConditionStrictlyByReferenceCodeOnly() async throws {
+        let context = makeCleanContext()
+        let acc = Account(name: "Main Bank", kind: .bank, institution: "BisB", balance: 1000.000)
+        acc.smsMatch = "1234"
+        context.insert(acc)
+        try context.save()
+
+        // 1. Two SMS with identical amount, balance, merchant, and date/time but NO reference code -> NOT duplicates!
+        let noRefSMS = "Your BisB card ending 1234 was used for BHD 15.000 at STARBUCKS on 2026/11/07 10:00. Avl Bal BHD 985.000. Tel 17515151"
+        let out1 = await SMSImporter.importText(noRefSMS, context: context, forceApprove: true)
+        let out2 = await SMSImporter.importText(noRefSMS, context: context, forceApprove: true)
+        #expect(out1.flaggedDuplicate == false)
+        #expect(out2.flaggedDuplicate == false)
+        #expect(out1.transaction?.isPossibleDuplicate == false)
+        #expect(out2.transaction?.isPossibleDuplicate == false)
+
+        // 2. Two SMS with the SAME reference code on different days (so not same-time merged) -> Flagged as duplicate!
+        let refSMS1 = "BisB: Purchase of BHD 20.000 at CARREFOUR on 2026/11/05 09:00. Ref: DUPREF998877. Avl Bal BHD 965.000. Tel 17515151"
+        let refSMS2 = "BisB: Purchase of BHD 35.000 at DIFFERENT SHOP on 2026/11/07 18:00. Ref: DUPREF998877. Avl Bal BHD 930.000. Tel 17515151"
+        let refOut1 = await SMSImporter.importText(refSMS1, context: context, forceApprove: true)
+        let refOut2 = await SMSImporter.importText(refSMS2, context: context, forceApprove: true)
+        #expect(refOut1.flaggedDuplicate == false)
+        #expect(refOut2.flaggedDuplicate == true)
+        #expect(refOut2.transaction?.isPossibleDuplicate == true)
     }
 
     // MARK: - 14. SMS Testing Lab + Self-Learning + Publish Knowledge Tests

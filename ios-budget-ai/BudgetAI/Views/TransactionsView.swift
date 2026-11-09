@@ -54,7 +54,7 @@ struct TxFilterState: Equatable {
     func matches(_ tx: MoneyTransaction, ignoringDates: Bool = false) -> Bool {
         switch kind {
         case .all: break
-        case .review: if !tx.isPending { return false }
+        case .review: if !tx.isPending && !tx.isPossibleDuplicate { return false }
         case .income: if !tx.isOrdinaryIncome { return false }
         case .expenses: if !tx.isSpending { return false }
         case .transfers: if !tx.isTransfer { return false }
@@ -90,6 +90,7 @@ struct TransactionsView: View {
     @State private var approvedTick = 0
 
     private var pending: [MoneyTransaction] { transactions.filter(\.isPending) }
+    private var needsReviewItems: [MoneyTransaction] { transactions.filter { $0.isPending || $0.isPossibleDuplicate } }
 
     private func matchesSearch(_ tx: MoneyTransaction) -> Bool {
         guard !query.isEmpty else { return true }
@@ -101,7 +102,7 @@ struct TransactionsView: View {
 
     private var filtered: [MoneyTransaction] {
         if filters.kind == .review {
-            return transactions.filter { $0.isPending && filters.matches($0, ignoringDates: mode == .calendar) && matchesSearch($0) }
+            return transactions.filter { ($0.isPending || $0.isPossibleDuplicate) && filters.matches($0, ignoringDates: mode == .calendar) && matchesSearch($0) }
         }
         if filters.kind == .all {
             return transactions.filter { filters.matches($0, ignoringDates: mode == .calendar) && matchesSearch($0) }
@@ -146,10 +147,10 @@ struct TransactionsView: View {
                                     .font(.title2)
                                     .foregroundStyle(Theme.warning)
                                 VStack(alignment: .leading, spacing: 3) {
-                                    Text("Quarantined for Review")
+                                    Text("Needs Review")
                                         .font(.headline)
                                         .foregroundStyle(Theme.ink)
-                                    Text("Transactions needing review appear here. Not included in balances until approved.")
+                                    Text("Transactions waiting for approval or flagged with duplicate SMS reference codes appear here.")
                                         .font(.caption)
                                         .foregroundStyle(Theme.secondaryInk)
                                 }
@@ -157,54 +158,96 @@ struct TransactionsView: View {
                             .padding(.vertical, 4)
                         }
                     } else {
+                        let pendingFiltered = filtered.filter(\.isPending)
+                        let duplicateFiltered = filtered.filter(\.isPossibleDuplicate)
                         Section {
                             HStack {
-                                Text("\(filtered.count) pending approval")
-                                    .font(.subheadline)
-                                    .foregroundStyle(Theme.secondaryInk)
-                                Spacer()
-                                Button("Approve all") {
-                                    let items = filtered
-                                    withAnimation { _ = Ledger.approveAll(items, context: context) }
-                                    approvedTick += 1
-                                    appState.show("Approved \(items.count) transaction\(items.count == 1 ? "" : "s")")
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("\(filtered.count) transaction\(filtered.count == 1 ? "" : "s") to review")
+                                        .font(.subheadline.weight(.medium))
+                                        .foregroundStyle(Theme.ink)
+                                    if !pendingFiltered.isEmpty && !duplicateFiltered.isEmpty {
+                                        Text("\(pendingFiltered.count) pending approval · \(duplicateFiltered.count) duplicate\(duplicateFiltered.count == 1 ? "" : "s")")
+                                            .font(.caption)
+                                            .foregroundStyle(Theme.secondaryInk)
+                                    } else if !duplicateFiltered.isEmpty {
+                                        Text("\(duplicateFiltered.count) possible duplicate\(duplicateFiltered.count == 1 ? "" : "s") (same SMS reference)")
+                                            .font(.caption)
+                                            .foregroundStyle(Theme.secondaryInk)
+                                    } else {
+                                        Text("\(pendingFiltered.count) pending approval")
+                                            .font(.caption)
+                                            .foregroundStyle(Theme.secondaryInk)
+                                    }
                                 }
-                                .font(.subheadline.weight(.semibold))
-                                .foregroundStyle(Theme.cobalt)
+                                Spacer()
+                                if !pendingFiltered.isEmpty {
+                                    Button("Approve all") {
+                                        let items = pendingFiltered
+                                        withAnimation { _ = Ledger.approveAll(items, context: context) }
+                                        approvedTick += 1
+                                        appState.show("Approved \(items.count) transaction\(items.count == 1 ? "" : "s")")
+                                    }
+                                    .font(.subheadline.weight(.semibold))
+                                    .foregroundStyle(Theme.cobalt)
+                                } else if !duplicateFiltered.isEmpty {
+                                    Button("Keep all") {
+                                        let items = duplicateFiltered
+                                        withAnimation {
+                                            for tx in items { tx.isPossibleDuplicate = false }
+                                            try? context.save()
+                                        }
+                                        approvedTick += 1
+                                        appState.show("Kept \(items.count) transaction\(items.count == 1 ? "" : "s")")
+                                    }
+                                    .font(.subheadline.weight(.semibold))
+                                    .foregroundStyle(Theme.cobalt)
+                                }
                             }
                         }
                     }
-                } else if filters.kind == .all && !pending.isEmpty && query.isEmpty {
+                } else if filters.kind == .all && !needsReviewItems.isEmpty && query.isEmpty {
                     Section {
-                        HStack(spacing: 12) {
-                            ZStack {
-                                Circle()
-                                    .fill(Theme.warning.opacity(0.16))
-                                    .frame(width: 38, height: 38)
-                                Image(systemName: "clock.badge.exclamationmark.fill")
-                                    .font(.system(size: 18))
-                                    .foregroundStyle(Theme.warning)
+                        Button {
+                            withAnimation(.snappy) { filters.kind = .review }
+                        } label: {
+                            HStack(spacing: 12) {
+                                ZStack {
+                                    Circle()
+                                        .fill(Theme.warning.opacity(0.16))
+                                        .frame(width: 38, height: 38)
+                                    Image(systemName: "clock.badge.exclamationmark.fill")
+                                        .font(.system(size: 18))
+                                        .foregroundStyle(Theme.warning)
+                                }
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text("\(needsReviewItems.count) needing review")
+                                        .font(.subheadline.weight(.semibold))
+                                        .foregroundStyle(Theme.ink)
+                                    Text("Tap to open Needs Review tab, approve pending SMS, or resolve duplicates.")
+                                        .font(.caption)
+                                        .foregroundStyle(Theme.secondaryInk)
+                                }
+                                Spacer()
+                                if !pending.isEmpty {
+                                    Button("Approve all") {
+                                        let count = pending.count
+                                        withAnimation { _ = Ledger.approveAll(pending, context: context) }
+                                        approvedTick += 1
+                                        appState.show("Approved \(count) transaction\(count == 1 ? "" : "s")")
+                                    }
+                                    .font(.caption.weight(.semibold))
+                                    .buttonStyle(.bordered)
+                                    .tint(Theme.positive)
+                                } else {
+                                    Image(systemName: "chevron.right")
+                                        .font(.footnote.weight(.semibold))
+                                        .foregroundStyle(.tertiary)
+                                }
                             }
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text("\(pending.count) waiting for approval")
-                                    .font(.subheadline.weight(.semibold))
-                                    .foregroundStyle(Theme.ink)
-                                Text("Included in the list below. Tap to review reasons, approve, or reject.")
-                                    .font(.caption)
-                                    .foregroundStyle(Theme.secondaryInk)
-                            }
-                            Spacer()
-                            Button("Approve all") {
-                                let count = pending.count
-                                withAnimation { _ = Ledger.approveAll(pending, context: context) }
-                                approvedTick += 1
-                                appState.show("Approved \(count) transaction\(count == 1 ? "" : "s")")
-                            }
-                            .font(.caption.weight(.semibold))
-                            .buttonStyle(.bordered)
-                            .tint(Theme.positive)
+                            .padding(.vertical, 2)
                         }
-                        .padding(.vertical, 2)
+                        .buttonStyle(.plain)
                     }
                 }
 
@@ -288,9 +331,30 @@ struct TransactionsView: View {
             .sheet(isPresented: $showFilters) {
                 TransactionFilterSheet(filters: $filters, accounts: accounts)
             }
+            .onAppear {
+                SMSImporter.reconcileExistingTransactions(context: context)
+                applyRequestedFilterIfNeeded()
+            }
+            .onChange(of: appState.requestedTransactionsFilter) { _, _ in
+                applyRequestedFilterIfNeeded()
+            }
+            .onChange(of: appState.tab) { _, newTab in
+                if newTab == .transactions {
+                    applyRequestedFilterIfNeeded()
+                }
+            }
             .sensoryFeedback(.success, trigger: approvedTick)
             .sensoryFeedback(.selection, trigger: mode)
         }
+    }
+
+    private func applyRequestedFilterIfNeeded() {
+        guard let requested = appState.requestedTransactionsFilter else { return }
+        withAnimation(.snappy) {
+            filters = TxFilterState(kind: requested)
+            mode = .list
+        }
+        appState.requestedTransactionsFilter = nil
     }
 
     // MARK: Pending
@@ -467,8 +531,8 @@ struct TransactionsView: View {
                     } label: {
                         HStack(spacing: 6) {
                             Text(f.rawValue)
-                            if f == .review && !pending.isEmpty {
-                                Text("\(pending.count)")
+                            if f == .review && !needsReviewItems.isEmpty {
+                                Text("\(needsReviewItems.count)")
                                     .font(.caption2.bold().monospacedDigit())
                                     .padding(.horizontal, 6)
                                     .padding(.vertical, 2)
@@ -1477,7 +1541,7 @@ struct TransactionDetailView: View {
         case "Unknown transaction type":
             return "The transaction direction or type could not be classified with certainty."
         case "Possible duplicate":
-            return "Another transaction with a matching amount and timestamp was already recorded."
+            return "Another SMS transaction with the same reference code was already recorded."
         default:
             return "This transaction requires approval before updating account balances and budgets."
         }

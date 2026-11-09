@@ -373,9 +373,44 @@ struct PasteSMSSheet: View {
             let chunks = batchChunks
             if chunks.count > 1 {
                 let parsedItems = chunks.compactMap { SMSParser.parse($0, sender: trimmedSender, context: context) }
-                Label("\(parsedItems.count) of \(chunks.count) messages detected as transactions", systemImage: "doc.on.doc.fill")
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(Theme.cobalt)
+                if parsedItems.count == 2,
+                   let r1 = parsedItems[0].referenceNumber?.trimmingCharacters(in: .whitespacesAndNewlines), !r1.isEmpty,
+                   let r2 = parsedItems[1].referenceNumber?.trimmingCharacters(in: .whitespacesAndNewlines), !r2.isEmpty,
+                   r1.caseInsensitiveCompare(r2) == .orderedSame,
+                   parsedItems[0].isIncome == parsedItems[1].isIncome {
+                    let maxAmount = max(parsedItems[0].amount, parsedItems[1].amount)
+                    let minBalance: Double? = {
+                        if let b1 = parsedItems[0].balance, let b2 = parsedItems[1].balance { return min(b1, b2) }
+                        return parsedItems[0].balance ?? parsedItems[1].balance
+                    }()
+                    Label("Same reference (\(r1)) · Will auto-merge into 1 transaction", systemImage: "arrow.triangle.merge")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Theme.positive)
+                    HStack {
+                        Text("Merged amount (highest)")
+                            .font(.caption)
+                            .foregroundStyle(Theme.secondaryInk)
+                        Spacer()
+                        Text(Money.format(maxAmount, parsedItems[0].currency ?? currency))
+                            .font(.caption.monospacedDigit().weight(.semibold))
+                            .foregroundStyle(Theme.ink)
+                    }
+                    if let minBalance {
+                        HStack {
+                            Text("Merged balance (lowest)")
+                                .font(.caption)
+                                .foregroundStyle(Theme.secondaryInk)
+                            Spacer()
+                            Text(Money.format(minBalance, parsedItems[0].currency ?? currency))
+                                .font(.caption.monospacedDigit().weight(.semibold))
+                                .foregroundStyle(Theme.cobalt)
+                        }
+                    }
+                } else {
+                    Label("\(parsedItems.count) of \(chunks.count) messages detected as transactions", systemImage: "doc.on.doc.fill")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(Theme.cobalt)
+                }
                 ForEach(Array(parsedItems.enumerated()), id: \.offset) { _, p in
                     previewRow(for: p)
                 }

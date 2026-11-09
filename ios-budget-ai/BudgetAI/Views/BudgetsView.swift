@@ -782,7 +782,7 @@ struct SafeToSpendView: View {
             }
 
             Section {
-                row("Spendable balance", "Cash and bank accounts", s.spendable, symbol: "building.columns.fill", color: Theme.cobalt, sign: 1)
+                row("Spendable balance", "Assets included in net worth", s.spendable, symbol: "building.columns.fill", color: Theme.cobalt, sign: 1)
                 row("Upcoming bills", "Due before month end", s.billsDue, symbol: "calendar", color: Theme.warning, sign: -1)
                 row("Essential spending", "Left in essential budgets", s.essentials, symbol: "cart.fill", color: Color(hex: 0x22A565), sign: -1)
                 row("Savings commitments", "Still to set aside this month", s.savings, symbol: "banknote.fill", color: Color(hex: 0x8B5CF6), sign: -1)
@@ -806,6 +806,34 @@ struct SafeToSpendView: View {
                 Text(s.isShort
                      ? "Your commitments and liabilities are higher than your spendable balance. Consider pausing a savings goal or moving money from savings."
                      : "Divided evenly across the \(s.daysLeft) days left this month. Spend less today and tomorrow's amount grows.")
+            }
+
+            let assets = accounts.filter { !$0.kind.isLiability }
+            if !assets.isEmpty {
+                Section("Assets") {
+                    ForEach(assets) { acc in
+                        LabeledContent {
+                            Text(Money.format(acc.balance, currency, signed: acc.includeInNetWorth))
+                                .font(.body.monospacedDigit())
+                                .foregroundStyle(acc.includeInNetWorth ? Theme.positive : Theme.secondaryInk)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.75)
+                                .layoutPriority(1)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(acc.name)
+                                    .foregroundStyle(acc.includeInNetWorth ? Theme.ink : Theme.secondaryInk)
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.85)
+                                let baseSub = acc.institution.isEmpty ? acc.kind.title : "\(acc.kind.title) · \(acc.institution)"
+                                Text(acc.includeInNetWorth ? "\(baseSub) · Included in net worth" : "\(baseSub) · Excluded from net worth")
+                                    .font(.caption2)
+                                    .foregroundStyle(Theme.secondaryInk)
+                                    .lineLimit(1)
+                            }
+                        }
+                    }
+                }
             }
 
             if !bills.isEmpty {

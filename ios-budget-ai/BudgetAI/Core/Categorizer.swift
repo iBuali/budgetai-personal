@@ -689,6 +689,7 @@ enum SMSParser {
     }
 
     /// Splits a pasted block of text into individual SMS messages if multiple messages were pasted together.
+    /// Handles both blank-line separated paragraphs and consecutive single-newline separated SMS messages.
     static func splitBatch(_ raw: String) -> [String] {
         let normalized = normalizeText(raw).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalized.isEmpty else { return [] }
@@ -704,10 +705,27 @@ enum SMSParser {
                     acc[acc.count - 1].append(trimmed)
                 }
             }
-            .compactMap { lines -> String? in
-                let joined = lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-                return joined.isEmpty ? nil : joined
+            .compactMap { lines -> [String]? in
+                let nonEmpty = lines.filter { !$0.isEmpty }
+                guard !nonEmpty.isEmpty else { return nil }
+                // If a paragraph has multiple lines where 2+ lines independently contain a transaction amount,
+                // split those lines into separate SMS chunks even when there was no blank line between them.
+                let linesWithAmounts = nonEmpty.filter { amount(in: $0) != nil }
+                if nonEmpty.count > 1 && linesWithAmounts.count > 1 {
+                    var subChunks: [String] = []
+                    for line in nonEmpty {
+                        if amount(in: line) != nil || subChunks.isEmpty {
+                            subChunks.append(line)
+                        } else {
+                            subChunks[subChunks.count - 1] += "\n" + line
+                        }
+                    }
+                    return subChunks
+                }
+                let joined = nonEmpty.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+                return joined.isEmpty ? nil : [joined]
             }
+            .flatMap { $0 }
 
         if paragraphs.count > 1 {
             let withAmounts = paragraphs.filter { amount(in: $0) != nil }

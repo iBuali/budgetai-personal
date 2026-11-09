@@ -80,6 +80,7 @@ enum Ledger {
         context.delete(tx)
         recordSnapshot(context: context)
         try? context.save()
+        reconcileDuplicates(context: context)
     }
 
     /// Reverse the old effect, mutate, then apply the new one.
@@ -383,50 +384,74 @@ enum Ledger {
 
     // MARK: Duplicates
 
+    /// Extracts the normalized SMS reference code for a transaction (from `smsReference` or `rawText`).
+    static func effectiveReference(for tx: MoneyTransaction) -> String? {
+        if let direct = tx.smsReference?.trimmingCharacters(in: .whitespacesAndNewlines), !direct.isEmpty {
+            return direct
+        }
+        if let raw = tx.rawText, let parsedRef = SMSParser.referenceNumber(in: raw)?.trimmingCharacters(in: .whitespacesAndNewlines), !parsedRef.isEmpty {
+            tx.smsReference = parsedRef
+            return parsedRef
+        }
+        return nil
+    }
+
+    /// Strict Reference-Only Duplicate Detection:
+    /// A transaction is flagged as a duplicate ONLY if it has a non-empty SMS reference code
+    /// that matches the reference code of another transaction. All other conditions (amount, balance, merchant, date, etc.) are ignored.
     static func isLikelyDuplicate(_ tx: MoneyTransaction, context: ModelContext) -> Bool {
-        let txRef = tx.smsReference?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !txRef.isEmpty {
-            let all = (try? context.fetch(FetchDescriptor<MoneyTransaction>())) ?? []
-            if all.contains(where: { other in
-                guard other.id != tx.id, let otherRef = other.smsReference?.trimmingCharacters(in: .whitespacesAndNewlines), !otherRef.isEmpty else {
-                    return false
-                }
-                return otherRef.caseInsensitiveCompare(txRef) == .orderedSame
-            }) {
-                return true
+        guard let txRef = effectiveReference(for: tx), !txRef.isEmpty else {
+            return false
+        }
+        let all = (try? context.fetch(FetchDescriptor<MoneyTransaction>())) ?? []
+        return all.contains { other in
+            guard other.id != tx.id,
+                  let otherRef = effectiveReference(for: other),
+                  !otherRef.isEmpty else {
+                return false
+            }
+            return otherRef.caseInsensitiveCompare(txRef) == .orderedSame
+        }
+    }
+
+    /// Re-evaluates duplicate status across all stored transactions so that ONLY transactions sharing
+    /// an identical non-empty SMS reference code remain flagged as `isPossibleDuplicate`.
+    static func reconcileDuplicates(context: ModelContext) {
+        let all = (try? context.fetch(FetchDescriptor<MoneyTransaction>(sortBy: [SortDescriptor(\.date)]))) ?? []
+        guard !all.isEmpty else { return }
+
+        var refCounts: [String: Int] = [:]
+        for tx in all {
+            if let ref = effectiveReference(for: tx)?.uppercased(), !ref.isEmpty {
+                refCounts[ref, default: 0] += 1
             }
         }
 
-        let start = tx.date.addingTimeInterval(-2 * 86_400)
-        let end = tx.date.addingTimeInterval(2 * 86_400)
-        let descriptor = FetchDescriptor<MoneyTransaction>(predicate: #Predicate { $0.date >= start && $0.date <= end })
-        let candidates = (try? context.fetch(descriptor)) ?? []
-        let key = Finance.merchantKey(tx.merchant)
-        let normRaw = tx.rawText.map { SMSParser.normalizeText($0).trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
-
-        return candidates.contains { other in
-            guard other.id != tx.id else { return false }
-            let otherRef = other.smsReference?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            // If both have non-empty reference numbers and they differ, they are distinct bank transactions.
-            if !txRef.isEmpty && !otherRef.isEmpty && txRef.caseInsensitiveCompare(otherRef) != .orderedSame {
-                return false
+        var seenFirstForRef: Set<String> = []
+        var changed = false
+        for tx in all {
+            guard let ref = effectiveReference(for: tx)?.uppercased(), !ref.isEmpty, (refCounts[ref] ?? 0) > 1 else {
+                if tx.isPossibleDuplicate {
+                    tx.isPossibleDuplicate = false
+                    changed = true
+                }
+                continue
             }
-            guard abs(other.amount - tx.amount) < 0.0005 else { return false }
-
-            if !normRaw.isEmpty, let oRaw = other.rawText {
-                let normOther = SMSParser.normalizeText(oRaw).trimmingCharacters(in: .whitespacesAndNewlines)
-                if !normOther.isEmpty && normRaw == normOther {
-                    return true
+            if !seenFirstForRef.contains(ref) {
+                seenFirstForRef.insert(ref)
+                if tx.isPossibleDuplicate {
+                    tx.isPossibleDuplicate = false
+                    changed = true
+                }
+            } else {
+                if !tx.isPossibleDuplicate {
+                    tx.isPossibleDuplicate = true
+                    changed = true
                 }
             }
-
-            guard other.effectiveTransactionType == tx.effectiveTransactionType, other.isIncome == tx.isIncome else { return false }
-            if let r1 = tx.smsRecipientSuffix, let r2 = other.smsRecipientSuffix, !r1.isEmpty, !r2.isEmpty {
-                return r1 == r2
-            }
-            let otherKey = Finance.merchantKey(other.merchant)
-            if key.isEmpty || otherKey.isEmpty { return true }
-            return key == otherKey || key.contains(otherKey) || otherKey.contains(key)
+        }
+        if changed {
+            try? context.save()
         }
     }
 

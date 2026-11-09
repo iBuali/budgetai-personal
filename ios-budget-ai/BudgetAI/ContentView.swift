@@ -7,10 +7,16 @@ enum AppTab: Hashable { case home, transactions, budgets, insights, profile }
 @Observable
 final class AppState {
     var tab: AppTab = .home
+    var requestedTransactionsFilter: TxFilter?
     var toast: String?
     var toastIsWarning = false
     var showAddTransaction = false
     var showPasteSMS = false
+
+    func openTransactions(filter: TxFilter) {
+        requestedTransactionsFilter = filter
+        tab = .transactions
+    }
 
     func show(_ text: String, warning: Bool = false) {
         toastIsWarning = warning
@@ -71,12 +77,16 @@ struct RootView: View {
         .sheet(isPresented: $state.showPasteSMS) { PasteSMSSheet() }
         .onAppear {
             if faceID { authenticate() } else { locked = false }
+            SMSImporter.reconcileExistingTransactions(context: context)
             Ledger.recordSnapshot(context: context)
             Ledger.refreshCardReminders(context: context)
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .background && faceID { locked = true }
-            if phase == .active && faceID && locked { authenticate() }
+            if phase == .active {
+                SMSImporter.reconcileExistingTransactions(context: context)
+                if faceID && locked { authenticate() }
+            }
         }
     }
 

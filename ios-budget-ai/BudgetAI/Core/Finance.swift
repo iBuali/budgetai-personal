@@ -151,7 +151,7 @@ struct Finance {
     var savingsRemaining: Double { goals.reduce(0) { $0 + $1.remainingCommitment(now: now) } }
 
     var safeToSpend: SafeToSpend {
-        SafeToSpend(spendable: liquidBalance, billsDue: billsDueRestOfMonth, essentials: essentialsRemaining,
+        SafeToSpend(spendable: totalAssets, billsDue: billsDueRestOfMonth, essentials: essentialsRemaining,
                     savings: savingsRemaining, liabilities: totalLiabilities, daysLeft: daysLeftInMonth)
     }
 
