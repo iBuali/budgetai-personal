@@ -408,7 +408,7 @@ enum Categorizer {
             "deliveroo", "burger", "pizza", "shake shack", "tim hortons", "dunkin", "subway", "bakery",
             "keeta", "hungerstation", "mrsool", "toyou", "ninja", "cari", "cinnabon", "krispy kreme",
             "baskin", "hardee", "wendy", "papa john", "domino", "nando", "chilis", "pf chang", "paul",
-            "caribou", "dose cafe", " % arabica", "arabica", "roastery", "shawarma", "grill", "bistro",
+            "caribou", "dose cafe", " % arabica", "arabica", "shawarma", "grill", "bistro",
             "diner", "kitchen", "sweets", "patisserie", "chocolat", "ice cream", "gelato", "sushi", "albaik", "al baik",
             "طلبات", "كوستا", "ستاربكس", "ماكدونالدز", "كنتاكي", "كافيه", "مقهى", "قهوة", "مطعم", "جاهز",
             "هنقرستيشن", "مرسول", "كيتا", "تويو", "البيك", "شاورما", "برجر", "بيتزا", "مخبز", "حلويات",
@@ -447,8 +447,8 @@ enum Categorizer {
         (.entertainment, [
             "vox", "cinema", "cineco", "epix", "mukta", "steam", "playstation", "xbox", "nintendo",
             "concert", "ticket", "bowling", "arcade", "magic island", "magic planet", "gravity", "karting",
-            "padel", "stadium", "museum", "theme park", "boulevard",
-            "سينما", "فوكس", "سينكو", "تذاكر", "بولينج", "بادل", "ألعاب", "ترفيه", "ملاهي"
+            "stadium", "museum", "theme park", "boulevard",
+            "سينما", "فوكس", "سينكو", "تذاكر", "بولينج", "ألعاب", "ترفيه", "ملاهي"
         ]),
         (.shopping, [
             "amazon", "amzn", "zara", "h&m", "noon", "ikea", "shein", "apple store", "mall", "centrepoint",
