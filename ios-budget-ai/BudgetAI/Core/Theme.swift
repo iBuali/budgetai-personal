@@ -3,13 +3,16 @@ import SwiftUI
 enum Theme {
     static let canvas = Color(hex: 0xF4F6FA)
     static let surface = Color.white
+    static let card = Color.white
     static let ink = Color(hex: 0x0E1525)
     static let secondaryInk = Color(hex: 0x6B7385)
     static let cobalt = Color(hex: 0x1E3FAE)
     static let brand = Color(hex: 0x1E3FAE)
     static let cobaltSoft = Color(hex: 0x1E3FAE).opacity(0.10)
     static let positive = Color(hex: 0x2BB673)
+    static let income = Color(hex: 0x2BB673)
     static let negative = Color(hex: 0xF05252)
+    static let expense = Color(hex: 0xF05252)
     static let warning = Color(hex: 0xE9A23B)
     static let track = Color(hex: 0xE6E9F0)
     static let cardRadius: CGFloat = 22

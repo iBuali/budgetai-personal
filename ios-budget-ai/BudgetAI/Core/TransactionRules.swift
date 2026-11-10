@@ -311,10 +311,11 @@ final class TransactionRuleStore {
         }
 
         if tx.amount > 0 {
+            let cur = UserDefaults.standard.string(forKey: Keys.currency) ?? "BHD"
             captured.append(RuleCondition(
                 field: .amount,
                 value: String(format: "%.3f", tx.amount),
-                displayValue: Money.format(tx.amount, tx.currency)
+                displayValue: Money.format(tx.amount, cur)
             ))
         }
 

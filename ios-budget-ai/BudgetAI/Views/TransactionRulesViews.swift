@@ -57,235 +57,11 @@ struct TransactionRuleBuilderSheet: View {
     var body: some View {
         NavigationStack {
             Form {
-                // MARK: 1. Capture Transaction Data & Select Conditions
-                Section {
-                    if availableConditions.isEmpty {
-                        Text("No transaction fields available to capture.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    } else {
-                        ForEach(availableConditions) { cond in
-                            let isSelected = selectedFields.contains(cond.field)
-                            Button {
-                                if isSelected {
-                                    selectedFields.remove(cond.field)
-                                } else {
-                                    selectedFields.insert(cond.field)
-                                }
-                            } label: {
-                                HStack(spacing: 12) {
-                                    Image(systemName: isSelected ? "checkmark.square.fill" : "square")
-                                        .font(.title3)
-                                        .foregroundStyle(isSelected ? Theme.brand : .secondary)
-
-                                    Image(systemName: cond.field.symbol)
-                                        .font(.subheadline)
-                                        .foregroundStyle(Theme.brand)
-                                        .frame(width: 24)
-
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(cond.field.label)
-                                            .font(.subheadline.weight(.medium))
-                                            .foregroundStyle(Theme.ink)
-                                        Text(cond.displayValue)
-                                            .font(.caption)
-                                            .foregroundStyle(Theme.secondaryInk)
-                                            .lineLimit(1)
-                                    }
-
-                                    Spacer()
-                                }
-                                .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                } header: {
-                    Text("1. IF — Select Captured Conditions")
-                } footer: {
-                    Text("Check the fields captured from this transaction that should identify similar future transactions.")
-                }
-
-                // MARK: 2. Condition Logic (AND / OR)
-                Section {
-                    Picker("Match Logic", selection: $logic) {
-                        ForEach(RuleConditionLogic.allCases) { item in
-                            Text(item.shortTitle).tag(item)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-
-                    Text(logic.title)
-                        .font(.caption)
-                        .foregroundStyle(Theme.secondaryInk)
-                } header: {
-                    Text("2. Condition Logic")
-                }
-
-                // MARK: 3. THEN – Actions (Default: Set Category + Transfer Options)
-                Section {
-                    Picker("Set Category", selection: $selectedCategory) {
-                        ForEach(CategoryRegistry.shared.all) { cat in
-                            Label(cat.rawValue, systemImage: cat.symbol).tag(cat)
-                        }
-                    }
-                    .onChange(of: selectedCategory) { _, newValue in
-                        if newValue == .internalTransfer {
-                            isTransferMode = true
-                            transferKind = .internalTransfer
-                        } else if newValue == .transfers {
-                            isTransferMode = true
-                            transferKind = .externalTransfer
-                        } else {
-                            isTransferMode = false
-                        }
-                    }
-
-                    Toggle("Classify as Transfer", isOn: $isTransferMode)
-                        .onChange(of: isTransferMode) { _, isTransfer in
-                            if isTransfer {
-                                selectedCategory = (transferKind == .internalTransfer) ? .internalTransfer : .transfers
-                            } else if selectedCategory == .transfers || selectedCategory == .internalTransfer {
-                                selectedCategory = .other
-                            }
-                        }
-
-                    if isTransferMode {
-                        Picker("Transfer Type", selection: $transferKind) {
-                            ForEach(RuleTransferKind.allCases) { kind in
-                                Text(kind.title).tag(kind)
-                            }
-                        }
-                        .pickerStyle(.segmented)
-                        .onChange(of: transferKind) { _, newKind in
-                            selectedCategory = (newKind == .internalTransfer) ? .internalTransfer : .transfers
-                        }
-
-                        if transferKind == .internalTransfer {
-                            Picker("From Account", selection: $fromAccountID) {
-                                Text("Keep Detected Account").tag(UUID?.none)
-                                ForEach(accounts) { acc in
-                                    Text(acc.name).tag(UUID?.some(acc.id))
-                                }
-                            }
-
-                            Picker("To Account", selection: $toAccountID) {
-                                Text("Select Destination Account").tag(UUID?.none)
-                                ForEach(accounts.filter { $0.id != fromAccountID }) { acc in
-                                    Text(acc.name).tag(UUID?.some(acc.id))
-                                }
-                            }
-                        } else {
-                            Picker("From / To Account", selection: $fromAccountID) {
-                                Text("Keep Detected Account").tag(UUID?.none)
-                                ForEach(accounts) { acc in
-                                    Text(acc.name).tag(UUID?.some(acc.id))
-                                }
-                            }
-                        }
-                    }
-                } header: {
-                    Text("3. THEN — Default Action")
-                } footer: {
-                    if isTransferMode && transferKind == .internalTransfer {
-                        Text("Internal transfers move money between your selected From Account and To Account.")
-                    } else if isTransferMode {
-                        Text("External transfers record money sent to or received from an external account.")
-                    }
-                }
-
-                // MARK: 4. Additional Actions (from available transaction fields)
-                Section {
-                    if !isTransferMode {
-                        Toggle(isOn: $enableSetAccount) {
-                            Label("Set Account", systemImage: "wallet.bifold.fill")
-                        }
-                        if enableSetAccount {
-                            Picker("Account", selection: $fromAccountID) {
-                                Text("Select Account").tag(UUID?.none)
-                                ForEach(accounts) { acc in
-                                    Text(acc.name).tag(UUID?.some(acc.id))
-                                }
-                            }
-                        }
-                    }
-
-                    if !actionMerchant.isEmpty || existingRule != nil {
-                        Toggle(isOn: $enableSetMerchant) {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Label("Set Merchant / Name", systemImage: "storefront.fill")
-                                if !actionMerchant.isEmpty {
-                                    Text(actionMerchant)
-                                        .font(.caption)
-                                        .foregroundStyle(Theme.secondaryInk)
-                                }
-                            }
-                        }
-                    }
-
-                    if !actionBank.isEmpty || existingRule != nil {
-                        Toggle(isOn: $enableSetBank) {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Label("Set SMS Bank", systemImage: "building.columns.fill")
-                                if !actionBank.isEmpty {
-                                    Text(actionBank)
-                                        .font(.caption)
-                                        .foregroundStyle(Theme.secondaryInk)
-                                }
-                            }
-                        }
-                    }
-
-                    if !actionLocationName.isEmpty || existingRule != nil {
-                        Toggle(isOn: $enableSetLocation) {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Label("Set Location", systemImage: "mappin.and.ellipse")
-                                if !actionLocationName.isEmpty {
-                                    Text(actionLocationName)
-                                        .font(.caption)
-                                        .foregroundStyle(Theme.secondaryInk)
-                                }
-                            }
-                        }
-                    }
-
-                    if !goals.isEmpty {
-                        Toggle(isOn: $enableSetGoal) {
-                            Label("Link Savings Goal", systemImage: "target")
-                        }
-                        if enableSetGoal {
-                            Picker("Savings Goal", selection: $actionGoalID) {
-                                Text("Select Goal").tag(UUID?.none)
-                                ForEach(goals) { goal in
-                                    Text(goal.name).tag(UUID?.some(goal.id))
-                                }
-                            }
-                        }
-                    }
-
-                    if !actionNote.isEmpty || existingRule != nil {
-                        Toggle(isOn: $enableSetNote) {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Label("Set Note", systemImage: "note.text")
-                                if !actionNote.isEmpty {
-                                    Text(actionNote)
-                                        .font(.caption)
-                                        .foregroundStyle(Theme.secondaryInk)
-                                }
-                            }
-                        }
-                    }
-                } header: {
-                    Text("Additional Actions (Optional)")
-                } footer: {
-                    Text("Additional actions use the values captured from this transaction.")
-                }
-
-                // MARK: 5. Rule Name & Status
-                Section("Rule Info") {
-                    TextField("Rule Name (optional)", text: $ruleName)
-                    Toggle("Enable Rule for Future Transactions", isOn: $isEnabled)
-                }
+                conditionsSection
+                logicSection
+                defaultActionSection
+                additionalActionsSection
+                ruleInfoSection
             }
             .navigationTitle(existingRule == nil ? "Create Rule" : "Edit Rule")
             .navigationBarTitleDisplayMode(.inline)
@@ -310,6 +86,256 @@ struct TransactionRuleBuilderSheet: View {
             } message: {
                 Text("A rule (\"\(conflictingRuleName)\") already uses these exact conditions. Would you like to update that rule with these actions instead?")
             }
+        }
+    }
+
+    @ViewBuilder
+    private var conditionsSection: some View {
+        Section {
+            if availableConditions.isEmpty {
+                Text("No transaction fields available to capture.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(availableConditions) { cond in
+                    conditionRow(cond)
+                }
+            }
+        } header: {
+            Text("1. IF — Select Captured Conditions")
+        } footer: {
+            Text("Check the fields captured from this transaction that should identify similar future transactions.")
+        }
+    }
+
+    @ViewBuilder
+    private func conditionRow(_ cond: RuleCondition) -> some View {
+        let isSelected = selectedFields.contains(cond.field)
+        Button {
+            if isSelected {
+                selectedFields.remove(cond.field)
+            } else {
+                selectedFields.insert(cond.field)
+            }
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: isSelected ? "checkmark.square.fill" : "square")
+                    .font(.title3)
+                    .foregroundStyle(isSelected ? Theme.brand : .secondary)
+
+                Image(systemName: cond.field.symbol)
+                    .font(.subheadline)
+                    .foregroundStyle(Theme.brand)
+                    .frame(width: 24)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(cond.field.label)
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(Theme.ink)
+                    Text(cond.displayValue)
+                        .font(.caption)
+                        .foregroundStyle(Theme.secondaryInk)
+                        .lineLimit(1)
+                }
+
+                Spacer()
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private var logicSection: some View {
+        Section {
+            Picker("Match Logic", selection: $logic) {
+                ForEach(RuleConditionLogic.allCases) { item in
+                    Text(item.shortTitle).tag(item)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            Text(logic.title)
+                .font(.caption)
+                .foregroundStyle(Theme.secondaryInk)
+        } header: {
+            Text("2. Condition Logic")
+        }
+    }
+
+    @ViewBuilder
+    private var defaultActionSection: some View {
+        Section {
+            Picker("Set Category", selection: $selectedCategory) {
+                ForEach(CategoryRegistry.shared.all) { cat in
+                    Label(cat.rawValue, systemImage: cat.symbol).tag(cat)
+                }
+            }
+            .onChange(of: selectedCategory) { _, newValue in
+                if newValue == .internalTransfer {
+                    isTransferMode = true
+                    transferKind = .internalTransfer
+                } else if newValue == .transfers {
+                    isTransferMode = true
+                    transferKind = .externalTransfer
+                } else {
+                    isTransferMode = false
+                }
+            }
+
+            Toggle("Classify as Transfer", isOn: $isTransferMode)
+                .onChange(of: isTransferMode) { _, isTransfer in
+                    if isTransfer {
+                        selectedCategory = (transferKind == .internalTransfer) ? .internalTransfer : .transfers
+                    } else if selectedCategory == .transfers || selectedCategory == .internalTransfer {
+                        selectedCategory = .other
+                    }
+                }
+
+            if isTransferMode {
+                transferActionOptions
+            }
+        } header: {
+            Text("3. THEN — Default Action")
+        } footer: {
+            if isTransferMode && transferKind == .internalTransfer {
+                Text("Internal transfers move money between your selected From Account and To Account.")
+            } else if isTransferMode {
+                Text("External transfers record money sent to or received from an external account.")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var transferActionOptions: some View {
+        Picker("Transfer Type", selection: $transferKind) {
+            ForEach(RuleTransferKind.allCases) { kind in
+                Text(kind.title).tag(kind)
+            }
+        }
+        .pickerStyle(.segmented)
+        .onChange(of: transferKind) { _, newKind in
+            selectedCategory = (newKind == .internalTransfer) ? .internalTransfer : .transfers
+        }
+
+        if transferKind == .internalTransfer {
+            Picker("From Account", selection: $fromAccountID) {
+                Text("Keep Detected Account").tag(UUID?.none)
+                ForEach(accounts) { acc in
+                    Text(acc.name).tag(UUID?.some(acc.id))
+                }
+            }
+
+            Picker("To Account", selection: $toAccountID) {
+                Text("Select Destination Account").tag(UUID?.none)
+                ForEach(accounts.filter { $0.id != fromAccountID }) { acc in
+                    Text(acc.name).tag(UUID?.some(acc.id))
+                }
+            }
+        } else {
+            Picker("From / To Account", selection: $fromAccountID) {
+                Text("Keep Detected Account").tag(UUID?.none)
+                ForEach(accounts) { acc in
+                    Text(acc.name).tag(UUID?.some(acc.id))
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var additionalActionsSection: some View {
+        Section {
+            if !isTransferMode {
+                Toggle(isOn: $enableSetAccount) {
+                    Label("Set Account", systemImage: "wallet.bifold.fill")
+                }
+                if enableSetAccount {
+                    Picker("Account", selection: $fromAccountID) {
+                        Text("Select Account").tag(UUID?.none)
+                        ForEach(accounts) { acc in
+                            Text(acc.name).tag(UUID?.some(acc.id))
+                        }
+                    }
+                }
+            }
+
+            if !actionMerchant.isEmpty || existingRule != nil {
+                Toggle(isOn: $enableSetMerchant) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Label("Set Merchant / Name", systemImage: "storefront.fill")
+                        if !actionMerchant.isEmpty {
+                            Text(actionMerchant)
+                                .font(.caption)
+                                .foregroundStyle(Theme.secondaryInk)
+                        }
+                    }
+                }
+            }
+
+            if !actionBank.isEmpty || existingRule != nil {
+                Toggle(isOn: $enableSetBank) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Label("Set SMS Bank", systemImage: "building.columns.fill")
+                        if !actionBank.isEmpty {
+                            Text(actionBank)
+                                .font(.caption)
+                                .foregroundStyle(Theme.secondaryInk)
+                        }
+                    }
+                }
+            }
+
+            if !actionLocationName.isEmpty || existingRule != nil {
+                Toggle(isOn: $enableSetLocation) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Label("Set Location", systemImage: "mappin.and.ellipse")
+                        if !actionLocationName.isEmpty {
+                            Text(actionLocationName)
+                                .font(.caption)
+                                .foregroundStyle(Theme.secondaryInk)
+                        }
+                    }
+                }
+            }
+
+            if !goals.isEmpty {
+                Toggle(isOn: $enableSetGoal) {
+                    Label("Link Savings Goal", systemImage: "target")
+                }
+                if enableSetGoal {
+                    Picker("Savings Goal", selection: $actionGoalID) {
+                        Text("Select Goal").tag(UUID?.none)
+                        ForEach(goals) { goal in
+                            Text(goal.name).tag(UUID?.some(goal.id))
+                        }
+                    }
+                }
+            }
+
+            if !actionNote.isEmpty || existingRule != nil {
+                Toggle(isOn: $enableSetNote) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Label("Set Note", systemImage: "note.text")
+                        if !actionNote.isEmpty {
+                            Text(actionNote)
+                                .font(.caption)
+                                .foregroundStyle(Theme.secondaryInk)
+                        }
+                    }
+                }
+            }
+        } header: {
+            Text("Additional Actions (Optional)")
+        } footer: {
+            Text("Additional actions use the values captured from this transaction.")
+        }
+    }
+
+    @ViewBuilder
+    private var ruleInfoSection: some View {
+        Section("Rule Info") {
+            TextField("Rule Name (optional)", text: $ruleName)
+            Toggle("Enable Rule for Future Transactions", isOn: $isEnabled)
         }
     }
 
