@@ -14,7 +14,11 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-15
+    strategy:
+      matrix:
+        os: [macos-latest, macos-15]
+      fail-fast: false
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     env:
       BUNDLE_ID: ${{ inputs.bundle_id }}
@@ -50,12 +54,13 @@ jobs:
             build/output/SHA256SUMS.txt
             build/output/build-info.json
           if-no-files-found: error
+          overwrite: true
           retention-days: 7
       - name: Upload build diagnostics (including failures)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: BudgetAI-build-diagnostics
+          name: BudgetAI-build-diagnostics-${{ matrix.os }}
           path: |
             build/logs/
             build/Archive.xcresult/
