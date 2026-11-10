@@ -1520,7 +1520,7 @@ struct BudgetAITests {
     // MARK: - 15. Shortcuts Automatic Location Capture Tests
 
     @Test func testShortcutsLocationCaptureAndResolution() async throws {
-        let (context, _) = try makeInMemoryContext()
+        let context = makeCleanContext()
 
         // 1. Resolve location from explicit coordinates
         let coordLoc = await LocationService.shared.resolveLocation(
