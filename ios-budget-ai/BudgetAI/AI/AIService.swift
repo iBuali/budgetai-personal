@@ -345,7 +345,11 @@ enum SMSImporter {
         forceApprove: Bool = false,
         accountID: UUID? = nil,
         sender: String? = nil,
-        manualBank: String? = nil
+        manualBank: String? = nil,
+        location: String? = nil,
+        latitude: Double? = nil,
+        longitude: Double? = nil,
+        autoCaptureLocation: Bool = false
     ) async -> SMSImportOutcome {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return SMSImportOutcome(message: "The message was empty.") }
@@ -353,10 +357,32 @@ enum SMSImporter {
 
         let chunks = SMSParser.splitBatch(trimmed)
         if chunks.count > 1 {
-            return await importBatch(chunks, context: context, forceApprove: forceApprove, accountID: accountID, sender: sender, manualBank: manualBank)
+            return await importBatch(
+                chunks,
+                context: context,
+                forceApprove: forceApprove,
+                accountID: accountID,
+                sender: sender,
+                manualBank: manualBank,
+                location: location,
+                latitude: latitude,
+                longitude: longitude,
+                autoCaptureLocation: autoCaptureLocation
+            )
         }
 
-        return await importSingle(trimmed, context: context, forceApprove: forceApprove, accountID: accountID, sender: sender, manualBank: manualBank)
+        return await importSingle(
+            trimmed,
+            context: context,
+            forceApprove: forceApprove,
+            accountID: accountID,
+            sender: sender,
+            manualBank: manualBank,
+            location: location,
+            latitude: latitude,
+            longitude: longitude,
+            autoCaptureLocation: autoCaptureLocation
+        )
     }
 
     private static func importBatch(
@@ -365,7 +391,11 @@ enum SMSImporter {
         forceApprove: Bool,
         accountID: UUID?,
         sender: String?,
-        manualBank: String?
+        manualBank: String?,
+        location: String? = nil,
+        latitude: Double? = nil,
+        longitude: Double? = nil,
+        autoCaptureLocation: Bool = false
     ) async -> SMSImportOutcome {
         var imported: [MoneyTransaction] = []
         var anyAI = false
@@ -376,7 +406,18 @@ enum SMSImporter {
         var skippedCount = 0
 
         for chunk in chunks {
-            let single = await importSingle(chunk, context: context, forceApprove: forceApprove, accountID: accountID, sender: sender, manualBank: manualBank)
+            let single = await importSingle(
+                chunk,
+                context: context,
+                forceApprove: forceApprove,
+                accountID: accountID,
+                sender: sender,
+                manualBank: manualBank,
+                location: location,
+                latitude: latitude,
+                longitude: longitude,
+                autoCaptureLocation: autoCaptureLocation
+            )
             if let tx = single.transaction {
                 if !imported.contains(where: { $0.id == tx.id }) {
                     imported.append(tx)
@@ -420,7 +461,11 @@ enum SMSImporter {
         forceApprove: Bool,
         accountID: UUID?,
         sender: String?,
-        manualBank: String?
+        manualBank: String?,
+        location: String? = nil,
+        latitude: Double? = nil,
+        longitude: Double? = nil,
+        autoCaptureLocation: Bool = false
     ) async -> SMSImportOutcome {
         if let reason = SMSParser.nonTransactionReason(trimmed) {
             return SMSImportOutcome(message: reason)
@@ -543,6 +588,20 @@ enum SMSImporter {
         // Preserve the pre-conversion transfer type so we can detect & merge simultaneous transfer SMS
         // (e.g., when a transfer between two accounts generates one "Internal Transfer" SMS and one "Transfer Out" SMS at the same date & time).
         let rawParsedType = p.transactionType
+
+        // Automatically resolve purchase location:
+        // 1. Explicit coordinates / address from Shortcuts automation ("Get Current Location")
+        // 2. Real-time GPS capture when triggered by live SMS automation (AddBankSMSIntent)
+        // 3. Fallback inference from SMS text & merchant keywords
+        let resolvedLocationData = await LocationService.shared.resolveLocation(
+            rawInput: location,
+            latitude: latitude,
+            longitude: longitude,
+            rawSMS: trimmed,
+            merchant: p.merchant,
+            autoCaptureGPS: autoCaptureLocation
+        )
+
         if !isCardPayment,
            let sameRefMerged = mergeSameReferenceSameAccountSMSIfNeeded(
                parsed: p,
@@ -551,6 +610,7 @@ enum SMSImporter {
                resolvedSender: resolvedSender,
                matchingDigits: matchingDigits,
                targetAccountID: target,
+               resolvedLocation: resolvedLocationData,
                usedAI: usedAI,
                forceApprove: forceApprove,
                context: context
@@ -571,6 +631,7 @@ enum SMSImporter {
                resolvedBank: resolvedSMSBank,
                resolvedSender: resolvedSender,
                targetAccountID: target,
+               resolvedLocation: resolvedLocationData,
                usedAI: usedAI,
                forceApprove: forceApprove,
                context: context
@@ -653,12 +714,12 @@ enum SMSImporter {
         tx.goalID = p.goalID
         tx.smsBalanceIsCardLimit = p.balanceIsCardLimit || isCardPayment
 
-        // Infer purchase/merchant location when available in SMS or merchant name
-        if let inferredLoc = LocationService.inferLocation(from: trimmed, merchant: tx.merchant) {
-            tx.locationName = inferredLoc.name
-            tx.locationAddress = inferredLoc.address
-            tx.latitude = inferredLoc.latitude
-            tx.longitude = inferredLoc.longitude
+        // Attach automatically resolved purchase location
+        if let loc = resolvedLocationData ?? LocationService.inferLocation(from: trimmed, merchant: tx.merchant) {
+            tx.locationName = loc.name
+            tx.locationAddress = loc.address
+            tx.latitude = loc.latitude
+            tx.longitude = loc.longitude
         }
 
         // Highest Priority: Apply user-defined Transaction Rules to future matching transactions.
@@ -809,6 +870,7 @@ enum SMSImporter {
         resolvedSender: String?,
         matchingDigits: String?,
         targetAccountID: UUID?,
+        resolvedLocation: TransactionLocationData? = nil,
         usedAI: Bool,
         forceApprove: Bool,
         context: ModelContext
@@ -920,6 +982,13 @@ enum SMSImporter {
                     tx.merchant = "IBAN ending \(recip)"
                 }
 
+                if (tx.locationName == nil || tx.latitude == nil), let loc = resolvedLocation {
+                    tx.locationName = loc.name
+                    tx.locationAddress = loc.address
+                    tx.latitude = loc.latitude
+                    tx.longitude = loc.longitude
+                }
+
                 tx.rawText = combinedRawSMS
                 tx.isPossibleDuplicate = false
                 tx.smsConfidence = .high
@@ -1010,6 +1079,7 @@ enum SMSImporter {
         resolvedBank: String?,
         resolvedSender: String?,
         targetAccountID: UUID?,
+        resolvedLocation: TransactionLocationData? = nil,
         usedAI: Bool,
         forceApprove: Bool,
         context: ModelContext
@@ -1309,6 +1379,14 @@ enum SMSImporter {
                 if tx.smsAccountSuffix == nil { tx.smsAccountSuffix = parsed.accountSuffix }
                 tx.smsBalance = sourceBalance
                 tx.smsToBalance = destBalance
+
+                if (tx.locationName == nil || tx.latitude == nil), let loc = resolvedLocation {
+                    tx.locationName = loc.name
+                    tx.locationAddress = loc.address
+                    tx.latitude = loc.latitude
+                    tx.longitude = loc.longitude
+                }
+
                 tx.smsConfidence = .high
                 tx.smsClassificationReason = "Rule 6: Merged 2 matching SMS at same date & time (Debit: \(debitBank ?? "Source") → Credit: \(creditBank ?? "Destination"))"
             }

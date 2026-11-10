@@ -5,12 +5,11 @@ import AppIntents
 struct SMSSetupGuideView: View {
     @Environment(AppState.self) private var appState
 
-    private let steps: [(String, String)] = [
-        ("Open the Shortcuts app", "Go to the Automation tab and tap New Automation."),
-        ("Choose Message", "Set Message Contains to \"BHD\" (or pick your bank as the sender)."),
-        ("Run Immediately", "Select Run Immediately so it works without asking you."),
-        ("Add the Budget AI action", "Search for \"Add Bank SMS\". Set Message to Shortcut Input, and tap Sender → Shortcut Input → Sender (Budget AI also fetches bank phone numbers like 17515151 for BisB or 17123456 for ila directly from the SMS)."),
-        ("Done", "Every bank alert is now read and filed automatically, with multi-account routing and duplicate transfer merging."),
+    private let steps: [(title: String, detail: String, icon: String)] = [
+        ("1. Create Message Automation", "Open Apple Shortcuts → Automation tab → tap New Automation (+). Choose \"Message\", enter \"BHD\" under Message Contains (or select your bank as sender), and select \"Run Immediately\".", "message.badge.filled.fill"),
+        ("2. Add 'Get Current Location'", "Tap \"New Blank Automation\" → tap \"Add Action\" → search for \"Get Current Location\" and add it. This captures your exact GPS location at the moment of payment so you see purchase locations on the map.", "location.fill"),
+        ("3. Add 'Add Bank SMS' Action", "Tap \"Add Action\" → search for \"Add Bank SMS\" (from Budget AI). Set up the parameters:\n• Message: Shortcut Input\n• Sender: Shortcut Input → Sender (optional)\n• Location: Current Location (from Step 2)\n• Tap arrow for Latitude & Longitude if desired", "arrow.triangle.2.circlepath"),
+        ("4. Automatic GPS Fallback", "Budget AI also attempts automatic real-time GPS location capture directly whenever a bank SMS is imported. Ensure Location is set to \"While Using\" in iOS Settings.", "checkmark.seal.fill")
     ]
 
     var body: some View {
@@ -20,28 +19,94 @@ struct SMSSetupGuideView: View {
                     IconBadge(symbol: "message.badge.filled.fill", color: Theme.positive, size: 52)
                     Text("Import bank SMS automatically")
                         .font(.title3.weight(.bold)).foregroundStyle(Theme.ink)
-                    Text("iOS doesn't let apps read your messages directly. A one-time Shortcuts automation forwards bank alerts to Budget AI instead.")
+                    Text("iOS doesn't let apps read your messages directly. A one-time Shortcuts automation forwards bank alerts to Budget AI and automatically tags your purchase location.")
                         .font(.subheadline).foregroundStyle(Theme.secondaryInk)
                 }
                 .padding(.vertical, 6)
             }
 
-            SMSImportSettingsSection()
+            // Visual automation diagram
+            Section("Recommended Shortcut Flow") {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 10) {
+                        Image(systemName: "bolt.badge.clock.fill")
+                            .foregroundStyle(Theme.brand)
+                            .frame(width: 24)
+                        Text("Trigger: When message contains \"BHD\"")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(Theme.ink)
+                    }
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Theme.canvas, in: RoundedRectangle(cornerRadius: 8))
 
-            Section("Setup, about 1 minute") {
-                ForEach(Array(steps.enumerated()), id: \.offset) { index, step in
-                    HStack(alignment: .top, spacing: 12) {
-                        Text("\(index + 1)")
-                            .font(.subheadline.weight(.bold).monospacedDigit())
-                            .foregroundStyle(.white)
-                            .frame(width: 28, height: 28)
-                            .background(Theme.cobalt, in: Circle())
+                    HStack(spacing: 8) {
+                        Image(systemName: "arrow.down")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(Theme.secondaryInk)
+                            .padding(.leading, 12)
+                    }
+
+                    HStack(spacing: 10) {
+                        Image(systemName: "location.fill")
+                            .foregroundStyle(Theme.positive)
+                            .frame(width: 24)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(step.0).font(.body.weight(.semibold)).foregroundStyle(Theme.ink)
-                            Text(step.1).font(.subheadline).foregroundStyle(Theme.secondaryInk)
+                            Text("Action 1: Get Current Location")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(Theme.ink)
+                            Text("Retrieves current shop or place GPS coordinates")
+                                .font(.caption)
+                                .foregroundStyle(Theme.secondaryInk)
                         }
                     }
-                    .padding(.vertical, 2)
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Theme.canvas, in: RoundedRectangle(cornerRadius: 8))
+
+                    HStack(spacing: 8) {
+                        Image(systemName: "arrow.down")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(Theme.secondaryInk)
+                            .padding(.leading, 12)
+                    }
+
+                    HStack(spacing: 10) {
+                        Image(systemName: "plus.app.fill")
+                            .foregroundStyle(Theme.brand)
+                            .frame(width: 24)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Action 2: Add Bank SMS")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(Theme.ink)
+                            Text("Message: Shortcut Input\nSender: Shortcut Input → Sender\nLocation: Current Location")
+                                .font(.caption.monospaced())
+                                .foregroundStyle(Theme.secondaryInk)
+                        }
+                    }
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Theme.canvas, in: RoundedRectangle(cornerRadius: 8))
+                }
+                .padding(.vertical, 4)
+            }
+
+            SMSImportSettingsSection()
+
+            Section("Setup Steps (about 1 minute)") {
+                ForEach(Array(steps.enumerated()), id: \.offset) { index, step in
+                    HStack(alignment: .top, spacing: 12) {
+                        Image(systemName: step.icon)
+                            .font(.subheadline.weight(.bold))
+                            .foregroundStyle(.white)
+                            .frame(width: 28, height: 28)
+                            .background(Theme.brand, in: Circle())
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(step.title).font(.body.weight(.semibold)).foregroundStyle(Theme.ink)
+                            Text(step.detail).font(.subheadline).foregroundStyle(Theme.secondaryInk)
+                        }
+                    }
+                    .padding(.vertical, 4)
                 }
             }
 

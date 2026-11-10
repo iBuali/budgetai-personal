@@ -25,7 +25,8 @@ final class LocationService: NSObject, CLLocationManagerDelegate {
         manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
     }
 
-    func captureCurrentLocation(fallbackPlaceName: String? = nil) async -> TransactionLocationData? {
+    @MainActor
+    func captureCurrentLocation(fallbackPlaceName: String? = nil, timeoutSeconds: Double = 3.5) async -> TransactionLocationData? {
         isFetching = true
         lastError = nil
         defer { isFetching = false }
@@ -42,10 +43,31 @@ final class LocationService: NSObject, CLLocationManagerDelegate {
             return nil
         }
 
-        let loc: CLLocation? = await withCheckedContinuation { cont in
-            self.continuation?.resume(returning: nil)
-            self.continuation = cont
-            self.manager.requestLocation()
+        let loc: CLLocation? = await withTaskGroup(of: CLLocation?.self) { group in
+            group.addTask { @MainActor in
+                await withCheckedContinuation { cont in
+                    if let existing = self.continuation {
+                        self.continuation = nil
+                        existing.resume(returning: nil)
+                    }
+                    self.continuation = cont
+                    self.manager.requestLocation()
+                }
+            }
+            group.addTask {
+                let nanoseconds = UInt64(max(0.5, timeoutSeconds) * 1_000_000_000)
+                try? await Task.sleep(nanoseconds: nanoseconds)
+                return nil
+            }
+            let firstResult = await group.next() ?? nil
+            await MainActor.run {
+                if let cont = self.continuation {
+                    self.continuation = nil
+                    cont.resume(returning: nil)
+                }
+            }
+            group.cancelAll()
+            return firstResult
         }
 
         guard let loc else {
@@ -53,12 +75,16 @@ final class LocationService: NSObject, CLLocationManagerDelegate {
             return nil
         }
 
+        return await reverseGeocode(location: loc, fallbackPlaceName: fallbackPlaceName)
+    }
+
+    func reverseGeocode(location: CLLocation, fallbackPlaceName: String? = nil) async -> TransactionLocationData {
         let geocoder = CLGeocoder()
         var placeName = fallbackPlaceName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         var addressParts: [String] = []
 
-        if let placemarks = try? await geocoder.reverseGeocodeLocation(loc), let pm = placemarks.first {
-            if placeName.isEmpty {
+        if let placemarks = try? await geocoder.reverseGeocodeLocation(location), let pm = placemarks.first {
+            if placeName.isEmpty || isGenericPlaceName(placeName) {
                 placeName = pm.name ?? pm.subLocality ?? pm.locality ?? "Current Location"
             }
             if let thoroughfare = pm.thoroughfare, thoroughfare != placeName {
@@ -82,9 +108,111 @@ final class LocationService: NSObject, CLLocationManagerDelegate {
         return TransactionLocationData(
             name: placeName,
             address: addressParts.isEmpty ? nil : addressParts.joined(separator: ", "),
-            latitude: loc.coordinate.latitude,
-            longitude: loc.coordinate.longitude
+            latitude: location.coordinate.latitude,
+            longitude: location.coordinate.longitude
         )
+    }
+
+    private func isGenericPlaceName(_ name: String) -> Bool {
+        let lower = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let generics: Set<String> = [
+            "current location", "purchase location", "purchase", "expense", "debit",
+            "card purchase", "pos purchase", "transaction", "payment", "fawri+", "fawri transfer",
+            "bank transfer", "transfer out", "transfer in", "incoming", "outgoing"
+        ]
+        return generics.contains(lower) || lower.isEmpty
+    }
+
+    /// Automatically resolves location from:
+    /// 1. Explicit coordinates (e.g. from Shortcuts 'Get Current Location' → Latitude/Longitude)
+    /// 2. Raw location/address string from Shortcuts 'Current Location'
+    /// 3. Real-time GPS capture when live SMS arrives (AddBankSMSIntent)
+    /// 4. Fallback inference from SMS text & merchant keywords
+    @MainActor
+    func resolveLocation(
+        rawInput: String? = nil,
+        latitude: Double? = nil,
+        longitude: Double? = nil,
+        rawSMS: String? = nil,
+        merchant: String? = nil,
+        autoCaptureGPS: Bool = false
+    ) async -> TransactionLocationData? {
+        // 1. Explicit valid coordinates passed in
+        if let lat = latitude, let lon = longitude,
+           (-90.0...90.0).contains(lat), (-180.0...180.0).contains(lon),
+           (abs(lat) > 0.0001 || abs(lon) > 0.0001) {
+            let clLoc = CLLocation(latitude: lat, longitude: lon)
+            return await reverseGeocode(location: clLoc, fallbackPlaceName: merchant ?? rawInput)
+        }
+
+        // 2. Coordinate numbers or address passed as rawInput string
+        if let raw = rawInput?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty {
+            if let coords = Self.parseCoordinates(from: raw) {
+                let clLoc = CLLocation(latitude: coords.latitude, longitude: coords.longitude)
+                return await reverseGeocode(location: clLoc, fallbackPlaceName: merchant)
+            }
+
+            if !isGenericPlaceName(raw) {
+                let geocoder = CLGeocoder()
+                if let placemarks = try? await geocoder.geocodeAddressString(raw), let pm = placemarks.first, let loc = pm.location {
+                    var parts: [String] = []
+                    if let thoroughfare = pm.thoroughfare { parts.append(thoroughfare) }
+                    if let sub = pm.subLocality, !parts.contains(sub) { parts.append(sub) }
+                    if let city = pm.locality, !parts.contains(city) { parts.append(city) }
+                    if let country = pm.country, !parts.contains(country) { parts.append(country) }
+
+                    let cleanMerchant = merchant?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    let name = (!cleanMerchant.isEmpty && !isGenericPlaceName(cleanMerchant)) ? cleanMerchant : (pm.name ?? raw)
+                    return TransactionLocationData(
+                        name: name,
+                        address: parts.isEmpty ? raw : parts.joined(separator: ", "),
+                        latitude: loc.coordinate.latitude,
+                        longitude: loc.coordinate.longitude
+                    )
+                }
+
+                let cleanMerchant = merchant?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let displayName = (!cleanMerchant.isEmpty && !isGenericPlaceName(cleanMerchant)) ? cleanMerchant : raw
+                return TransactionLocationData(
+                    name: displayName,
+                    address: raw,
+                    latitude: nil,
+                    longitude: nil
+                )
+            }
+        }
+
+        // 3. Automatic GPS capture when triggered by live SMS automation (AddBankSMSIntent)
+        if autoCaptureGPS {
+            if let liveGPS = await captureCurrentLocation(fallbackPlaceName: merchant, timeoutSeconds: 3.5) {
+                return liveGPS
+            }
+        }
+
+        // 4. Inferred location from SMS text and merchant keywords
+        if let inferred = Self.inferLocation(from: rawSMS, merchant: merchant ?? "") {
+            return inferred
+        }
+
+        return nil
+    }
+
+    static func parseCoordinates(from string: String) -> (latitude: Double, longitude: Double)? {
+        let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        let parts = trimmed
+            .replacingOccurrences(of: "°", with: "")
+            .replacingOccurrences(of: "N", with: "")
+            .replacingOccurrences(of: "E", with: "")
+            .components(separatedBy: CharacterSet(charactersIn: ", \t"))
+            .filter { !$0.isEmpty }
+        if parts.count >= 2,
+           let lat = Double(parts[0]),
+           let lon = Double(parts[1]),
+           (-90.0...90.0).contains(lat),
+           (-180.0...180.0).contains(lon) {
+            return (lat, lon)
+        }
+        return nil
     }
 
     func searchPlaces(query: String) async -> [TransactionLocationData] {
@@ -124,15 +252,19 @@ final class LocationService: NSObject, CLLocationManagerDelegate {
     nonisolated func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
         let loc = locations.last
         Task { @MainActor in
-            self.continuation?.resume(returning: loc)
-            self.continuation = nil
+            if let cont = self.continuation {
+                self.continuation = nil
+                cont.resume(returning: loc)
+            }
         }
     }
 
     nonisolated func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
         Task { @MainActor in
-            self.continuation?.resume(returning: nil)
-            self.continuation = nil
+            if let cont = self.continuation {
+                self.continuation = nil
+                cont.resume(returning: nil)
+            }
         }
     }
 

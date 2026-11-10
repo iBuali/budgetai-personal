@@ -1516,4 +1516,66 @@ struct BudgetAITests {
         #expect(abs((place.latitude ?? 0) - 26.2335) < 0.01)
         #expect(abs((place.longitude ?? 0) - 50.5414) < 0.01)
     }
+
+    // MARK: - 15. Shortcuts Automatic Location Capture Tests
+
+    @Test func testShortcutsLocationCaptureAndResolution() async throws {
+        let (context, _) = try makeInMemoryContext()
+
+        // 1. Resolve location from explicit coordinates
+        let coordLoc = await LocationService.shared.resolveLocation(
+            rawInput: nil,
+            latitude: 26.2336,
+            longitude: 50.5532,
+            rawSMS: nil,
+            merchant: "City Centre Cafe"
+        )
+        let resolvedCoord = try #require(coordLoc)
+        #expect(abs((resolvedCoord.latitude ?? 0) - 26.2336) < 0.001)
+        #expect(abs((resolvedCoord.longitude ?? 0) - 50.5532) < 0.001)
+
+        // 2. Resolve location from raw coordinate string (e.g. from Shortcuts)
+        let stringCoordLoc = await LocationService.shared.resolveLocation(
+            rawInput: "26.2442, 50.5738",
+            rawSMS: nil,
+            merchant: "The Avenues Store"
+        )
+        let resolvedStringCoord = try #require(stringCoordLoc)
+        #expect(abs((resolvedStringCoord.latitude ?? 0) - 26.2442) < 0.001)
+        #expect(abs((resolvedStringCoord.longitude ?? 0) - 50.5738) < 0.001)
+
+        // 3. Fallback inference when no coordinates or address given
+        let inferredLoc = await LocationService.shared.resolveLocation(
+            rawInput: nil,
+            rawSMS: "Debit card purchase of BHD 5.500 at Marassi Galleria on 2026/11/08",
+            merchant: "Marassi Galleria"
+        )
+        let resolvedInferred = try #require(inferredLoc)
+        #expect(resolvedInferred.name.contains("Marassi"))
+        #expect(abs((resolvedInferred.latitude ?? 0) - 26.2981) < 0.01)
+
+        // 4. SMSImporter passes and attaches location to imported transaction
+        let smsText = "Debit card purchase of BHD 14.500 at Starbucks on 2026/11/08 10:30. Available balance BHD 480.000"
+        let outcome = await SMSImporter.importText(
+            smsText,
+            context: context,
+            forceApprove: true,
+            location: "26.2335, 50.5414"
+        )
+        let tx = try #require(outcome.transaction)
+        #expect(tx.latitude != nil)
+        #expect(abs((tx.latitude ?? 0) - 26.2335) < 0.001)
+        #expect(abs((tx.longitude ?? 0) - 50.5414) < 0.001)
+
+        // 5. Verify AddBankSMSIntent properties exist
+        var intent = AddBankSMSIntent()
+        intent.message = smsText
+        intent.sender = "BBK"
+        intent.location = "26.2335, 50.5414"
+        intent.latitude = 26.2335
+        intent.longitude = 50.5414
+        #expect(intent.location == "26.2335, 50.5414")
+        #expect(intent.latitude == 26.2335)
+        #expect(intent.longitude == 50.5414)
+    }
 }
