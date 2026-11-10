@@ -946,576 +946,23 @@ struct TransactionDetailView: View {
 
     var body: some View {
         List {
-            Section {
-                VStack(spacing: 10) {
-                    if isAccountTransfer {
-                        IconBadge(symbol: "arrow.left.arrow.right", color: Theme.cobalt, size: 64)
-                    } else {
-                        CategoryIcon(category: tx.isIncome && tx.category == .other ? .income : tx.displayCategory, size: 64)
-                    }
-                    Text(tx.merchant).font(.title3.weight(.semibold)).foregroundStyle(Theme.ink).multilineTextAlignment(.center)
-                    let heroAmount = isAccountTransfer ? tx.amount : tx.signedAmount
-                    Text(isAccountTransfer ? Money.format(tx.amount, currency) : Money.format(tx.signedAmount, currency, signed: true))
-                        .font(.system(size: 34, weight: .bold).monospacedDigit())
-                        .foregroundStyle(tx.isPending ? Theme.secondaryInk : (tx.isIncome ? Theme.positive : Theme.ink))
-                        .animatedNumber(heroAmount)
-                    Text(tx.date.formatted(date: .complete, time: .shortened)).font(.subheadline).foregroundStyle(Theme.secondaryInk)
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 8)
-                .listRowBackground(Color.clear)
-            }
-
+            heroSection
             if tx.isPending {
-                Section {
-                    let reasons = tx.reviewReasons(accounts: accounts)
-                    VStack(alignment: .leading, spacing: 14) {
-                        HStack(spacing: 12) {
-                            ZStack {
-                                Circle()
-                                    .fill(Theme.warning.opacity(0.18))
-                                    .frame(width: 44, height: 44)
-                                Image(systemName: "clock.badge.exclamationmark.fill")
-                                    .font(.system(size: 22))
-                                    .foregroundStyle(Theme.warning)
-                            }
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text("Waiting for Approval")
-                                    .font(.headline)
-                                    .foregroundStyle(Theme.ink)
-                                Text("Quarantined transaction · Balances and budgets are not updated until approved.")
-                                    .font(.caption)
-                                    .foregroundStyle(Theme.secondaryInk)
-                            }
-                        }
-
-                        if !reasons.isEmpty {
-                            VStack(alignment: .leading, spacing: 8) {
-                                Text("Reasons for Review")
-                                    .font(.caption.weight(.bold))
-                                    .foregroundStyle(Theme.secondaryInk)
-                                    .textCase(.uppercase)
-
-                                ForEach(reasons, id: \.self) { reason in
-                                    HStack(alignment: .top, spacing: 10) {
-                                        Image(systemName: reasonIcon(for: reason))
-                                            .font(.body)
-                                            .foregroundStyle(Theme.warning)
-                                            .frame(width: 22)
-                                        VStack(alignment: .leading, spacing: 2) {
-                                            Text(reason)
-                                                .font(.subheadline.weight(.semibold))
-                                                .foregroundStyle(Theme.ink)
-                                            Text(reasonExplanation(for: reason))
-                                                .font(.caption2)
-                                                .foregroundStyle(Theme.secondaryInk)
-                                        }
-                                    }
-                                    .padding(.vertical, 6)
-                                    .padding(.horizontal, 10)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .background(Theme.warning.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
-                                }
-                            }
-                        }
-
-                        VStack(spacing: 10) {
-                            Button {
-                                commitPendingEdits(silent: true)
-                                let result = Ledger.approve(tx, context: context)
-                                appState.report(result, base: "Approved \(Money.format(tx.amount, currency))")
-                            } label: {
-                                HStack {
-                                    Spacer()
-                                    Label("Approve and update account", systemImage: "checkmark.circle.fill")
-                                        .font(.body.weight(.semibold))
-                                    Spacer()
-                                }
-                                .padding(.vertical, 4)
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .tint(Theme.positive)
-
-                            Button(role: .destructive) {
-                                Ledger.delete(tx, context: context)
-                                appState.show("Transaction rejected and removed")
-                                dismiss()
-                            } label: {
-                                HStack {
-                                    Spacer()
-                                    Label("Reject", systemImage: "xmark.circle")
-                                        .font(.body.weight(.medium))
-                                    Spacer()
-                                }
-                                .padding(.vertical, 2)
-                            }
-                            .buttonStyle(.bordered)
-                            .tint(Theme.negative)
-                        }
-                        .padding(.top, 4)
-                    }
-                    .padding(.vertical, 6)
-                } header: {
-                    Text("Approval Status")
-                }
+                approvalSection
             }
-
             if tx.isPossibleDuplicate {
-                Section {
-                    Label("This looks like the same payment as another transaction.", systemImage: "exclamationmark.circle.fill")
-                        .foregroundStyle(Theme.negative)
-                    Button("Keep both") {
-                        tx.isPossibleDuplicate = false
-                        try? context.save()
-                    }
-                    Button("Delete this duplicate", role: .destructive) {
-                        Ledger.delete(tx, context: context)
-                        dismiss()
-                    }
-                }
+                duplicateSection
             }
-
-            Section("Transaction") {
-                HStack(spacing: 8) {
-                    Text("Name")
-                    Spacer()
-                    TextField("Merchant or title", text: $nameText)
-                        .multilineTextAlignment(.trailing)
-                        .focused($focusedField, equals: .name)
-                        .submitLabel(.done)
-                        .onChange(of: nameText) { _, newValue in
-                            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
-                            guard !trimmed.isEmpty, trimmed != tx.merchant else { return }
-                            tx.merchant = trimmed
-                            try? context.save()
-                        }
-                }
-
-                HStack(spacing: 8) {
-                    Text("Amount (\(currency))")
-                    Spacer()
-                    TextField(Money.format(0, currency), text: $amountText)
-                        .keyboardType(.decimalPad)
-                        .multilineTextAlignment(.trailing)
-                        .monospacedDigit()
-                        .focused($focusedField, equals: .amount)
-                        .onChange(of: amountText) { _, newValue in
-                            guard let parsed = Money.parse(newValue), parsed > 0, abs(parsed - tx.amount) >= 0.0005 else { return }
-                            Ledger.edit(tx, context: context) { target in
-                                target.amount = abs(parsed)
-                            }
-                        }
-                }
-
-                DatePicker(
-                    "Date",
-                    selection: Binding(
-                        get: { tx.date },
-                        set: { newDate in
-                            tx.date = newDate
-                            Ledger.recordSnapshot(context: context)
-                            try? context.save()
-                        }
-                    ),
-                    displayedComponents: [.date, .hourAndMinute]
-                )
-
-                Button {
-                    withAnimation(.snappy) { editingCategory.toggle() }
-                } label: {
-                    HStack(spacing: 12) {
-                        Text("Category").foregroundStyle(Theme.ink)
-                        Spacer()
-                        CategoryIcon(category: tx.category, size: 28)
-                        Text(tx.category.title).foregroundStyle(Theme.ink)
-                        if tx.aiCategorized { AIBadge() }
-                        Image(systemName: "chevron.down")
-                            .font(.footnote.weight(.semibold))
-                            .foregroundStyle(.tertiary)
-                            .rotationEffect(.degrees(editingCategory ? 180 : 0))
-                    }
-                }
-                .buttonStyle(.plain)
-
-                if editingCategory {
-                    CategoryPickerGrid(
-                        category: Binding(get: { tx.category }, set: { new in
-                            commitPendingEdits(silent: true)
-                            if new == .visaTransfer {
-                                let cards = accounts.filter { $0.kind == .creditCard }
-                                Ledger.edit(tx, context: context) { target in
-                                    target.subcategory = nil
-                                    target.category = .visaTransfer
-                                    target.isIncome = false
-                                    target.smsTransactionType = .internalTransfer
-                                    target.aiCategorized = false
-                                    target.goalID = nil
-                                    target.smsBalanceIsCardLimit = true
-                                    let currentDestIsCard = target.toAccountID.flatMap { id in cards.first { $0.id == id } } != nil
-                                    if !currentDestIsCard {
-                                        target.toAccountID = cards.first(where: { $0.id != target.accountID })?.id
-                                    }
-                                }
-                                if cards.isEmpty {
-                                    appState.show("Add your Visa card as a Credit card account to pay it down", warning: true)
-                                }
-                            } else if new == .internalTransfer {
-                                Ledger.edit(tx, context: context) { target in
-                                    target.subcategory = nil
-                                    target.category = .internalTransfer
-                                    target.isIncome = false
-                                    target.smsTransactionType = .internalTransfer
-                                    target.aiCategorized = false
-                                    if target.toAccountID == nil,
-                                       let recip = target.smsRecipientSuffix,
-                                       let matchedDest = SMSParser.findMatchingAccount(suffix: recip, excludingAccountID: target.accountID, in: context) {
-                                        target.toAccountID = matchedDest.id
-                                    }
-                                    if target.goalID == nil,
-                                       let matchedGoal = SMSParser.findMatchingGoal(suffix: target.smsRecipientSuffix, accountID: target.toAccountID, in: context),
-                                       matchedGoal.linkedAccountID == nil || matchedGoal.linkedAccountID != target.accountID {
-                                        target.goalID = matchedGoal.id
-                                        if target.toAccountID == nil, let linkedAcc = matchedGoal.linkedAccountID, linkedAcc != target.accountID {
-                                            target.toAccountID = linkedAcc
-                                        }
-                                    }
-                                }
-                            } else if tx.category == .internalTransfer || tx.category == .visaTransfer || tx.smsTransactionType == .internalTransfer || tx.isIncome != new.isIncomeCategory {
-                                Ledger.edit(tx, context: context) { target in
-                                    target.subcategory = nil
-                                    target.category = new
-                                    target.toAccountID = nil
-                                    target.goalID = nil
-                                    target.smsBalanceIsCardLimit = false
-                                    target.isIncome = new.isIncomeCategory
-                                    if isSMSTransaction {
-                                        target.smsTransactionType = new.isIncomeCategory ? .income : (new == .transfers ? .transferOut : .expense)
-                                    }
-                                    target.aiCategorized = false
-                                }
-                            } else {
-                                if new != tx.category { tx.subcategory = nil }
-                                tx.category = new
-                                tx.aiCategorized = false
-                                try? context.save()
-                            }
-                        }),
-                        subcategory: Binding(get: { tx.subcategory }, set: { newSub in
-                            tx.subcategory = newSub
-                            try? context.save()
-                        }),
-                        income: tx.isIncome,
-                        includeAllTypes: true
-                    )
-                }
-
-                Picker("Account", selection: Binding(get: { tx.accountID }, set: { newID in
-                    Ledger.edit(tx, context: context) { target in
-                        target.accountID = newID
-                    }
-                })) {
-                    Text(isSMSTransaction ? "Unknown" : "None").tag(UUID?.none)
-                    ForEach(accounts) { a in Text(a.menuTitle).tag(UUID?.some(a.id)) }
-                }
-
-                if tx.category == .visaTransfer {
-                    Picker("Visa card", selection: Binding(get: { tx.toAccountID }, set: { newID in
-                        guard newID != tx.accountID else { return }
-                        Ledger.edit(tx, context: context) { $0.toAccountID = newID }
-                    })) {
-                        Text("Select card").tag(UUID?.none)
-                        ForEach(accounts.filter { $0.kind == .creditCard }) { a in
-                            Text(a.menuTitle).tag(UUID?.some(a.id))
-                        }
-                    }
-                    if let card = toAccount, card.kind == .creditCard {
-                        LabeledContent("Card balance owed") {
-                            Text(Money.format(card.balance, currency))
-                                .monospacedDigit()
-                                .foregroundStyle(card.balance > 0.0005 ? Theme.negative : Theme.positive)
-                                .animatedNumber(card.balance)
-                        }
-                        if card.paymentDueReminder {
-                            LabeledContent("Next payment due") {
-                                Text(card.nextUpcomingDueDate().formatted(.dateTime.day().month(.abbreviated).year()))
-                            }
-                        }
-                    }
-                } else if tx.category == .internalTransfer || tx.effectiveTransactionType == .internalTransfer || tx.toAccountID != nil {
-                    Picker("To account", selection: Binding(get: { tx.toAccountID ?? matchedRecipientAccount?.id }, set: { newID in
-                        guard newID != tx.accountID else { return }
-                        Ledger.edit(tx, context: context) { target in
-                            target.toAccountID = newID
-                            if newID != nil {
-                                target.category = .internalTransfer
-                                target.smsTransactionType = .internalTransfer
-                                target.isIncome = false
-                            }
-                            if let newID, let matchedGoal = goals.first(where: { $0.linkedAccountID == newID }) {
-                                target.goalID = matchedGoal.id
-                            }
-                        }
-                    })) {
-                        Text("Select destination").tag(UUID?.none)
-                        ForEach(accounts.filter { $0.id != tx.accountID }) { a in
-                            Text(a.menuTitle).tag(UUID?.some(a.id))
-                        }
-                    }
-                }
-
-                if !goals.isEmpty && tx.category != .visaTransfer {
-                    Picker("Savings goal", selection: Binding(get: { tx.goalID }, set: { newGoalID in
-                        Ledger.edit(tx, context: context) { target in
-                            target.goalID = newGoalID
-                            if let newGoalID,
-                               let g = goals.first(where: { $0.id == newGoalID }),
-                               target.toAccountID == nil,
-                               let linkedAcc = g.linkedAccountID,
-                               linkedAcc != target.accountID,
-                               (target.category == .internalTransfer || target.smsTransactionType == .internalTransfer) {
-                                target.toAccountID = linkedAcc
-                            }
-                        }
-                    })) {
-                        Text("None").tag(UUID?.none)
-                        ForEach(goals) { g in
-                            Text(g.name).tag(UUID?.some(g.id))
-                        }
-                    }
-                }
-
-                TextField("Note", text: $tx.note, axis: .vertical)
-                    .onChange(of: tx.note) { _, _ in
-                        try? context.save()
-                    }
-            }
-
-            // MARK: Apple Wallet–Style Location Section
-            Section("Location") {
-                if let loc = effectiveLocation {
-                    TransactionLocationCard(
-                        placeName: loc.name,
-                        address: loc.address,
-                        latitude: loc.latitude,
-                        longitude: loc.longitude,
-                        onCaptureCurrent: {
-                            captureGPSLocation()
-                        },
-                        onSearchPlace: {
-                            showLocationPicker = true
-                        },
-                        onRemove: tx.hasLocation ? {
-                            tx.locationName = nil
-                            tx.locationAddress = nil
-                            tx.latitude = nil
-                            tx.longitude = nil
-                            try? context.save()
-                        } : nil
-                    )
-                    .listRowInsets(EdgeInsets())
-                    .listRowBackground(Color.clear)
-                } else {
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack(spacing: 10) {
-                            Image(systemName: "map.fill")
-                                .font(.title3)
-                                .foregroundStyle(Theme.brand)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Add Purchase Location")
-                                    .font(.subheadline.weight(.semibold))
-                                    .foregroundStyle(Theme.ink)
-                                Text("Show a map and place of purchase like Apple Wallet.")
-                                    .font(.caption)
-                                    .foregroundStyle(Theme.secondaryInk)
-                            }
-                        }
-
-                        HStack(spacing: 10) {
-                            Button {
-                                captureGPSLocation()
-                            } label: {
-                                HStack(spacing: 6) {
-                                    if isCapturingGPS {
-                                        ProgressView().controlSize(.small)
-                                    } else {
-                                        Image(systemName: "location.fill")
-                                    }
-                                    Text("Current Location")
-                                }
-                                .font(.caption.weight(.semibold))
-                                .frame(maxWidth: .infinity)
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .tint(Theme.brand)
-                            .disabled(isCapturingGPS)
-
-                            Button {
-                                showLocationPicker = true
-                            } label: {
-                                Label("Search Place", systemImage: "magnifyingglass")
-                                    .font(.caption.weight(.semibold))
-                                    .frame(maxWidth: .infinity)
-                            }
-                            .buttonStyle(.bordered)
-                        }
-                    }
-                    .padding(.vertical, 4)
-                }
-            }
-
-            // MARK: New Transaction Rules Section
-            Section {
-                TransactionDetailRulesSection(tx: tx, accounts: accounts)
-                    .listRowInsets(EdgeInsets())
-                    .listRowBackground(Color.clear)
-            }
-
+            editableFieldsSection
+            locationSection
+            rulesSection
             if isSMSTransaction || tx.smsBalance != nil {
-                Section("SMS Details") {
-                    Picker("SMS sender bank", selection: Binding(
-                        get: { tx.smsBank ?? "" },
-                        set: { newBank in
-                            commitPendingEdits(silent: true)
-                            let clean = newBank.isEmpty ? nil : newBank
-                            Ledger.edit(tx, context: context) { target in
-                                target.smsBank = clean
-                            }
-                            try? context.save()
-                            appState.show(clean.map { "Bank set to \($0)" } ?? "Cleared SMS bank")
-                        }
-                    )) {
-                        Text("Unknown / Not set").tag("")
-                        if let currentBank = tx.smsBank, !currentBank.isEmpty, !BahrainBankCatalog.bahrainBanks.contains(currentBank) {
-                            Text(currentBank).tag(currentBank)
-                        }
-                        ForEach(BahrainBankCatalog.bahrainBanks, id: \.self) { bank in
-                            Text(bank).tag(bank)
-                        }
-                    }
-
-                    LabeledContent("Reference") {
-                        Text((tx.smsReference?.isEmpty == false) ? tx.smsReference! : "—")
-                            .font(.subheadline.monospaced())
-                            .foregroundStyle(Theme.ink)
-                    }
-
-                    LabeledContent("Recipient IBAN / Account") {
-                        Text(recipientDisplayText)
-                            .font(.subheadline.monospacedDigit())
-                            .foregroundStyle(Theme.ink)
-                    }
-
-                    LabeledContent("Previous balance") {
-                        Text(previousBalanceAmount.map { Money.format($0, currency) } ?? "—")
-                            .monospacedDigit()
-                    }
-
-                    LabeledContent("New balance") {
-                        if let account {
-                            if let smsBal = tx.smsBalance, !tx.isCardLimitBalance, abs(account.balance - smsBal) >= 0.0005 {
-                                VStack(alignment: .trailing, spacing: 2) {
-                                    Text("\(account.name) (\(Money.format(account.balance, currency)))")
-                                        .monospacedDigit()
-                                        .animatedNumber(account.balance)
-                                    Text("SMS: \(Money.format(smsBal, currency))")
-                                        .font(.caption2.monospacedDigit())
-                                        .foregroundStyle(Theme.secondaryInk)
-                                }
-                            } else {
-                                Text("\(account.name) (\(Money.format(account.balance, currency)))")
-                                    .monospacedDigit()
-                                    .animatedNumber(account.balance)
-                            }
-                        } else if let smsBal = tx.smsBalance {
-                            Text(Money.format(smsBal, currency))
-                                .monospacedDigit()
-                        } else {
-                            Text("None").foregroundStyle(Theme.secondaryInk)
-                        }
-                    }
-
-                    if let bank = tx.smsBalance, let account, !account.kind.isLiability, !tx.isCardLimitBalance {
-                        if abs(account.balance - bank) >= 0.0005 && !tx.isPending {
-                            Button {
-                                if let synced = Ledger.syncBalanceFromSMS(tx, context: context, force: true) {
-                                    appState.show("\(account.name) set to \(Money.format(synced, currency))")
-                                }
-                            } label: {
-                                Label("Match \(account.name) to bank balance", systemImage: "equal.circle.fill")
-                            }
-                        } else if tx.balanceAdjustment != 0 {
-                            Label("\(account.name) matched (\(Money.format(tx.balanceAdjustment, currency, signed: true)))", systemImage: "checkmark.seal.fill")
-                                .foregroundStyle(Theme.positive)
-                        }
-                    }
-
-                    if let toBal = tx.smsToBalance, let toID = tx.toAccountID, let toAccount = Ledger.account(toID, context: context) {
-                        Divider()
-
-                        LabeledContent("Destination previous balance") {
-                            let destPrev = max(0, toBal - tx.amount)
-                            Text(Money.format(destPrev, currency))
-                                .monospacedDigit()
-                        }
-
-                        LabeledContent("Destination new balance") {
-                            Text("\(toAccount.name) (\(Money.format(toAccount.balance, currency)))")
-                                .monospacedDigit()
-                                .animatedNumber(toAccount.balance)
-                        }
-
-                        if !toAccount.kind.isLiability {
-                            if abs(toAccount.balance - toBal) >= 0.0005 && !tx.isPending {
-                                Button {
-                                    if let synced = Ledger.syncBalanceForAccount(id: toID, balance: toBal, on: tx, isToAccount: true, context: context, force: true) {
-                                        appState.show("\(toAccount.name) set to \(Money.format(synced, currency))")
-                                    }
-                                } label: {
-                                    Label("Match \(toAccount.name) to bank balance", systemImage: "equal.circle.fill")
-                                }
-                            } else if tx.toBalanceAdjustment != 0 {
-                                Label("\(toAccount.name) matched (\(Money.format(tx.toBalanceAdjustment, currency, signed: true)))", systemImage: "checkmark.seal.fill")
-                                    .foregroundStyle(Theme.positive)
-                            }
-                        }
-                    }
-
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Classification reason").font(.caption).foregroundStyle(Theme.secondaryInk)
-                        Text(tx.smsClassificationReason.isEmpty ? "—" : tx.smsClassificationReason)
-                            .font(.footnote)
-                            .foregroundStyle(Theme.ink)
-                    }
-                }
+                smsDetailsSection
             }
-
             if !rawSMSMessages.isEmpty {
-                Section(rawSMSMessages.count > 1 ? "Original SMS messages (\(rawSMSMessages.count))" : "Original message") {
-                    if rawSMSMessages.count > 1 {
-                        ForEach(Array(rawSMSMessages.enumerated()), id: \.offset) { idx, msg in
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(smsLegHeaderTitle(index: idx, message: msg))
-                                    .font(.caption.weight(.semibold))
-                                    .foregroundStyle(idx == 0 ? Theme.ink : Theme.positive)
-                                Text(msg)
-                                    .font(.footnote)
-                                    .foregroundStyle(Theme.secondaryInk)
-                                    .textSelection(.enabled)
-                            }
-                            .padding(.vertical, 2)
-                        }
-                    } else {
-                        Text(rawSMSMessages[0])
-                            .font(.footnote)
-                            .foregroundStyle(Theme.secondaryInk)
-                            .textSelection(.enabled)
-                    }
-                }
+                rawMessagesSection
             }
-
-            Section {
-                Button("Delete transaction", role: .destructive) { confirmDelete = true }
-            }
+            deleteSection
         }
         .scrollContentBackground(.hidden)
         .canvasBackground()
@@ -1564,6 +1011,609 @@ struct TransactionDetailView: View {
                 try? context.save()
                 appState.show("Location updated to \(loc.name)")
             }
+        }
+    }
+
+    @ViewBuilder
+    private var heroSection: some View {
+        Section {
+            VStack(spacing: 10) {
+                if isAccountTransfer {
+                    IconBadge(symbol: "arrow.left.arrow.right", color: Theme.cobalt, size: 64)
+                } else {
+                    CategoryIcon(category: tx.isIncome && tx.category == .other ? .income : tx.displayCategory, size: 64)
+                }
+                Text(tx.merchant).font(.title3.weight(.semibold)).foregroundStyle(Theme.ink).multilineTextAlignment(.center)
+                let heroAmount = isAccountTransfer ? tx.amount : tx.signedAmount
+                Text(isAccountTransfer ? Money.format(tx.amount, currency) : Money.format(tx.signedAmount, currency, signed: true))
+                    .font(.system(size: 34, weight: .bold).monospacedDigit())
+                    .foregroundStyle(tx.isPending ? Theme.secondaryInk : (tx.isIncome ? Theme.positive : Theme.ink))
+                    .animatedNumber(heroAmount)
+                Text(tx.date.formatted(date: .complete, time: .shortened)).font(.subheadline).foregroundStyle(Theme.secondaryInk)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 8)
+            .listRowBackground(Color.clear)
+        }
+    }
+
+    @ViewBuilder
+    private var approvalSection: some View {
+        Section {
+            let reasons = tx.reviewReasons(accounts: accounts)
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(spacing: 12) {
+                    ZStack {
+                        Circle()
+                            .fill(Theme.warning.opacity(0.18))
+                            .frame(width: 44, height: 44)
+                        Image(systemName: "clock.badge.exclamationmark.fill")
+                            .font(.system(size: 22))
+                            .foregroundStyle(Theme.warning)
+                    }
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Waiting for Approval")
+                            .font(.headline)
+                            .foregroundStyle(Theme.ink)
+                        Text("Quarantined transaction · Balances and budgets are not updated until approved.")
+                            .font(.caption)
+                            .foregroundStyle(Theme.secondaryInk)
+                    }
+                }
+
+                if !reasons.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Reasons for Review")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(Theme.secondaryInk)
+                            .textCase(.uppercase)
+
+                        ForEach(reasons, id: \.self) { reason in
+                            HStack(alignment: .top, spacing: 10) {
+                                Image(systemName: reasonIcon(for: reason))
+                                    .font(.body)
+                                    .foregroundStyle(Theme.warning)
+                                    .frame(width: 22)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(reason)
+                                        .font(.subheadline.weight(.semibold))
+                                        .foregroundStyle(Theme.ink)
+                                    Text(reasonExplanation(for: reason))
+                                        .font(.caption2)
+                                        .foregroundStyle(Theme.secondaryInk)
+                                }
+                            }
+                            .padding(.vertical, 6)
+                            .padding(.horizontal, 10)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Theme.warning.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+                        }
+                    }
+                }
+
+                VStack(spacing: 10) {
+                    Button {
+                        commitPendingEdits(silent: true)
+                        let result = Ledger.approve(tx, context: context)
+                        appState.report(result, base: "Approved \(Money.format(tx.amount, currency))")
+                    } label: {
+                        HStack {
+                            Spacer()
+                            Label("Approve and update account", systemImage: "checkmark.circle.fill")
+                                .font(.body.weight(.semibold))
+                            Spacer()
+                        }
+                        .padding(.vertical, 4)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Theme.positive)
+
+                    Button(role: .destructive) {
+                        Ledger.delete(tx, context: context)
+                        appState.show("Transaction rejected and removed")
+                        dismiss()
+                    } label: {
+                        HStack {
+                            Spacer()
+                            Label("Reject", systemImage: "xmark.circle")
+                                .font(.body.weight(.medium))
+                            Spacer()
+                        }
+                        .padding(.vertical, 2)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(Theme.negative)
+                }
+                .padding(.top, 4)
+            }
+            .padding(.vertical, 6)
+        } header: {
+            Text("Approval Status")
+        }
+    }
+
+    @ViewBuilder
+    private var duplicateSection: some View {
+        Section {
+            Label("This looks like the same payment as another transaction.", systemImage: "exclamationmark.circle.fill")
+                .foregroundStyle(Theme.negative)
+            Button("Keep both") {
+                tx.isPossibleDuplicate = false
+                try? context.save()
+            }
+            Button("Delete this duplicate", role: .destructive) {
+                Ledger.delete(tx, context: context)
+                dismiss()
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var editableFieldsSection: some View {
+        Section("Transaction") {
+            HStack(spacing: 8) {
+                Text("Name")
+                Spacer()
+                TextField("Merchant or title", text: $nameText)
+                    .multilineTextAlignment(.trailing)
+                    .focused($focusedField, equals: .name)
+                    .submitLabel(.done)
+                    .onChange(of: nameText) { _, newValue in
+                        let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !trimmed.isEmpty, trimmed != tx.merchant else { return }
+                        tx.merchant = trimmed
+                        try? context.save()
+                    }
+            }
+
+            HStack(spacing: 8) {
+                Text("Amount (\(currency))")
+                Spacer()
+                TextField(Money.format(0, currency), text: $amountText)
+                    .keyboardType(.decimalPad)
+                    .multilineTextAlignment(.trailing)
+                    .monospacedDigit()
+                    .focused($focusedField, equals: .amount)
+                    .onChange(of: amountText) { _, newValue in
+                        guard let parsed = Money.parse(newValue), parsed > 0, abs(parsed - tx.amount) >= 0.0005 else { return }
+                        Ledger.edit(tx, context: context) { target in
+                            target.amount = abs(parsed)
+                        }
+                    }
+            }
+
+            DatePicker(
+                "Date",
+                selection: Binding(
+                    get: { tx.date },
+                    set: { newDate in
+                        tx.date = newDate
+                        Ledger.recordSnapshot(context: context)
+                        try? context.save()
+                    }
+                ),
+                displayedComponents: [.date, .hourAndMinute]
+            )
+
+            Button {
+                withAnimation(.snappy) { editingCategory.toggle() }
+            } label: {
+                HStack(spacing: 12) {
+                    Text("Category").foregroundStyle(Theme.ink)
+                    Spacer()
+                    CategoryIcon(category: tx.category, size: 28)
+                    Text(tx.category.title).foregroundStyle(Theme.ink)
+                    if tx.aiCategorized { AIBadge() }
+                    Image(systemName: "chevron.down")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                        .rotationEffect(.degrees(editingCategory ? 180 : 0))
+                }
+            }
+            .buttonStyle(.plain)
+
+            if editingCategory {
+                CategoryPickerGrid(
+                    category: Binding(get: { tx.category }, set: { new in
+                        applySelectedCategory(new)
+                    }),
+                    subcategory: Binding(get: { tx.subcategory }, set: { newSub in
+                        tx.subcategory = newSub
+                        try? context.save()
+                    }),
+                    income: tx.isIncome,
+                    includeAllTypes: true
+                )
+            }
+
+            Picker("Account", selection: Binding(get: { tx.accountID }, set: { newID in
+                Ledger.edit(tx, context: context) { target in
+                    target.accountID = newID
+                }
+            })) {
+                Text(isSMSTransaction ? "Unknown" : "None").tag(UUID?.none)
+                ForEach(accounts) { a in Text(a.menuTitle).tag(UUID?.some(a.id)) }
+            }
+
+            transferAccountPickers
+
+            if !goals.isEmpty && tx.category != .visaTransfer {
+                savingsGoalPicker
+            }
+
+            TextField("Note", text: $tx.note, axis: .vertical)
+                .onChange(of: tx.note) { _, _ in
+                    try? context.save()
+                }
+        }
+    }
+
+    @ViewBuilder
+    private var transferAccountPickers: some View {
+        if tx.category == .visaTransfer {
+            Picker("Visa card", selection: Binding(get: { tx.toAccountID }, set: { newID in
+                guard newID != tx.accountID else { return }
+                Ledger.edit(tx, context: context) { $0.toAccountID = newID }
+            })) {
+                Text("Select card").tag(UUID?.none)
+                ForEach(accounts.filter { $0.kind == .creditCard }) { a in
+                    Text(a.menuTitle).tag(UUID?.some(a.id))
+                }
+            }
+            if let card = toAccount, card.kind == .creditCard {
+                LabeledContent("Card balance owed") {
+                    Text(Money.format(card.balance, currency))
+                        .monospacedDigit()
+                        .foregroundStyle(card.balance > 0.0005 ? Theme.negative : Theme.positive)
+                        .animatedNumber(card.balance)
+                }
+                if card.paymentDueReminder {
+                    LabeledContent("Next payment due") {
+                        Text(card.nextUpcomingDueDate().formatted(.dateTime.day().month(.abbreviated).year()))
+                    }
+                }
+            }
+        } else if tx.category == .internalTransfer || tx.effectiveTransactionType == .internalTransfer || tx.toAccountID != nil {
+            Picker("To account", selection: Binding(get: { tx.toAccountID ?? matchedRecipientAccount?.id }, set: { newID in
+                guard newID != tx.accountID else { return }
+                let linkedGoalID = newID.flatMap { id in goals.first(where: { $0.linkedAccountID == id })?.id }
+                Ledger.edit(tx, context: context) { target in
+                    target.toAccountID = newID
+                    if newID != nil {
+                        target.category = .internalTransfer
+                        target.smsTransactionType = .internalTransfer
+                        target.isIncome = false
+                    }
+                    if let linkedGoalID {
+                        target.goalID = linkedGoalID
+                    }
+                }
+            })) {
+                Text("Select destination").tag(UUID?.none)
+                ForEach(accounts.filter { $0.id != tx.accountID }) { a in
+                    Text(a.menuTitle).tag(UUID?.some(a.id))
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var savingsGoalPicker: some View {
+        Picker("Savings goal", selection: Binding(get: { tx.goalID }, set: { newGoalID in
+            let linkedAccountID = newGoalID.flatMap { id in goals.first(where: { $0.id == id })?.linkedAccountID }
+            Ledger.edit(tx, context: context) { target in
+                target.goalID = newGoalID
+                let isInternal = target.category == .internalTransfer || target.smsTransactionType == .internalTransfer
+                if target.toAccountID == nil,
+                   let linkedAcc = linkedAccountID,
+                   linkedAcc != target.accountID,
+                   isInternal {
+                    target.toAccountID = linkedAcc
+                }
+            }
+        })) {
+            Text("None").tag(UUID?.none)
+            ForEach(goals) { g in
+                Text(g.name).tag(UUID?.some(g.id))
+            }
+        }
+    }
+
+    private func applySelectedCategory(_ new: SpendCategory) {
+        commitPendingEdits(silent: true)
+        if new == .visaTransfer {
+            let cards = accounts.filter { $0.kind == .creditCard }
+            Ledger.edit(tx, context: context) { target in
+                target.subcategory = nil
+                target.category = .visaTransfer
+                target.isIncome = false
+                target.smsTransactionType = .internalTransfer
+                target.aiCategorized = false
+                target.goalID = nil
+                target.smsBalanceIsCardLimit = true
+                let currentDestIsCard = target.toAccountID.flatMap { id in cards.first { $0.id == id } } != nil
+                if !currentDestIsCard {
+                    target.toAccountID = cards.first(where: { $0.id != target.accountID })?.id
+                }
+            }
+            if cards.isEmpty {
+                appState.show("Add your Visa card as a Credit card account to pay it down", warning: true)
+            }
+        } else if new == .internalTransfer {
+            Ledger.edit(tx, context: context) { target in
+                target.subcategory = nil
+                target.category = .internalTransfer
+                target.isIncome = false
+                target.smsTransactionType = .internalTransfer
+                target.aiCategorized = false
+                if target.toAccountID == nil,
+                   let recip = target.smsRecipientSuffix,
+                   let matchedDest = SMSParser.findMatchingAccount(suffix: recip, excludingAccountID: target.accountID, in: context) {
+                    target.toAccountID = matchedDest.id
+                }
+                if target.goalID == nil,
+                   let matchedGoal = SMSParser.findMatchingGoal(suffix: target.smsRecipientSuffix, accountID: target.toAccountID, in: context),
+                   matchedGoal.linkedAccountID == nil || matchedGoal.linkedAccountID != target.accountID {
+                    target.goalID = matchedGoal.id
+                    if target.toAccountID == nil, let linkedAcc = matchedGoal.linkedAccountID, linkedAcc != target.accountID {
+                        target.toAccountID = linkedAcc
+                    }
+                }
+            }
+        } else if tx.category == .internalTransfer || tx.category == .visaTransfer || tx.smsTransactionType == .internalTransfer || tx.isIncome != new.isIncomeCategory {
+            Ledger.edit(tx, context: context) { target in
+                target.subcategory = nil
+                target.category = new
+                target.toAccountID = nil
+                target.goalID = nil
+                target.smsBalanceIsCardLimit = false
+                target.isIncome = new.isIncomeCategory
+                if isSMSTransaction {
+                    target.smsTransactionType = new.isIncomeCategory ? .income : (new == .transfers ? .transferOut : .expense)
+                }
+                target.aiCategorized = false
+            }
+        } else {
+            if new != tx.category { tx.subcategory = nil }
+            tx.category = new
+            tx.aiCategorized = false
+            try? context.save()
+        }
+    }
+
+    @ViewBuilder
+    private var locationSection: some View {
+        Section("Location") {
+            if let loc = effectiveLocation {
+                TransactionLocationCard(
+                    placeName: loc.name,
+                    address: loc.address,
+                    latitude: loc.latitude,
+                    longitude: loc.longitude,
+                    onCaptureCurrent: {
+                        captureGPSLocation()
+                    },
+                    onSearchPlace: {
+                        showLocationPicker = true
+                    },
+                    onRemove: tx.hasLocation ? {
+                        tx.locationName = nil
+                        tx.locationAddress = nil
+                        tx.latitude = nil
+                        tx.longitude = nil
+                        try? context.save()
+                    } : nil
+                )
+                .listRowInsets(EdgeInsets())
+                .listRowBackground(Color.clear)
+            } else {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 10) {
+                        Image(systemName: "map.fill")
+                            .font(.title3)
+                            .foregroundStyle(Theme.brand)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Add Purchase Location")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(Theme.ink)
+                            Text("Show a map and place of purchase like Apple Wallet.")
+                                .font(.caption)
+                                .foregroundStyle(Theme.secondaryInk)
+                        }
+                    }
+
+                    HStack(spacing: 10) {
+                        Button {
+                            captureGPSLocation()
+                        } label: {
+                            HStack(spacing: 6) {
+                                if isCapturingGPS {
+                                    ProgressView().controlSize(.small)
+                                } else {
+                                    Image(systemName: "location.fill")
+                                }
+                                Text("Current Location")
+                            }
+                            .font(.caption.weight(.semibold))
+                            .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(Theme.brand)
+                        .disabled(isCapturingGPS)
+
+                        Button {
+                            showLocationPicker = true
+                        } label: {
+                            Label("Search Place", systemImage: "magnifyingglass")
+                                .font(.caption.weight(.semibold))
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var rulesSection: some View {
+        Section {
+            TransactionDetailRulesSection(tx: tx, accounts: accounts)
+                .listRowInsets(EdgeInsets())
+                .listRowBackground(Color.clear)
+        }
+    }
+
+    @ViewBuilder
+    private var smsDetailsSection: some View {
+        Section("SMS Details") {
+            Picker("SMS sender bank", selection: Binding(
+                get: { tx.smsBank ?? "" },
+                set: { newBank in
+                    commitPendingEdits(silent: true)
+                    let clean = newBank.isEmpty ? nil : newBank
+                    Ledger.edit(tx, context: context) { target in
+                        target.smsBank = clean
+                    }
+                    try? context.save()
+                    appState.show(clean.map { "Bank set to \($0)" } ?? "Cleared SMS bank")
+                }
+            )) {
+                Text("Unknown / Not set").tag("")
+                if let currentBank = tx.smsBank, !currentBank.isEmpty, !BahrainBankCatalog.bahrainBanks.contains(currentBank) {
+                    Text(currentBank).tag(currentBank)
+                }
+                ForEach(BahrainBankCatalog.bahrainBanks, id: \.self) { bank in
+                    Text(bank).tag(bank)
+                }
+            }
+
+            LabeledContent("Reference") {
+                Text((tx.smsReference?.isEmpty == false) ? tx.smsReference! : "—")
+                    .font(.subheadline.monospaced())
+                    .foregroundStyle(Theme.ink)
+            }
+
+            LabeledContent("Recipient IBAN / Account") {
+                Text(recipientDisplayText)
+                    .font(.subheadline.monospacedDigit())
+                    .foregroundStyle(Theme.ink)
+            }
+
+            LabeledContent("Previous balance") {
+                Text(previousBalanceAmount.map { Money.format($0, currency) } ?? "—")
+                    .monospacedDigit()
+            }
+
+            LabeledContent("New balance") {
+                if let account {
+                    if let smsBal = tx.smsBalance, !tx.isCardLimitBalance, abs(account.balance - smsBal) >= 0.0005 {
+                        VStack(alignment: .trailing, spacing: 2) {
+                            Text("\(account.name) (\(Money.format(account.balance, currency)))")
+                                .monospacedDigit()
+                                .animatedNumber(account.balance)
+                            Text("SMS: \(Money.format(smsBal, currency))")
+                                .font(.caption2.monospacedDigit())
+                                .foregroundStyle(Theme.secondaryInk)
+                        }
+                    } else {
+                        Text("\(account.name) (\(Money.format(account.balance, currency)))")
+                            .monospacedDigit()
+                            .animatedNumber(account.balance)
+                    }
+                } else if let smsBal = tx.smsBalance {
+                    Text(Money.format(smsBal, currency))
+                        .monospacedDigit()
+                } else {
+                    Text("None").foregroundStyle(Theme.secondaryInk)
+                }
+            }
+
+            if let bank = tx.smsBalance, let account, !account.kind.isLiability, !tx.isCardLimitBalance {
+                if abs(account.balance - bank) >= 0.0005 && !tx.isPending {
+                    Button {
+                        if let synced = Ledger.syncBalanceFromSMS(tx, context: context, force: true) {
+                            appState.show("\(account.name) set to \(Money.format(synced, currency))")
+                        }
+                    } label: {
+                        Label("Match \(account.name) to bank balance", systemImage: "equal.circle.fill")
+                    }
+                } else if tx.balanceAdjustment != 0 {
+                    Label("\(account.name) matched (\(Money.format(tx.balanceAdjustment, currency, signed: true)))", systemImage: "checkmark.seal.fill")
+                        .foregroundStyle(Theme.positive)
+                }
+            }
+
+            if let toBal = tx.smsToBalance, let toID = tx.toAccountID, let toAccount = Ledger.account(toID, context: context) {
+                Divider()
+
+                LabeledContent("Destination previous balance") {
+                    let destPrev = max(0, toBal - tx.amount)
+                    Text(Money.format(destPrev, currency))
+                        .monospacedDigit()
+                }
+
+                LabeledContent("Destination new balance") {
+                    Text("\(toAccount.name) (\(Money.format(toAccount.balance, currency)))")
+                        .monospacedDigit()
+                        .animatedNumber(toAccount.balance)
+                }
+
+                if !toAccount.kind.isLiability {
+                    if abs(toAccount.balance - toBal) >= 0.0005 && !tx.isPending {
+                        Button {
+                            if let synced = Ledger.syncBalanceForAccount(id: toID, balance: toBal, on: tx, isToAccount: true, context: context, force: true) {
+                                appState.show("\(toAccount.name) set to \(Money.format(synced, currency))")
+                            }
+                        } label: {
+                            Label("Match \(toAccount.name) to bank balance", systemImage: "equal.circle.fill")
+                        }
+                    } else if tx.toBalanceAdjustment != 0 {
+                        Label("\(toAccount.name) matched (\(Money.format(tx.toBalanceAdjustment, currency, signed: true)))", systemImage: "checkmark.seal.fill")
+                            .foregroundStyle(Theme.positive)
+                    }
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Classification reason").font(.caption).foregroundStyle(Theme.secondaryInk)
+                Text(tx.smsClassificationReason.isEmpty ? "—" : tx.smsClassificationReason)
+                    .font(.footnote)
+                    .foregroundStyle(Theme.ink)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var rawMessagesSection: some View {
+        Section(rawSMSMessages.count > 1 ? "Original SMS messages (\(rawSMSMessages.count))" : "Original message") {
+            if rawSMSMessages.count > 1 {
+                ForEach(Array(rawSMSMessages.enumerated()), id: \.offset) { idx, msg in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(smsLegHeaderTitle(index: idx, message: msg))
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(idx == 0 ? Theme.ink : Theme.positive)
+                        Text(msg)
+                            .font(.footnote)
+                            .foregroundStyle(Theme.secondaryInk)
+                            .textSelection(.enabled)
+                    }
+                    .padding(.vertical, 2)
+                }
+            } else {
+                Text(rawSMSMessages[0])
+                    .font(.footnote)
+                    .foregroundStyle(Theme.secondaryInk)
+                    .textSelection(.enabled)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var deleteSection: some View {
+        Section {
+            Button("Delete transaction", role: .destructive) { confirmDelete = true }
         }
     }
 

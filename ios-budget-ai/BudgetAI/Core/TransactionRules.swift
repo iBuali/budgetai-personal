@@ -314,7 +314,7 @@ final class TransactionRuleStore {
             captured.append(RuleCondition(
                 field: .amount,
                 value: String(format: "%.3f", tx.amount),
-                displayValue: Money.format(tx.amount)
+                displayValue: Money.format(tx.amount, tx.currency)
             ))
         }
 
