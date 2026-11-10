@@ -167,8 +167,8 @@ struct TransactionRuleBuilderSheet: View {
     private var defaultActionSection: some View {
         Section {
             Picker("Set Category", selection: $selectedCategory) {
-                ForEach(CategoryRegistry.shared.all) { cat in
-                    Label(cat.rawValue, systemImage: cat.symbol).tag(cat)
+                ForEach(SpendCategory.allCases) { cat in
+                    Label(cat.title, systemImage: cat.symbol).tag(cat)
                 }
             }
             .onChange(of: selectedCategory) { _, newValue in
