@@ -403,6 +403,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = "Budget AI";
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_NSFaceIDUsageDescription = "Unlock Budget AI with Face ID to keep your finances private.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Budget AI captures your location when recording transactions so you can see where you made each purchase on a map.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -438,6 +439,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = "Budget AI";
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_NSFaceIDUsageDescription = "Unlock Budget AI with Face ID to keep your finances private.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Budget AI captures your location when recording transactions so you can see where you made each purchase on a map.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;

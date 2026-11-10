@@ -307,6 +307,13 @@ struct TransactionsView: View {
                     }
                 }
                 ToolbarItemGroup(placement: .topBarTrailing) {
+                    NavigationLink {
+                        TransactionRulesListView()
+                    } label: {
+                        Image(systemName: "slider.horizontal.3")
+                    }
+                    .accessibilityLabel("Transaction Rules")
+
                     Button {
                         withAnimation(.snappy) { mode = mode == .list ? .calendar : .list }
                     } label: {
@@ -861,7 +868,8 @@ struct TransactionDetailView: View {
     @State private var editingCategory = false
     @State private var nameText = ""
     @State private var amountText = ""
-    @State private var conditionSaved = false
+    @State private var showLocationPicker = false
+    @State private var isCapturingGPS = false
     @FocusState private var focusedField: DetailField?
 
     private enum DetailField: Hashable {
@@ -906,6 +914,34 @@ struct TransactionDetailView: View {
     private var hasUnsavedAmount: Bool {
         guard let parsed = Money.parse(amountText), parsed > 0 else { return false }
         return abs(parsed - tx.amount) >= 0.0005
+    }
+
+    private var effectiveLocation: TransactionLocationData? {
+        if tx.hasLocation {
+            let place = (tx.locationName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
+                ? tx.locationName!
+                : tx.merchant
+            return TransactionLocationData(
+                name: place,
+                address: tx.locationAddress,
+                latitude: tx.latitude,
+                longitude: tx.longitude
+            )
+        }
+        return LocationService.inferLocation(from: tx.rawText, merchant: tx.merchant)
+    }
+
+    /// Computes the previous balance before this transaction occurred.
+    private var previousBalanceAmount: Double? {
+        if let smsBal = tx.smsBalance {
+            if tx.isCardLimitBalance { return smsBal }
+            return tx.isIncome ? max(0, smsBal - tx.amount) : (smsBal + tx.amount)
+        }
+        if let account {
+            if tx.isPending { return account.balance }
+            return tx.isIncome ? (account.balance - tx.amount) : (account.balance + tx.amount)
+        }
+        return nil
     }
 
     var body: some View {
@@ -1254,42 +1290,84 @@ struct TransactionDetailView: View {
                     }
             }
 
-            if isSMSTransaction {
-                Section {
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack {
-                            Label(conditionSaved ? "Condition Saved for Future" : "Save Condition for Future", systemImage: conditionSaved ? "checkmark.circle.fill" : "arrow.triangle.2.circlepath")
-                                .font(.subheadline.weight(.semibold))
-                                .foregroundStyle(conditionSaved ? Theme.positive : Theme.cobalt)
-                            Spacer()
+            // MARK: Apple Wallet–Style Location Section
+            Section("Location") {
+                if let loc = effectiveLocation {
+                    TransactionLocationCard(
+                        placeName: loc.name,
+                        address: loc.address,
+                        latitude: loc.latitude,
+                        longitude: loc.longitude,
+                        onCaptureCurrent: {
+                            captureGPSLocation()
+                        },
+                        onSearchPlace: {
+                            showLocationPicker = true
+                        },
+                        onRemove: tx.hasLocation ? {
+                            tx.locationName = nil
+                            tx.locationAddress = nil
+                            tx.latitude = nil
+                            tx.longitude = nil
+                            try? context.save()
+                        } : nil
+                    )
+                    .listRowInsets(EdgeInsets())
+                    .listRowBackground(Color.clear)
+                } else {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack(spacing: 10) {
+                            Image(systemName: "map.fill")
+                                .font(.title3)
+                                .foregroundStyle(Theme.brand)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Add Purchase Location")
+                                    .font(.subheadline.weight(.semibold))
+                                    .foregroundStyle(Theme.ink)
+                                Text("Show a map and place of purchase like Apple Wallet.")
+                                    .font(.caption)
+                                    .foregroundStyle(Theme.secondaryInk)
+                            }
                         }
-                        Text("Save this transaction's rules, category, and account as a condition so future matching SMS messages are automatically categorized the same way without restricting to SMS sender bank.")
-                            .font(.caption)
-                            .foregroundStyle(Theme.secondaryInk)
 
-                        Button {
-                            commitPendingEdits(silent: true)
-                            SMSUserRules.rememberTransactionRule(for: tx, saveBank: false)
-                            withAnimation(.snappy) {
-                                conditionSaved = true
+                        HStack(spacing: 10) {
+                            Button {
+                                captureGPSLocation()
+                            } label: {
+                                HStack(spacing: 6) {
+                                    if isCapturingGPS {
+                                        ProgressView().controlSize(.small)
+                                    } else {
+                                        Image(systemName: "location.fill")
+                                    }
+                                    Text("Current Location")
+                                }
+                                .font(.caption.weight(.semibold))
+                                .frame(maxWidth: .infinity)
                             }
-                            appState.show("Saved condition for future SMS")
-                        } label: {
-                            HStack {
-                                Spacer()
-                                Label(conditionSaved ? "Condition Saved for Future SMS" : "Save Condition for Future", systemImage: conditionSaved ? "checkmark" : "square.and.arrow.down")
-                                    .fontWeight(.semibold)
-                                Spacer()
+                            .buttonStyle(.borderedProminent)
+                            .tint(Theme.brand)
+                            .disabled(isCapturingGPS)
+
+                            Button {
+                                showLocationPicker = true
+                            } label: {
+                                Label("Search Place", systemImage: "magnifyingglass")
+                                    .font(.caption.weight(.semibold))
+                                    .frame(maxWidth: .infinity)
                             }
+                            .buttonStyle(.bordered)
                         }
-                        .buttonStyle(.borderedProminent)
-                        .tint(conditionSaved ? Theme.positive : Theme.cobalt)
-                        .padding(.top, 4)
                     }
                     .padding(.vertical, 4)
-                } header: {
-                    Text("Saved SMS Conditions")
                 }
+            }
+
+            // MARK: New Transaction Rules Section
+            Section {
+                TransactionDetailRulesSection(tx: tx, accounts: accounts)
+                    .listRowInsets(EdgeInsets())
+                    .listRowBackground(Color.clear)
             }
 
             if isSMSTransaction || tx.smsBalance != nil {
@@ -1327,16 +1405,30 @@ struct TransactionDetailView: View {
                             .foregroundStyle(Theme.ink)
                     }
 
-                    LabeledContent(tx.toAccountID != nil && tx.smsToBalance != nil ? "Source balance in SMS" : (tx.isCardLimitBalance ? "Card available limit in SMS" : "Balance in SMS")) {
-                        Text(tx.smsBalance.map { Money.format($0, currency) } ?? "—")
+                    LabeledContent("Previous balance") {
+                        Text(previousBalanceAmount.map { Money.format($0, currency) } ?? "—")
                             .monospacedDigit()
                     }
 
-                    LabeledContent(tx.toAccountID != nil && tx.smsToBalance != nil ? "Source account" : "Account in App") {
+                    LabeledContent("New balance") {
                         if let account {
-                            Text("\(account.name) (\(Money.format(account.balance, currency)))")
+                            if let smsBal = tx.smsBalance, !tx.isCardLimitBalance, abs(account.balance - smsBal) >= 0.0005 {
+                                VStack(alignment: .trailing, spacing: 2) {
+                                    Text("\(account.name) (\(Money.format(account.balance, currency)))")
+                                        .monospacedDigit()
+                                        .animatedNumber(account.balance)
+                                    Text("SMS: \(Money.format(smsBal, currency))")
+                                        .font(.caption2.monospacedDigit())
+                                        .foregroundStyle(Theme.secondaryInk)
+                                }
+                            } else {
+                                Text("\(account.name) (\(Money.format(account.balance, currency)))")
+                                    .monospacedDigit()
+                                    .animatedNumber(account.balance)
+                            }
+                        } else if let smsBal = tx.smsBalance {
+                            Text(Money.format(smsBal, currency))
                                 .monospacedDigit()
-                                .animatedNumber(account.balance)
                         } else {
                             Text("None").foregroundStyle(Theme.secondaryInk)
                         }
@@ -1360,12 +1452,13 @@ struct TransactionDetailView: View {
                     if let toBal = tx.smsToBalance, let toID = tx.toAccountID, let toAccount = Ledger.account(toID, context: context) {
                         Divider()
 
-                        LabeledContent("Destination balance in SMS") {
-                            Text(Money.format(toBal, currency))
+                        LabeledContent("Destination previous balance") {
+                            let destPrev = max(0, toBal - tx.amount)
+                            Text(Money.format(destPrev, currency))
                                 .monospacedDigit()
                         }
 
-                        LabeledContent("Destination account") {
+                        LabeledContent("Destination new balance") {
                             Text("\(toAccount.name) (\(Money.format(toAccount.balance, currency)))")
                                 .monospacedDigit()
                                 .animatedNumber(toAccount.balance)
@@ -1461,6 +1554,33 @@ struct TransactionDetailView: View {
                 Ledger.delete(tx, context: context)
                 dismiss()
             }
+        }
+        .sheet(isPresented: $showLocationPicker) {
+            LocationPickerSheet(initialName: tx.locationName ?? tx.merchant) { loc in
+                tx.locationName = loc.name
+                tx.locationAddress = loc.address
+                tx.latitude = loc.latitude
+                tx.longitude = loc.longitude
+                try? context.save()
+                appState.show("Location updated to \(loc.name)")
+            }
+        }
+    }
+
+    private func captureGPSLocation() {
+        Task {
+            isCapturingGPS = true
+            if let loc = await LocationService.shared.captureCurrentLocation(fallbackPlaceName: tx.merchant) {
+                tx.locationName = loc.name
+                tx.locationAddress = loc.address
+                tx.latitude = loc.latitude
+                tx.longitude = loc.longitude
+                try? context.save()
+                appState.show("Captured location: \(loc.name)")
+            } else if let err = LocationService.shared.lastError {
+                appState.show(err, warning: true)
+            }
+            isCapturingGPS = false
         }
     }
 

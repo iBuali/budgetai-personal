@@ -188,12 +188,14 @@ struct HomeView: View {
 
     private func safeCard(_ f: Finance) -> some View {
         let safe = f.safeToSpend
-        let pct = Int(f.budgetUsed * 100)
+        let totalPool = max(safe.spendable + f.monthExpenses, safe.spendable)
+        let safeRatio = totalPool > 0 ? min(max(safe.monthly / totalPool, 0), 1) : 0
+        let pct = Int((safeRatio * 100).rounded())
         return NavigationLink(value: HomeRoute.safe) {
             HStack(spacing: 18) {
                 ZStack {
-                    RingView(progress: f.budgetUsed, lineWidth: 11, color: f.budgetUsed > 0.95 ? Theme.negative : Theme.cobalt)
-                    Text(f.totalBudget > 0 ? "\(pct)%" : "—")
+                    RingView(progress: safeRatio, lineWidth: 11, color: safe.isShort ? Theme.negative : Theme.cobalt)
+                    Text("\(pct)%")
                         .font(.headline.monospacedDigit())
                         .foregroundStyle(Theme.ink)
                         .animatedNumber(Double(pct))
@@ -212,19 +214,12 @@ struct HomeView: View {
                         .minimumScaleFactor(0.75)
                         .layoutPriority(1)
                         .animatedNumber(safe.daily)
-                    if f.totalBudget > 0 {
-                        Text("Budget left \(Money.format(f.budgetLeft, currency)) of \(Money.number(f.totalBudget, decimals: Money.digits(currency)))")
-                            .font(.subheadline.monospacedDigit())
-                            .foregroundStyle(Theme.secondaryInk)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.75)
-                            .animatedNumber(f.budgetLeft)
-                    } else {
-                        Text("Set budgets to protect essentials")
-                            .font(.subheadline)
-                            .foregroundStyle(Theme.secondaryInk)
-                            .lineLimit(1)
-                    }
+                    Text("\(Money.format(safe.monthly, currency)) safe of \(Money.format(safe.spendable, currency)) · \(safe.daysLeft)d left")
+                        .font(.subheadline.monospacedDigit())
+                        .foregroundStyle(Theme.secondaryInk)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                        .animatedNumber(safe.monthly)
                 }
                 Spacer(minLength: 0)
                 Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(.tertiary)

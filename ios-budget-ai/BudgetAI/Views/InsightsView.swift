@@ -21,15 +21,6 @@ struct InsightsView: View {
                     }
                     .buttonStyle(PressableStyle())
 
-                    NavigationLink(value: InsightRoute.smsTestingLab) {
-                        featureCard(title: "SMS Testing Lab",
-                                    subtitle: "Bulk test Bahrain bank SMS, compare expected vs actual, self-learn patterns and publish parser knowledge.",
-                                    symbol: "flask.fill",
-                                    colors: [Color(hex: 0x22A565), Color(hex: 0x0EA5E9)],
-                                    available: true)
-                    }
-                    .buttonStyle(PressableStyle())
-
                     featureCard(title: "Can I Afford It?",
                                 subtitle: "Check if a purchase fits your plans before you buy.",
                                 symbol: "cart.badge.questionmark",
@@ -50,7 +41,6 @@ struct InsightsView: View {
             .navigationDestination(for: InsightRoute.self) { route in
                 switch route {
                 case .timeMachine: FinancialTimeMachineView()
-                case .smsTestingLab: SMSTestingLabView()
                 }
             }
         }
@@ -99,4 +89,4 @@ struct InsightsView: View {
     }
 }
 
-enum InsightRoute: Hashable { case timeMachine, smsTestingLab }
+enum InsightRoute: Hashable { case timeMachine }

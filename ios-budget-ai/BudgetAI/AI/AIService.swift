@@ -351,11 +351,6 @@ enum SMSImporter {
         guard !trimmed.isEmpty else { return SMSImportOutcome(message: "The message was empty.") }
         CategoryRegistry.shared.reload(context: context)
 
-        if let manualBank, !manualBank.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-           let sender, !sender.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            SMSUserRules.rememberBank(manualBank, forSender: sender)
-        }
-
         let chunks = SMSParser.splitBatch(trimmed)
         if chunks.count > 1 {
             return await importBatch(chunks, context: context, forceApprove: forceApprove, accountID: accountID, sender: sender, manualBank: manualBank)
@@ -458,7 +453,6 @@ enum SMSImporter {
         let cleanManualBank = manualBank?.trimmingCharacters(in: .whitespacesAndNewlines)
         let resolvedSMSBank = (cleanManualBank?.isEmpty == false ? cleanManualBank : nil)
             ?? p.detectedBank
-            ?? SMSUserRules.bank(forSender: effectiveSender, in: trimmed)
         let resolvedSender = effectiveSender ?? p.sender
 
         // Determine account involved in the transaction (supports multiple accounts e.g. 17515151 -> BisB, 17123456 -> ila).
@@ -505,10 +499,6 @@ enum SMSImporter {
             }
             if let ruleAccID = p.accountID, let acc = Ledger.account(ruleAccID, context: context), isCompatible(acc) {
                 return ruleAccID
-            }
-            if let senderAccID = SMSUserRules.accountID(forSender: resolvedSender, in: trimmed),
-               let acc = Ledger.account(senderAccID, context: context), isCompatible(acc) {
-                return senderAccID
             }
             return nil
         }()
@@ -663,6 +653,28 @@ enum SMSImporter {
         tx.goalID = p.goalID
         tx.smsBalanceIsCardLimit = p.balanceIsCardLimit || isCardPayment
 
+        // Infer purchase/merchant location when available in SMS or merchant name
+        if let inferredLoc = LocationService.inferLocation(from: trimmed, merchant: tx.merchant) {
+            tx.locationName = inferredLoc.name
+            tx.locationAddress = inferredLoc.address
+            tx.latitude = inferredLoc.latitude
+            tx.longitude = inferredLoc.longitude
+        }
+
+        // Highest Priority: Apply user-defined Transaction Rules to future matching transactions.
+        let matchedHighPriorityRule = TransactionRuleStore.shared.applyHighestPriorityRuleIfMatching(to: tx, context: context)
+        if matchedHighPriorityRule != nil {
+            p.matchedUserRule = true
+            p.category = tx.category
+            p.isIncome = tx.isIncome
+            if let ruleTxType = tx.smsTransactionType {
+                p.transactionType = ruleTxType
+            }
+            if let ruleAcc = tx.accountID {
+                target = ruleAcc
+            }
+        }
+
         // Quarantine check:
         // If an SMS has:
         // 1. Unknown sender bank
@@ -736,9 +748,11 @@ enum SMSImporter {
         }
 
         let code = AppSettings.currency
-        // Keep the user's note field empty for SMS transactions (do not put SMS reference in it).
+        // Keep the user's note field empty for SMS transactions unless set by a user Transaction Rule.
         // The SMS reference is preserved in tx.smsReference.
-        tx.note = ""
+        if matchedHighPriorityRule?.actions.setNote == nil {
+            tx.note = ""
+        }
 
         let result = Ledger.add(tx, context: context)
         let typeLabel = p.transactionType.title
@@ -874,7 +888,12 @@ enum SMSImporter {
                 if !s2.isEmpty, let newAcc = targetAccountID { return newAcc }
                 return existing.accountID ?? targetAccountID
             }()
-            let mergedBank = existing.smsBank ?? resolvedBank
+            let mergedBank: String? = {
+                if existing.smsBank == "Bank ABC", resolvedBank == "ila" {
+                    return "ila"
+                }
+                return existing.smsBank ?? resolvedBank
+            }()
             let mergedSender = existing.smsSender ?? resolvedSender?.trimmingCharacters(in: .whitespacesAndNewlines)
             let mergedRecipientSuffix = existing.smsRecipientSuffix ?? parsed.recipientSuffix
 
@@ -1371,16 +1390,20 @@ enum SMSImporter {
                 return SMSParser.findAccountInSMSText(raw, detectedBank: tx.smsBank, in: context)
             }()
 
-            if let matchedAcc {
+            if let matchedAcc, tx.accountID != matchedAcc.id {
                 let currentAcc = tx.accountID.flatMap { id in allAccounts.first(where: { $0.id == id }) }
-                let currentMatchesDigits: Bool = {
-                    guard let currentAcc else { return false }
-                    if let q = querySuffix, !q.isEmpty {
-                        return SMSParser.digitsMatch(accountMatch: currentAcc.smsMatch, query: q)
+                let shouldAssign: Bool = {
+                    guard let currentAcc else { return true }
+                    // Only reassign an existing account if the SMS has explicit digits that match `matchedAcc.smsMatch`
+                    // and do NOT match `currentAcc.smsMatch`.
+                    if let q = querySuffix, !q.isEmpty,
+                       SMSParser.digitsMatch(accountMatch: matchedAcc.smsMatch, query: q),
+                       !SMSParser.digitsMatch(accountMatch: currentAcc.smsMatch, query: q) {
+                        return true
                     }
-                    return currentAcc.id == matchedAcc.id
+                    return false
                 }()
-                if tx.accountID == nil || !currentMatchesDigits {
+                if shouldAssign {
                     if tx.isPending {
                         tx.accountID = matchedAcc.id
                         if tx.smsTransactionType != .unknown && AppSettings.smsAutoApprove {

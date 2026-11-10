@@ -119,18 +119,17 @@ struct RingView: View {
     let progress: Double
     var lineWidth: CGFloat = 12
     var color: Color = Theme.cobalt
-    @State private var shown: Double = 0
 
     var body: some View {
+        let clamped = min(max(progress, 0), 1)
         ZStack {
             Circle().stroke(Theme.cobaltSoft, lineWidth: lineWidth)
             Circle()
-                .trim(from: 0, to: min(max(shown, 0), 1))
+                .trim(from: 0, to: clamped)
                 .stroke(color, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
                 .rotationEffect(.degrees(-90))
+                .animation(.spring(response: 0.55, dampingFraction: 0.84), value: clamped)
         }
-        .onAppear { withAnimation(.spring(response: 0.85, dampingFraction: 0.82).delay(0.08)) { shown = progress } }
-        .onChange(of: progress) { _, v in withAnimation(.spring(response: 0.55, dampingFraction: 0.84)) { shown = v } }
     }
 }
 

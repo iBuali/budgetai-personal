@@ -25,6 +25,9 @@ struct AddTransactionSheet: View {
     @State private var note = ""
     @State private var repeatsMonthly = false
     @State private var saved = false
+    @State private var locationData: TransactionLocationData?
+    @State private var showLocationPicker = false
+    @State private var isCapturingGPS = false
     @FocusState private var amountFocused: Bool
 
     private var amount: Double { Money.parse(amountText) ?? 0 }
@@ -100,6 +103,52 @@ struct AddTransactionSheet: View {
                     } footer: {
                         if repeatsMonthly && !isIncome { Text("We'll add it to Bills and remind you before it's due.") }
                     }
+
+                    Section("Location") {
+                        if let loc = locationData {
+                            TransactionLocationCard(
+                                placeName: loc.name,
+                                address: loc.address,
+                                latitude: loc.latitude,
+                                longitude: loc.longitude,
+                                onCaptureCurrent: { captureCurrentLocation() },
+                                onSearchPlace: { showLocationPicker = true },
+                                onRemove: { locationData = nil }
+                            )
+                            .listRowInsets(EdgeInsets())
+                            .listRowBackground(Color.clear)
+                        } else {
+                            HStack(spacing: 10) {
+                                Button {
+                                    captureCurrentLocation()
+                                } label: {
+                                    HStack(spacing: 6) {
+                                        if isCapturingGPS {
+                                            ProgressView().controlSize(.small)
+                                        } else {
+                                            Image(systemName: "location.fill")
+                                        }
+                                        Text("Current Location")
+                                    }
+                                    .font(.caption.weight(.semibold))
+                                    .frame(maxWidth: .infinity)
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .tint(Theme.brand)
+                                .disabled(isCapturingGPS)
+
+                                Button {
+                                    showLocationPicker = true
+                                } label: {
+                                    Label("Search Place", systemImage: "magnifyingglass")
+                                        .font(.caption.weight(.semibold))
+                                        .frame(maxWidth: .infinity)
+                                }
+                                .buttonStyle(.bordered)
+                            }
+                            .padding(.vertical, 4)
+                        }
+                    }
                 }
             }
             .scrollContentBackground(.hidden)
@@ -123,8 +172,25 @@ struct AddTransactionSheet: View {
                 accountID = Ledger.defaultAccountID(context: context)
                 amountFocused = true
             }
+            .sheet(isPresented: $showLocationPicker) {
+                LocationPickerSheet(initialName: locationData?.name ?? merchant) { loc in
+                    locationData = loc
+                }
+            }
         }
         .presentationDragIndicator(.visible)
+    }
+
+    private func captureCurrentLocation() {
+        Task {
+            isCapturingGPS = true
+            if let loc = await LocationService.shared.captureCurrentLocation(fallbackPlaceName: merchant.isEmpty ? nil : merchant) {
+                locationData = loc
+            } else if let err = LocationService.shared.lastError {
+                appState.show(err, warning: true)
+            }
+            isCapturingGPS = false
+        }
     }
 
     // MARK: Transfer
@@ -198,6 +264,15 @@ struct AddTransactionSheet: View {
                                   merchant: name.isEmpty ? (subcategory ?? cat).title : name,
                                   category: cat, date: date, note: note, source: .manual, accountID: accountID)
         tx.subcategory = subcategory
+        if let loc = locationData ?? LocationService.inferLocation(from: note, merchant: tx.merchant) {
+            tx.locationName = loc.name
+            tx.locationAddress = loc.address
+            tx.latitude = loc.latitude
+            tx.longitude = loc.longitude
+        }
+        if !userPickedCategory {
+            TransactionRuleStore.shared.applyHighestPriorityRuleIfMatching(to: tx, context: context)
+        }
         let result = Ledger.add(tx, context: context)
         if repeatsMonthly && !isIncome {
             let next = Calendar.current.date(byAdding: .month, value: 1, to: date) ?? date

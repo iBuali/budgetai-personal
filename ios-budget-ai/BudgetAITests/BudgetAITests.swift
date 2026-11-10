@@ -23,8 +23,7 @@ struct BudgetAITests {
         UserDefaults.standard.removeObject(forKey: Keys.smsAccountID)
         UserDefaults.standard.removeObject(forKey: Keys.smsAutoApprove)
         UserDefaults.standard.removeObject(forKey: Keys.smsSyncBalance)
-        SMSUserRules.clearAll()
-        SMSKnowledgeStore.resetAll()
+        TransactionRuleStore.shared.clearAll()
         return context
     }
 
@@ -174,7 +173,7 @@ struct BudgetAITests {
     }
 
     @Test func cardPurchaseAndArabicDigitsClassification() throws {
-        SMSUserRules.clearAll()
+        TransactionRuleStore.shared.clearAll()
         let enSMS = "Your NBB card ending 1234 was used for BHD 6.750 at TALABAT BH on 24-Oct. Avl Bal: BHD 412.300"
         let enParsed = try #require(SMSParser.parse(enSMS))
         #expect(enParsed.transactionType == .expense)
@@ -276,7 +275,7 @@ struct BudgetAITests {
     // MARK: - 6. User Corrections, Scoped Learning, and Sender-vs-Account Separation
 
     @Test func userCorrectionsUpdateBalancesAndScopeRulesProperly() async throws {
-        SMSUserRules.clearAll()
+        TransactionRuleStore.shared.clearAll()
         let context = makeCleanContext()
         let nbb = Account(name: "NBB Current", kind: .bank, institution: "NBB", balance: 500.000)
         let bbk = Account(name: "BBK Savings", kind: .bank, institution: "BBK", balance: 200.000)
@@ -301,7 +300,6 @@ struct BudgetAITests {
             newBank: "Al Salam",
             newCategory: .health,
             approveIfPending: true,
-            rememberRule: true,
             context: context
         )
         tx1.merchant = "Gym Membership"
@@ -309,7 +307,24 @@ struct BudgetAITests {
             target.accountID = bbk.id
             target.amount = 12.500 // Also test editing transaction amount
         }
-        SMSUserRules.rememberTransactionRule(for: tx1, saveBank: true)
+
+        // User creates a rule from tx1 matching sender "88990" AND accountDigits "7711"
+        let rule = TransactionRule(
+            logic: .and,
+            conditions: [
+                RuleCondition(field: .smsSender, value: "88990", displayValue: "88990"),
+                RuleCondition(field: .accountDigits, value: "7711", displayValue: "Ending 7711")
+            ],
+            actions: RuleActions(
+                categoryRawValue: SpendCategory.health.rawValue,
+                transactionType: .expense,
+                customMerchant: "Gym Membership",
+                customBank: "Al Salam",
+                accountID: bbk.id
+            ),
+            sourceTransactionID: tx1.id
+        )
+        _ = TransactionRuleStore.shared.addRule(rule)
 
         #expect(tx1.isPending == false)
         #expect(tx1.smsTransactionType == .expense)
@@ -320,8 +335,7 @@ struct BudgetAITests {
         #expect(abs(nbb.balance - 500.000) < 0.0001) // Reversed from NBB when moved to BBK
         #expect(abs(bbk.balance - 187.500) < 0.0001) // Deducted edited amount 12.500 from BBK
 
-        // 3. Future message from the same sender "88990" with same template & counterparty *7711 automatically remembers
-        // bank, transaction type, category, custom name, and source account!
+        // 3. Future message from the same sender "88990" with same counterparty *7711 automatically applies the rule!
         let ambiguous2 = "Alert: BHD 25.000 processed for ACCT *7711 on 2026/10/28"
         let outcome2 = await SMSImporter.importText(ambiguous2, context: context, forceApprove: true, sender: "88990")
         let tx2 = try #require(outcome2.transaction)
@@ -333,7 +347,7 @@ struct BudgetAITests {
         #expect(tx2.accountID == bbk.id)
         #expect(abs(tx2.amount - 25.000) < 0.0001)
 
-        // 4. Unrelated message with a different counterparty/structure is NOT affected by the correction rule
+        // 4. Unrelated message with a different counterparty/structure is NOT affected by the rule
         let unrelated = "Alert: BHD 15.000 processed for ACCT *9999 on 2026/10/28"
         let parsedUnrelated = try #require(SMSParser.parse(unrelated, sender: "OTHER_SENDER", context: context))
         #expect(parsedUnrelated.detectedBank == nil)
@@ -684,45 +698,45 @@ struct BudgetAITests {
         #expect(abs(base.grossSpending - 100 / months) < 0.001)
     }
 
-    @Test func savedConditionsManagementAndClearAll() throws {
-        SMSUserRules.clearAll()
-        #expect(SMSUserRules.totalConditionsCount() == 0)
+    @Test func transactionRulesManagementAndClearAll() throws {
+        TransactionRuleStore.shared.clearAll()
+        #expect(TransactionRuleStore.shared.rules.isEmpty)
 
-        // 1. Add sender bank condition
-        SMSUserRules.rememberBank("BisB", forSender: "17515151")
-        #expect(SMSUserRules.allSenderBanks().count == 1)
-        #expect(SMSUserRules.bank(forSender: "17515151") == "BisB")
-
-        // 2. Add classification condition
-        SMSUserRules.rememberClassification(
-            type: .expense,
-            category: .dining,
-            merchant: "Cafeteria",
-            bank: "BisB",
-            forRawSMS: "Purchase of BHD 2.500 at Cafeteria with card 1234",
-            sender: "17515151"
+        // 1. Add a transaction rule
+        let rule = TransactionRule(
+            logic: .and,
+            conditions: [
+                RuleCondition(field: .merchant, value: "Cafeteria", displayValue: "Cafeteria"),
+                RuleCondition(field: .smsSender, value: "17515151", displayValue: "17515151")
+            ],
+            actions: RuleActions(
+                categoryRawValue: SpendCategory.dining.rawValue,
+                transactionType: .expense,
+                customMerchant: "Cafeteria",
+                customBank: "BisB"
+            )
         )
-        #expect(SMSUserRules.allClassificationRules().count == 1)
-        #expect(SMSUserRules.totalConditionsCount() == 1)
+        let res = TransactionRuleStore.shared.addRule(rule)
+        #expect(res.added == true)
+        #expect(TransactionRuleStore.shared.rules.count == 1)
 
-        let rule = try #require(SMSUserRules.allClassificationRules().first)
-        #expect(rule.merchant == "Cafeteria")
-        #expect(rule.category == .dining)
-        #expect(rule.transactionType == .expense)
+        let saved = try #require(TransactionRuleStore.shared.rules.first)
+        #expect(saved.actions.customMerchant == "Cafeteria")
+        #expect(saved.actions.category == .dining)
+        #expect(saved.actions.transactionType == .expense)
 
-        // 3. Delete single classification rule
-        SMSUserRules.removeClassificationRule(signature: rule.signature)
-        #expect(SMSUserRules.allClassificationRules().count == 0)
-        #expect(SMSUserRules.totalConditionsCount() == 0)
+        // 2. Delete single rule
+        TransactionRuleStore.shared.deleteRule(id: saved.id)
+        #expect(TransactionRuleStore.shared.rules.isEmpty)
 
-        // 4. Clear all conditions
-        SMSUserRules.clearAll()
-        #expect(SMSUserRules.totalConditionsCount() == 0)
-        #expect(SMSUserRules.allSenderBanks().isEmpty)
-        #expect(SMSUserRules.allClassificationRules().isEmpty)
+        // 3. Clear all rules
+        _ = TransactionRuleStore.shared.addRule(rule)
+        #expect(TransactionRuleStore.shared.rules.count == 1)
+        TransactionRuleStore.shared.clearAll()
+        #expect(TransactionRuleStore.shared.rules.isEmpty)
     }
 
-    @Test func multipleAccountsByBankPhoneAndSavedSenderRules() async throws {
+    @Test func multipleAccountsByBankPhoneReferenceAndSenderRecognition() async throws {
         let context = makeCleanContext()
         let bisb = Account(name: "BisB Account", kind: .bank, institution: "BisB", balance: 500.000)
         let ila = Account(name: "ila Bank", kind: .bank, institution: "ila", balance: 300.000)
@@ -751,10 +765,9 @@ struct BudgetAITests {
         #expect(tx2.isPending == false)
         #expect(abs(ila.balance - 280.000) < 0.0001)
 
-        // 3. User saves custom sender phone/ID linked to ila account, recognized even when Shortcut sender is nil
-        SMSUserRules.rememberBank("ila", forSender: "99001122", accountID: ila.id)
-        let customSenderSMS = "Purchase of BHD 5.000 at COSTA COFFEE on 2026/10/28 11:00. Helpline: +973 9900 1122"
-        let out3 = await SMSImporter.importText(customSenderSMS, context: context, forceApprove: true, sender: nil)
+        // 3. SMS with reference code prefix (e.g. ILAB2610289911) recognizes sender bank as ila even without phone or bank name
+        let refOnlySMS = "Purchase of BHD 5.000 at COSTA COFFEE on 2026/10/28 11:00. Ref: ILAB2610289911"
+        let out3 = await SMSImporter.importText(refOnlySMS, context: context, forceApprove: true, sender: nil)
         let tx3 = try #require(out3.transaction)
         #expect(tx3.smsBank == "ila")
         #expect(tx3.accountID == ila.id)
@@ -999,10 +1012,10 @@ struct BudgetAITests {
         #expect(abs(visaCard.balance - 87.000) < 0.0001)
     }
 
-    @Test func testConditionsNotSavedAutomaticallyAndCanBeSavedManually() async throws {
+    @Test func testRulesNotCreatedAutomaticallyAndApplyOnlyToFutureTransactions() async throws {
         let context = makeCleanContext()
-        SMSUserRules.clearAll()
-        #expect(SMSUserRules.totalConditionsCount() == 0)
+        TransactionRuleStore.shared.clearAll()
+        #expect(TransactionRuleStore.shared.rules.isEmpty)
 
         let acc1 = Account(name: "Main Account", kind: .bank, institution: "BisB", balance: 500.000)
         let acc2 = Account(name: "Shopping Account", kind: .bank, institution: "BisB", balance: 300.000)
@@ -1024,14 +1037,28 @@ struct BudgetAITests {
         }
         _ = Ledger.approve(tx, context: context)
 
-        // Verify conditions were NOT saved automatically!
-        #expect(SMSUserRules.totalConditionsCount() == 0)
+        // Verify rules were NOT created automatically!
+        #expect(TransactionRuleStore.shared.rules.isEmpty)
 
-        // 3. User explicitly taps "Save condition for future" (calling rememberTransactionRule)
-        SMSUserRules.rememberTransactionRule(for: tx)
-        #expect(SMSUserRules.totalConditionsCount() > 0)
+        // 3. User explicitly creates a Transaction Rule with user approval
+        let rule = TransactionRule(
+            logic: .and,
+            conditions: [
+                RuleCondition(field: .merchant, value: "Novelty Store", displayValue: "Novelty Store"),
+                RuleCondition(field: .bank, value: "BisB", displayValue: "BisB")
+            ],
+            actions: RuleActions(
+                categoryRawValue: SpendCategory.education.rawValue,
+                transactionType: .expense,
+                customMerchant: "Specialty Books",
+                accountID: acc2.id
+            ),
+            sourceTransactionID: tx.id
+        )
+        _ = TransactionRuleStore.shared.addRule(rule)
+        #expect(TransactionRuleStore.shared.rules.count == 1)
 
-        // 4. Future matching SMS from the same bank & counterparty now automatically gets the saved condition
+        // 4. Future matching SMS from the same bank & merchant now automatically gets the saved rule
         let nextSMS = "Debit: BHD 18.000 spent at Novelty Store on 2026/10/29 15:00. Tel: 17515151"
         let nextOutcome = await SMSImporter.importText(nextSMS, context: context, forceApprove: true)
         let nextTx = try #require(nextOutcome.transaction)
@@ -1059,9 +1086,9 @@ struct BudgetAITests {
         #expect(!reasons.contains("Uncertain categorization"))
     }
 
-    @Test func testSaveConditionWithoutSMSSenderBankAppliesAcrossBanks() async throws {
+    @Test func testTransactionRuleWithoutBankConditionAppliesAcrossBanks() async throws {
         let context = makeCleanContext()
-        SMSUserRules.clearAll()
+        TransactionRuleStore.shared.clearAll()
 
         let acc = Account(name: "Daily Account", kind: .bank, institution: "BisB", balance: 500.000)
         context.insert(acc)
@@ -1072,19 +1099,30 @@ struct BudgetAITests {
         let outcome1 = await SMSImporter.importText(sms1, context: context, forceApprove: true)
         let tx1 = try #require(outcome1.transaction)
 
-        // 2. User edits category and saves condition WITHOUT sender bank
-        tx1.category = .dining
-        tx1.merchant = "Specialty Coffee"
-        SMSUserRules.rememberTransactionRule(for: tx1, saveBank: false)
+        // 2. User creates a rule matching ONLY merchant ("Coffee Corner"), without selecting Bank
+        let captured = TransactionRuleStore.captureAvailableFields(from: tx1, accounts: [acc])
+        let merchantCondition = try #require(captured.first(where: { $0.field == .merchant }))
+        let rule = TransactionRule(
+            logic: .and,
+            conditions: [merchantCondition],
+            actions: RuleActions(
+                categoryRawValue: SpendCategory.dining.rawValue,
+                customMerchant: "Specialty Coffee"
+            ),
+            sourceTransactionID: tx1.id
+        )
+        _ = TransactionRuleStore.shared.addRule(rule)
+        #expect(TransactionRuleStore.shared.rules.count == 1)
 
-        #expect(SMSUserRules.totalConditionsCount() == 1)
+        // Existing tx1 was NOT modified automatically when creating the rule
+        #expect(tx1.merchant == "Coffee Corner")
 
         // 3. Receive similar transaction from a DIFFERENT sender/bank (e.g. ila Bank)
         let sms2 = "Debit: BHD 15.000 spent at Coffee Corner on 2026/10/29 11:00. Tel: 17123456"
         let outcome2 = await SMSImporter.importText(sms2, context: context, forceApprove: true)
         let tx2 = try #require(outcome2.transaction)
 
-        // Should apply the saved condition even though the SMS sender bank was different
+        // Should apply the saved rule even though the SMS sender bank was different
         #expect(tx2.category == .dining)
         #expect(tx2.merchant == "Specialty Coffee")
     }
@@ -1132,7 +1170,7 @@ struct BudgetAITests {
 
     @Test func testAlSalamMaskedIBANTowardsEWABNotAssignedToIlaBank() async throws {
         let context = makeCleanContext()
-        SMSUserRules.clearAll()
+        TransactionRuleStore.shared.clearAll()
 
         // User has ila Bank (first account) and BisB, but NO Al Salam Bank account
         let ila = Account(name: "ila Bank", kind: .bank, institution: "ila", balance: 300.000)
@@ -1142,9 +1180,6 @@ struct BudgetAITests {
         context.insert(ila)
         context.insert(bisb)
         try context.save()
-
-        // Even if a stale sender rule existed in UserDefaults mapping "ila" -> "ila", it must NEVER match substrings in the body
-        SMSUserRules.rememberBank("ila", forSender: "ila", accountID: ila.id)
 
         let alSalamSMS = "Dear Client, BHD 18.600 has been debited from your account BH69ALSA00219XXXXX0020 towards EWAB, your balance is BHD 5081.229 on 22/04/26 at 03:46. Thank you, Al Salam Bank"
 
@@ -1178,7 +1213,7 @@ struct BudgetAITests {
 
     @Test func testEditedAccountCardOrAccountDigitsRecognizedAcrossAllSMSTypes() async throws {
         let context = makeCleanContext()
-        SMSUserRules.clearAll()
+        TransactionRuleStore.shared.clearAll()
 
         // User creates an account (even without setting institution) and edits it to put "3876" in "Card or account digits in SMS"
         let myAccount = Account(name: "Personal Account", kind: .bank, institution: "", balance: 173.613)
@@ -1247,7 +1282,7 @@ struct BudgetAITests {
 
     @Test func testSameReferenceSameDateTimeSameAccountMergesHighestAmountAndLowestBalance() async throws {
         let context = makeCleanContext()
-        SMSUserRules.clearAll()
+        TransactionRuleStore.shared.clearAll()
 
         let ilaAccount = Account(name: "ila Bank", kind: .bank, institution: "ila", balance: 5392.174)
         ilaAccount.smsMatch = "1101"
@@ -1336,126 +1371,144 @@ struct BudgetAITests {
         #expect(refOut2.transaction?.isPossibleDuplicate == true)
     }
 
-    // MARK: - 14. SMS Testing Lab + Self-Learning + Publish Knowledge Tests
+    // MARK: - 14. New Transaction Rules System, Bank Recognition (Sender/Ref/Phone), and Location Capture Tests
 
-    @Test func testSMSTestingLabBulkImportSelfLearningPublishAndRollback() async throws {
+    @Test func testNewTransactionRulesPriorityAndOrConditionsAndInternalExternalTransfers() async throws {
         let context = makeCleanContext()
-        let tempRoot = FileManager.default.temporaryDirectory.appendingPathComponent("SMSLabTest_\(UUID().uuidString)", isDirectory: true)
-        SMSKnowledgeStore.baseDirectoryOverride = tempRoot.appendingPathComponent("Knowledge", isDirectory: true)
-        SMSLabStore.baseDirectoryOverride = tempRoot.appendingPathComponent("Lab", isDirectory: true)
-        defer {
-            SMSKnowledgeStore.resetAll()
-            SMSKnowledgeStore.baseDirectoryOverride = nil
-            SMSLabStore.baseDirectoryOverride = nil
-            try? FileManager.default.removeItem(at: tempRoot)
-        }
+        TransactionRuleStore.shared.clearAll()
 
-        let lab = SMSLabStore(loadFromDisk: false)
-        lab.resetAllForTesting()
+        let bisb = Account(name: "BisB Account", kind: .bank, institution: "BisB", balance: 1000.000)
+        bisb.smsMatch = "9001"
+        let ila = Account(name: "ila Account", kind: .bank, institution: "ila", balance: 200.000)
+        ila.smsMatch = "0846"
+        context.insert(bisb)
+        context.insert(ila)
+        try context.save()
 
-        // 1. Load Bahrain Sample Pack (18 messages across BisB, BBK, NBB, ila, Al Salam, KFH, BenefitPay, AUB)
-        let loadResult = lab.loadBahrainSamplePack()
-        #expect(loadResult.added == 18)
-        #expect(lab.samples.count == 18)
+        // 1. Import a sample Fawri+ transfer transaction
+        let sampleSMS = "Fawri+ payment BHD 40.000, ref: BIB103KAK999111 was credited to IBAN ending 0846 on 2026/11/01 10:00. Balance BHD 960.000. Tel: 17515151"
+        let sampleOut = await SMSImporter.importText(sampleSMS, context: context, forceApprove: true)
+        let sampleTx = try #require(sampleOut.transaction)
+        #expect(sampleTx.smsTransactionType == .expense)
+        #expect(sampleTx.toAccountID == nil)
 
-        // Verify live transactions in SwiftData are completely untouched (isolated sandbox)
-        let liveTxsBefore = try context.fetch(FetchDescriptor<MoneyTransaction>())
-        #expect(liveTxsBefore.isEmpty)
+        // 2. Capture available fields from the selected transaction
+        let captured = TransactionRuleStore.captureAvailableFields(from: sampleTx, accounts: [bisb, ila])
+        #expect(captured.contains(where: { $0.field == .recipientIBAN && $0.value == "0846" }))
+        #expect(captured.contains(where: { $0.field == .bank && $0.value == "BisB" }))
+        #expect(captured.contains(where: { $0.field == .smsSender && $0.value == "17515151" }))
 
-        // Before self-learning, the 3 challenge cases (shortcode 88188 -> BBK, MANAMA ROASTERY -> dining, compact BisB debit) fail
-        let initialStats = lab.stats
-        #expect(initialStats.total == 18)
-        #expect(initialStats.failed == 3)
-        #expect(initialStats.passed == 15)
-
-        // 2. Approved permanent test cases must never be overwritten automatically
-        let sampleToProtect = try #require(lab.samples.first(where: { $0.isTestCase }))
-        let originalBank = sampleToProtect.expected.bank
-        let overwriteAttempt = lab.updateSample(
-            id: sampleToProtect.id,
-            expected: LabExpected(bank: "FakeBank"),
-            allowOverwriteApproved: false
+        // 3. Create Rule 1 (External Transfer to IBAN 0846) and Rule 2 (Internal Transfer from BisB to ila)
+        let ruleExternal = TransactionRule(
+            logic: .and,
+            conditions: [
+                RuleCondition(field: .recipientIBAN, value: "0846", displayValue: "IBAN / Account ending 0846")
+            ],
+            actions: RuleActions(
+                categoryRawValue: SpendCategory.transfers.rawValue,
+                transactionType: .transferOut,
+                transferKind: .externalTransfer,
+                customMerchant: "External Recipient 0846",
+                accountID: bisb.id
+            ),
+            sourceTransactionID: sampleTx.id
         )
-        #expect(overwriteAttempt == false)
-        #expect(lab.samples.first(where: { $0.id == sampleToProtect.id })?.expected.bank == originalBank)
+        let ruleInternal = TransactionRule(
+            logic: .and,
+            conditions: [
+                RuleCondition(field: .recipientIBAN, value: "0846", displayValue: "IBAN / Account ending 0846"),
+                RuleCondition(field: .bank, value: "BisB", displayValue: "BisB")
+            ],
+            actions: RuleActions(
+                categoryRawValue: SpendCategory.internalTransfer.rawValue,
+                transactionType: .internalTransfer,
+                transferKind: .internalTransfer,
+                accountID: bisb.id,
+                toAccountID: ila.id
+            ),
+            sourceTransactionID: sampleTx.id
+        )
 
-        // 3. Self-Learning: generate rules from approved corrections
-        let proposal = lab.generateRulesFromCorrections()
-        #expect(proposal.count == 3)
-        #expect(proposal.senderBanks.count == 1)
-        #expect(proposal.keywords.count == 1)
-        #expect(proposal.patterns.count == 1)
+        _ = TransactionRuleStore.shared.addRule(ruleExternal)
+        _ = TransactionRuleStore.shared.addRule(ruleInternal)
+        #expect(TransactionRuleStore.shared.rules.count == 2)
+        #expect(TransactionRuleStore.shared.priorityIndex(for: ruleExternal.id) == 1) // Rule 1
+        #expect(TransactionRuleStore.shared.priorityIndex(for: ruleInternal.id) == 2) // Rule 2
 
-        // With draft preview enabled, all 18 test cases now pass and 0 regressions occur!
-        #expect(lab.stats.failed == 0)
-        #expect(lab.stats.passed == 18)
-        #expect(lab.stats.improvements == 3)
-        #expect(lab.regressionReport.isSafeToPublish == true)
-        #expect(lab.regressionReport.newlyFixed.count == 3)
+        // Existing sampleTx must NOT be altered when rules are created
+        #expect(sampleTx.merchant != "External Recipient 0846")
 
-        // 4. Before publishing, production SMSParser does not yet have the draft rules
-        let shortcodeSMS = "Card ending 9081 used for BHD 11.200 at CAREEM RIDE on 29/10/2026 20:15. Avl Bal BHD 801.100."
-        let prePublishParsed = try #require(SMSParser.parse(shortcodeSMS, sender: "88188", context: nil))
-        #expect(prePublishParsed.detectedBank == nil)
+        // 4. Since Rule 1 has higher priority than Rule 2, a matching future SMS uses Rule 1
+        let futureSMS1 = "Fawri+ payment BHD 25.000, ref: BIB103KAK999222 was credited to IBAN ending 0846 on 2026/11/02 12:00. Balance BHD 935.000. Tel: 17515151"
+        let outFuture1 = await SMSImporter.importText(futureSMS1, context: context, forceApprove: true)
+        let txFuture1 = try #require(outFuture1.transaction)
+        #expect(txFuture1.merchant == "External Recipient 0846")
+        #expect(txFuture1.category == .transfers)
+        #expect(txFuture1.toAccountID == nil)
 
-        // 5. Approve all draft rules and Publish to Budget AI (v1)
-        lab.approveAllDraftRules()
-        #expect(lab.unpublishedChanges.count == 3)
-        let v1Entry = try lab.publishToBudgetAI(notes: "Release v1: BBK 88188 shortcode, Manama Roastery dining, BisB compact debit")
-        #expect(v1Entry.version == 1)
-        #expect(SMSKnowledgeStore.livePack.version == 1)
-        #expect(lab.unpublishedChanges.isEmpty)
+        // 5. Reorder rules so Rule 2 (Internal Transfer) becomes Rule 1 (highest priority)
+        TransactionRuleStore.shared.moveRules(fromOffsets: IndexSet(integer: 1), toOffset: 0)
+        #expect(TransactionRuleStore.shared.priorityIndex(for: ruleInternal.id) == 1)
+        #expect(TransactionRuleStore.shared.priorityIndex(for: ruleExternal.id) == 2)
 
-        // 6. Verify production SMSParser now uses the published knowledge for all 3 learned cases!
-        let postPublishShortcode = try #require(SMSParser.parse(shortcodeSMS, sender: "88188", context: nil))
-        #expect(postPublishShortcode.detectedBank == "BBK")
+        // Now a future SMS to IBAN 0846 from BisB matches the new Rule 1 (Internal Transfer from BisB -> ila)
+        let futureSMS2 = "Fawri+ payment BHD 30.000, ref: BIB103KAK999333 was credited to IBAN ending 0846 on 2026/11/03 15:00. Balance BHD 905.000. Tel: 17515151"
+        let outFuture2 = await SMSImporter.importText(futureSMS2, context: context, forceApprove: true)
+        let txFuture2 = try #require(outFuture2.transaction)
+        #expect(txFuture2.smsTransactionType == .internalTransfer)
+        #expect(txFuture2.category == .internalTransfer)
+        #expect(txFuture2.accountID == bisb.id)
+        #expect(txFuture2.toAccountID == ila.id)
+        #expect(abs(ila.balance - 230.000) < 0.0001) // Credited 30.000 to ila via internal transfer rule!
 
-        let roasterySMS = "NBB: Your card ending 3310 was used for BHD 3.800 at MANAMA ROASTERY on 29/10/2026 09:30. Avl Bal BHD 486.300."
-        let postPublishRoastery = try #require(SMSParser.parse(roasterySMS, sender: "NBB", context: nil))
-        #expect(postPublishRoastery.category == .dining)
+        // 6. Test OR logic rule
+        let orRule = TransactionRule(
+            logic: .or,
+            conditions: [
+                RuleCondition(field: .merchant, value: "TALABAT", displayValue: "TALABAT"),
+                RuleCondition(field: .merchant, value: "JAHEZ", displayValue: "JAHEZ")
+            ],
+            actions: RuleActions(
+                categoryRawValue: SpendCategory.dining.rawValue,
+                customMerchant: "Food Delivery"
+            )
+        )
+        TransactionRuleStore.shared.clearAll()
+        _ = TransactionRuleStore.shared.addRule(orRule)
 
-        let compactBisbSMS = "BisB Alert: BHD 15.000 on card 4412 at ZARA CITY CENTRE 29/10/2026 21:00. Bal BHD 229.445."
-        let postPublishCompact = try #require(SMSParser.parse(compactBisbSMS, sender: "BisB", context: nil))
-        #expect(postPublishCompact.transactionType == .expense)
-        #expect(postPublishCompact.category == .shopping)
-        #expect(postPublishCompact.knowledgeRuleID != nil)
-
-        // 7. Publish a v2 with an additional keyword rule, then roll back to v1
-        lab.addOrUpdateKeywordRule(SMSCategoryKeywordRule(keyword: "bahrain padel club", category: SpendCategory.entertainment.rawValue, status: .approved))
-        let v2Entry = try lab.publishToBudgetAI(notes: "Release v2: Added Bahrain Padel Club")
-        #expect(v2Entry.version == 2)
-        #expect(Categorizer.guess("BAHRAIN PADEL CLUB") == .entertainment)
-
-        let rollbackEntry = try lab.rollbackToVersion(1, notes: "Rollback to v1")
-        #expect(rollbackEntry.version == 3)
-        #expect(rollbackEntry.restoredFrom == 1)
-        #expect(Categorizer.guess("BAHRAIN PADEL CLUB") == nil)
-        #expect(Categorizer.guess("MANAMA ROASTERY") == .dining)
+        let jahezSMS = "Purchase of BHD 6.500 with Card ending 9001 at JAHEZ BH on 2026/11/04 19:00. Tel: 17515151"
+        let jahezOut = await SMSImporter.importText(jahezSMS, context: context, forceApprove: true)
+        let jahezTx = try #require(jahezOut.transaction)
+        #expect(jahezTx.category == .dining)
+        #expect(jahezTx.merchant == "Food Delivery")
     }
 
-    @Test func testSMSLabBulkCSVAndTXTImport() throws {
-        let csv = """
-        sender,sms,bank,amount,type,direction,account,category,approved
-        BBK,"BBK: Your debit card ending 1234 was debited for BHD 9.500 at COSTA COFFEE on 29/10/2026.",BBK,9.500,expense,outgoing,1234,dining,true
-        NBB,"NBB: Salary of BHD 950.000 has been credited to your account ending 7788.",NBB,950.000,income,incoming,7788,income,false
-        """
-        let csvSummary = try SMSLabImporter.importRawText(csv, sourceName: "test.csv")
-        #expect(csvSummary.format == .csv)
-        #expect(csvSummary.importedSamples.count == 2)
-        #expect(csvSummary.labeledCount == 2)
-        #expect(csvSummary.importedSamples[0].expected.bank == "BBK")
-        #expect(csvSummary.importedSamples[0].expected.amount == 9.500)
-        #expect(csvSummary.importedSamples[0].expected.account == "1234")
-        #expect(csvSummary.importedSamples[0].isTestCase == true)
+    @Test func testBankRecognitionFromSenderTextReferenceCodeAndPhone() throws {
+        // 1. From Reference Code alone
+        #expect(SMSParser.identifyBankFromReference("BIB103KAK000KZUM") == "BisB")
+        #expect(SMSParser.identifyBankFromReference("ALS103KAU005SVOW") == "Al Salam")
+        #expect(SMSParser.identifyBankFromReference("ABCO261107054458") == "Bank ABC")
+        #expect(SMSParser.identifyBankFromReference("ILAB261107001122") == "ila")
+        #expect(SMSParser.identifyBankFromReference("NBB99887766") == "NBB")
+        #expect(SMSParser.identifyBankFromReference("BBK11223344") == "BBK")
+        #expect(SMSParser.identifyBankFromReference("KFH55667788") == "KFH")
 
-        let txt = """
-        [BisB] Your BisB card ending 4412 was used for BHD 4.000 at STARBUCKS on 29/10/2026.
-        [ila] ila Bank: Apple Pay purchase of BHD 7.250 at CARREFOUR using card ending 7721.
-        """
-        let txtSummary = try SMSLabImporter.importRawText(txt, sourceName: "batch.txt")
-        #expect(txtSummary.format == .txt)
-        #expect(txtSummary.importedSamples.count == 2)
-        #expect(txtSummary.importedSamples[0].sender == "BisB")
-        #expect(txtSummary.importedSamples[1].sender == "ila")
+        // 2. Full SMS parsing when only Reference code indicates the bank
+        let refSMS = "Payment of BHD 12.000 completed on 2026/11/07 14:00. Ref: KHCB202611079988. Balance BHD 400.000"
+        let parsedRef = try #require(SMSParser.parse(refSMS))
+        #expect(parsedRef.detectedBank == "Khaleeji")
+        #expect(parsedRef.bankConfidence == .high)
+
+        // 3. Full SMS parsing when only Bank Telephone number indicates the bank
+        let phoneSMS = "Your card ending 5511 was used for BHD 9.000 at SEEF MALL on 2026/11/07 16:00. For enquiries call 17565656"
+        let parsedPhone = try #require(SMSParser.parse(phoneSMS))
+        #expect(parsedPhone.detectedBank == "Al Salam")
+        #expect(parsedPhone.bankConfidence == .high)
+
+        // 4. Location inference from merchant / SMS text (Apple Wallet style place + coordinates)
+        let place = try #require(LocationService.inferPlaceFromMerchant("SEEF MALL", rawSMS: phoneSMS))
+        #expect(place.name.contains("Seef Mall"))
+        #expect(abs(place.latitude - 26.2336) < 0.01)
+        #expect(abs(place.longitude - 50.5342) < 0.01)
     }
 }

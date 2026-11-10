@@ -90,18 +90,23 @@ enum Ledger {
             try? context.save()
             return
         }
+        let oldAccountID = tx.accountID
+        let oldToAccountID = tx.toAccountID
         applyBalance(tx, sign: -1, context: context)
-        if tx.balanceAdjustment != 0, let id = tx.accountID, let account = account(id, context: context) {
-            account.balance -= tx.balanceAdjustment
+        change(tx)
+        if tx.accountID != oldAccountID, tx.balanceAdjustment != 0 {
+            if let oldID = oldAccountID, let oldAccount = account(oldID, context: context) {
+                oldAccount.balance -= tx.balanceAdjustment
+            }
             tx.balanceAdjustment = 0
         }
-        if tx.toBalanceAdjustment != 0, let toId = tx.toAccountID, let toAccount = account(toId, context: context) {
-            toAccount.balance -= tx.toBalanceAdjustment
+        if tx.toAccountID != oldToAccountID, tx.toBalanceAdjustment != 0 {
+            if let oldToID = oldToAccountID, let oldToAccount = account(oldToID, context: context) {
+                oldToAccount.balance -= tx.toBalanceAdjustment
+            }
             tx.toBalanceAdjustment = 0
         }
-        change(tx)
         applyBalance(tx, sign: 1, context: context)
-        _ = syncBalanceFromSMS(tx, context: context)
         recordSnapshot(context: context)
         try? context.save()
         if tx.category == .visaTransfer { refreshCardReminders(context: context) }
@@ -259,9 +264,6 @@ enum Ledger {
             }
         }
 
-        if rememberRule {
-            SMSUserRules.rememberTransactionRule(for: tx)
-        }
         return result
     }
 
@@ -290,10 +292,8 @@ enum Ledger {
             } else {
                 tx.balanceAdjustment += diff
             }
-            if force {
-                recordSnapshot(context: context)
-                try? context.save()
-            }
+            recordSnapshot(context: context)
+            try? context.save()
         }
         return balance
     }
@@ -611,7 +611,7 @@ enum Ledger {
         try? context.delete(model: ChatMessage.self)
         try? context.delete(model: CustomCategory.self)
         try? context.save()
-        SMSUserRules.clearAll()
+        TransactionRuleStore.shared.deleteAll()
         CategoryRegistry.shared.reload(context: context)
         Notifier.rescheduleBills([])
     }

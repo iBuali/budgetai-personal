@@ -465,6 +465,24 @@ final class MoneyTransaction {
     var goalID: UUID?
     /// True when `smsBalance` in the SMS represents a credit card's available credit limit rather than a bank deposit balance.
     var smsBalanceIsCardLimit: Bool = false
+    /// Name of the place of purchase or location (e.g. "City Centre Bahrain", "Manama").
+    var locationName: String?
+    /// Formatted street/city address for the transaction location, if available.
+    var locationAddress: String?
+    /// Latitude coordinate for the transaction location.
+    var latitude: Double?
+    /// Longitude coordinate for the transaction location.
+    var longitude: Double?
+
+    var hasLocation: Bool {
+        if let lat = latitude, let lon = longitude, abs(lat) > 0.0001 || abs(lon) > 0.0001 {
+            return true
+        }
+        if let name = locationName?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
+            return true
+        }
+        return false
+    }
 
     init(amount: Double, isIncome: Bool, merchant: String, category: SpendCategory, date: Date = .now,
          note: String = "", source: TxSource = .manual, accountID: UUID? = nil) {

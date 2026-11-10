@@ -82,9 +82,9 @@ struct ProfileView: View {
                     Button { appState.showPasteSMS = true } label: {
                         row("Paste bank SMS", "doc.on.clipboard.fill", SpendCategory.transport.color)
                     }
-                    NavigationLink { SMSTestingLabView() } label: {
-                        let liveV = SMSKnowledgeStore.livePack.version
-                        row("SMS Testing Lab", "flask.fill", Theme.cobalt, value: liveV > 0 ? "v\(liveV)" : "Dev Tool")
+                    NavigationLink { TransactionRulesListView() } label: {
+                        let count = TransactionRuleStore.shared.rules.count
+                        row("Transaction Rules", "slider.horizontal.3", Theme.cobalt, value: count > 0 ? "\(count)" : "None")
                     }
                 }
 
