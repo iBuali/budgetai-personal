@@ -436,6 +436,10 @@ final class TransactionRuleStore {
         UserDefaults.standard.removeObject(forKey: Self.storageKey)
     }
 
+    func clearAll() {
+        deleteAll()
+    }
+
     /// Returns the 1-based priority index (`Rule 1`, `Rule 2`, ...) for a given rule ID.
     func priorityNumber(for id: UUID) -> Int? {
         guard let idx = rules.firstIndex(where: { $0.id == id }) else { return nil }

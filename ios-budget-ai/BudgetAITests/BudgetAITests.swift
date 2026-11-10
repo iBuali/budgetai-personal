@@ -310,17 +310,18 @@ struct BudgetAITests {
 
         // User creates a rule from tx1 matching sender "88990" AND accountDigits "7711"
         let rule = TransactionRule(
+            name: "Gym Membership Rule",
             logic: .and,
             conditions: [
                 RuleCondition(field: .smsSender, value: "88990", displayValue: "88990"),
                 RuleCondition(field: .accountDigits, value: "7711", displayValue: "Ending 7711")
             ],
             actions: RuleActions(
-                categoryRawValue: SpendCategory.health.rawValue,
-                transactionType: .expense,
-                customMerchant: "Gym Membership",
-                customBank: "Al Salam",
-                accountID: bbk.id
+                categoryRaw: SpendCategory.health.rawValue,
+                fromAccountID: bbk.id,
+                setMerchant: "Gym Membership",
+                setBank: "Al Salam",
+                setIsIncome: false
             ),
             sourceTransactionID: tx1.id
         )
@@ -704,26 +705,27 @@ struct BudgetAITests {
 
         // 1. Add a transaction rule
         let rule = TransactionRule(
+            name: "Cafeteria Rule",
             logic: .and,
             conditions: [
                 RuleCondition(field: .merchant, value: "Cafeteria", displayValue: "Cafeteria"),
                 RuleCondition(field: .smsSender, value: "17515151", displayValue: "17515151")
             ],
             actions: RuleActions(
-                categoryRawValue: SpendCategory.dining.rawValue,
-                transactionType: .expense,
-                customMerchant: "Cafeteria",
-                customBank: "BisB"
+                categoryRaw: SpendCategory.dining.rawValue,
+                setMerchant: "Cafeteria",
+                setBank: "BisB",
+                setIsIncome: false
             )
         )
-        let res = TransactionRuleStore.shared.addRule(rule)
-        #expect(res.added == true)
+        let savedRule = TransactionRuleStore.shared.addRule(rule)
+        #expect(savedRule.id == rule.id)
         #expect(TransactionRuleStore.shared.rules.count == 1)
 
         let saved = try #require(TransactionRuleStore.shared.rules.first)
-        #expect(saved.actions.customMerchant == "Cafeteria")
+        #expect(saved.actions.setMerchant == "Cafeteria")
         #expect(saved.actions.category == .dining)
-        #expect(saved.actions.transactionType == .expense)
+        #expect(saved.actions.setIsIncome == false)
 
         // 2. Delete single rule
         TransactionRuleStore.shared.deleteRule(id: saved.id)
@@ -1042,16 +1044,17 @@ struct BudgetAITests {
 
         // 3. User explicitly creates a Transaction Rule with user approval
         let rule = TransactionRule(
+            name: "Specialty Books Rule",
             logic: .and,
             conditions: [
                 RuleCondition(field: .merchant, value: "Novelty Store", displayValue: "Novelty Store"),
                 RuleCondition(field: .bank, value: "BisB", displayValue: "BisB")
             ],
             actions: RuleActions(
-                categoryRawValue: SpendCategory.education.rawValue,
-                transactionType: .expense,
-                customMerchant: "Specialty Books",
-                accountID: acc2.id
+                categoryRaw: SpendCategory.education.rawValue,
+                fromAccountID: acc2.id,
+                setMerchant: "Specialty Books",
+                setIsIncome: false
             ),
             sourceTransactionID: tx.id
         )
@@ -1100,14 +1103,15 @@ struct BudgetAITests {
         let tx1 = try #require(outcome1.transaction)
 
         // 2. User creates a rule matching ONLY merchant ("Coffee Corner"), without selecting Bank
-        let captured = TransactionRuleStore.captureAvailableFields(from: tx1, accounts: [acc])
+        let captured = TransactionRuleStore.captureAvailableConditions(from: tx1, accounts: [acc])
         let merchantCondition = try #require(captured.first(where: { $0.field == .merchant }))
         let rule = TransactionRule(
+            name: "Coffee Corner Rule",
             logic: .and,
             conditions: [merchantCondition],
             actions: RuleActions(
-                categoryRawValue: SpendCategory.dining.rawValue,
-                customMerchant: "Specialty Coffee"
+                categoryRaw: SpendCategory.dining.rawValue,
+                setMerchant: "Specialty Coffee"
             ),
             sourceTransactionID: tx1.id
         )
@@ -1393,37 +1397,37 @@ struct BudgetAITests {
         #expect(sampleTx.toAccountID == nil)
 
         // 2. Capture available fields from the selected transaction
-        let captured = TransactionRuleStore.captureAvailableFields(from: sampleTx, accounts: [bisb, ila])
+        let captured = TransactionRuleStore.captureAvailableConditions(from: sampleTx, accounts: [bisb, ila])
         #expect(captured.contains(where: { $0.field == .recipientIBAN && $0.value == "0846" }))
         #expect(captured.contains(where: { $0.field == .bank && $0.value == "BisB" }))
         #expect(captured.contains(where: { $0.field == .smsSender && $0.value == "17515151" }))
 
         // 3. Create Rule 1 (External Transfer to IBAN 0846) and Rule 2 (Internal Transfer from BisB to ila)
         let ruleExternal = TransactionRule(
+            name: "External Transfer 0846",
             logic: .and,
             conditions: [
                 RuleCondition(field: .recipientIBAN, value: "0846", displayValue: "IBAN / Account ending 0846")
             ],
             actions: RuleActions(
-                categoryRawValue: SpendCategory.transfers.rawValue,
-                transactionType: .transferOut,
+                categoryRaw: SpendCategory.transfers.rawValue,
                 transferKind: .externalTransfer,
-                customMerchant: "External Recipient 0846",
-                accountID: bisb.id
+                fromAccountID: bisb.id,
+                setMerchant: "External Recipient 0846"
             ),
             sourceTransactionID: sampleTx.id
         )
         let ruleInternal = TransactionRule(
+            name: "Internal Transfer BisB to ila",
             logic: .and,
             conditions: [
                 RuleCondition(field: .recipientIBAN, value: "0846", displayValue: "IBAN / Account ending 0846"),
                 RuleCondition(field: .bank, value: "BisB", displayValue: "BisB")
             ],
             actions: RuleActions(
-                categoryRawValue: SpendCategory.internalTransfer.rawValue,
-                transactionType: .internalTransfer,
+                categoryRaw: SpendCategory.internalTransfer.rawValue,
                 transferKind: .internalTransfer,
-                accountID: bisb.id,
+                fromAccountID: bisb.id,
                 toAccountID: ila.id
             ),
             sourceTransactionID: sampleTx.id
@@ -1432,8 +1436,8 @@ struct BudgetAITests {
         _ = TransactionRuleStore.shared.addRule(ruleExternal)
         _ = TransactionRuleStore.shared.addRule(ruleInternal)
         #expect(TransactionRuleStore.shared.rules.count == 2)
-        #expect(TransactionRuleStore.shared.priorityIndex(for: ruleExternal.id) == 1) // Rule 1
-        #expect(TransactionRuleStore.shared.priorityIndex(for: ruleInternal.id) == 2) // Rule 2
+        #expect(TransactionRuleStore.shared.priorityNumber(for: ruleExternal.id) == 1) // Rule 1
+        #expect(TransactionRuleStore.shared.priorityNumber(for: ruleInternal.id) == 2) // Rule 2
 
         // Existing sampleTx must NOT be altered when rules are created
         #expect(sampleTx.merchant != "External Recipient 0846")
@@ -1447,9 +1451,9 @@ struct BudgetAITests {
         #expect(txFuture1.toAccountID == nil)
 
         // 5. Reorder rules so Rule 2 (Internal Transfer) becomes Rule 1 (highest priority)
-        TransactionRuleStore.shared.moveRules(fromOffsets: IndexSet(integer: 1), toOffset: 0)
-        #expect(TransactionRuleStore.shared.priorityIndex(for: ruleInternal.id) == 1)
-        #expect(TransactionRuleStore.shared.priorityIndex(for: ruleExternal.id) == 2)
+        TransactionRuleStore.shared.moveRules(from: IndexSet(integer: 1), to: 0)
+        #expect(TransactionRuleStore.shared.priorityNumber(for: ruleInternal.id) == 1)
+        #expect(TransactionRuleStore.shared.priorityNumber(for: ruleExternal.id) == 2)
 
         // Now a future SMS to IBAN 0846 from BisB matches the new Rule 1 (Internal Transfer from BisB -> ila)
         let futureSMS2 = "Fawri+ payment BHD 30.000, ref: BIB103KAK999333 was credited to IBAN ending 0846 on 2026/11/03 15:00. Balance BHD 905.000. Tel: 17515151"
@@ -1463,14 +1467,15 @@ struct BudgetAITests {
 
         // 6. Test OR logic rule
         let orRule = TransactionRule(
+            name: "Food Delivery Rule",
             logic: .or,
             conditions: [
                 RuleCondition(field: .merchant, value: "TALABAT", displayValue: "TALABAT"),
                 RuleCondition(field: .merchant, value: "JAHEZ", displayValue: "JAHEZ")
             ],
             actions: RuleActions(
-                categoryRawValue: SpendCategory.dining.rawValue,
-                customMerchant: "Food Delivery"
+                categoryRaw: SpendCategory.dining.rawValue,
+                setMerchant: "Food Delivery"
             )
         )
         TransactionRuleStore.shared.clearAll()
@@ -1485,13 +1490,13 @@ struct BudgetAITests {
 
     @Test func testBankRecognitionFromSenderTextReferenceCodeAndPhone() throws {
         // 1. From Reference Code alone
-        #expect(SMSParser.identifyBankFromReference("BIB103KAK000KZUM") == "BisB")
-        #expect(SMSParser.identifyBankFromReference("ALS103KAU005SVOW") == "Al Salam")
-        #expect(SMSParser.identifyBankFromReference("ABCO261107054458") == "Bank ABC")
-        #expect(SMSParser.identifyBankFromReference("ILAB261107001122") == "ila")
-        #expect(SMSParser.identifyBankFromReference("NBB99887766") == "NBB")
-        #expect(SMSParser.identifyBankFromReference("BBK11223344") == "BBK")
-        #expect(SMSParser.identifyBankFromReference("KFH55667788") == "KFH")
+        #expect(SMSParser.identifyBankFromReference("BIB103KAK000KZUM")?.bank == "BisB")
+        #expect(SMSParser.identifyBankFromReference("ALS103KAU005SVOW")?.bank == "Al Salam")
+        #expect(SMSParser.identifyBankFromReference("ABCO261107054458")?.bank == "Bank ABC")
+        #expect(SMSParser.identifyBankFromReference("ILAB261107001122")?.bank == "ila")
+        #expect(SMSParser.identifyBankFromReference("NBB99887766")?.bank == "NBB")
+        #expect(SMSParser.identifyBankFromReference("BBK11223344")?.bank == "BBK")
+        #expect(SMSParser.identifyBankFromReference("KFH55667788")?.bank == "KFH")
 
         // 2. Full SMS parsing when only Reference code indicates the bank
         let refSMS = "Payment of BHD 12.000 completed on 2026/11/07 14:00. Ref: KHCB202611079988. Balance BHD 400.000"
@@ -1506,9 +1511,9 @@ struct BudgetAITests {
         #expect(parsedPhone.bankConfidence == .high)
 
         // 4. Location inference from merchant / SMS text (Apple Wallet style place + coordinates)
-        let place = try #require(LocationService.inferPlaceFromMerchant("SEEF MALL", rawSMS: phoneSMS))
-        #expect(place.name.contains("Seef Mall"))
-        #expect(abs(place.latitude - 26.2336) < 0.01)
-        #expect(abs(place.longitude - 50.5342) < 0.01)
+        let place = try #require(LocationService.inferLocation(from: phoneSMS, merchant: "SEEF MALL"))
+        #expect(place.name.uppercased().contains("SEEF MALL"))
+        #expect(abs((place.latitude ?? 0) - 26.2335) < 0.01)
+        #expect(abs((place.longitude ?? 0) - 50.5414) < 0.01)
     }
 }
