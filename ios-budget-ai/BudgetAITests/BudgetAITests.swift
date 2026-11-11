@@ -1659,9 +1659,18 @@ struct BudgetAITests {
         #expect(transferTx.accountID == checkingAccount.id)
         #expect(transferTx.toAccountID == savingsAccount.id)
 
-        // 3. Test matching filter: only matching rules are returned for tx
+        // 3. Test matching filter: only matching rules are returned for matchingTx
+        let matchingTx = MoneyTransaction(
+            amount: 4.500,
+            isIncome: false,
+            merchant: "TALABAT*123",
+            category: SpendCategory.dining,
+            date: .now,
+            source: .sms,
+            accountID: checkingAccount.id
+        )
         let allRules = store.rules
-        let matched = allRules.filter { store.matches(rule: $0, context: RuleEvaluationContext(from: tx), ignoreEnabledState: true) }
+        let matched = allRules.filter { store.matches(rule: $0, context: RuleEvaluationContext(from: matchingTx), ignoreEnabledState: true) }
         #expect(matched.count == 1)
         #expect(matched.first?.name == "Merchant Cleanup Rule")
 
