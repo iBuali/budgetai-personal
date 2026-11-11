@@ -84,6 +84,8 @@ struct TransactionsView: View {
     @State private var filters = TxFilterState()
     @State private var mode: TxViewMode = .list
     @State private var showFilters = false
+    @State private var showStatementImport = false
+    @State private var showStatementExport = false
     @State private var categorizing = false
     @State private var calendarMonth = Calendar.current.date(from: Calendar.current.dateComponents([.year, .month], from: .now)) ?? .now
     @State private var selectedDay: Date = Calendar.current.startOfDay(for: .now)
@@ -329,14 +331,23 @@ struct TransactionsView: View {
                     Menu {
                         Button("Add manually", systemImage: "doc.text") { appState.showAddTransaction = true }
                         Button("Paste bank SMS", systemImage: "message") { appState.showPasteSMS = true }
+                        Divider()
+                        Button("Import Bank Statement", systemImage: "doc.badge.arrow.up") { showStatementImport = true }
+                        Button("Export Statement (PDF/Excel)", systemImage: "square.and.arrow.up") { showStatementExport = true }
                     } label: {
                         Image(systemName: "plus")
                     }
-                    .accessibilityLabel("Add transaction")
+                    .accessibilityLabel("Add or Import")
                 }
             }
             .sheet(isPresented: $showFilters) {
                 TransactionFilterSheet(filters: $filters, accounts: accounts)
+            }
+            .sheet(isPresented: $showStatementImport) {
+                StatementImportSheet()
+            }
+            .sheet(isPresented: $showStatementExport) {
+                StatementExportSheet()
             }
             .onAppear {
                 SMSImporter.reconcileExistingTransactions(context: context)

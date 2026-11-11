@@ -16,6 +16,8 @@ struct ProfileView: View {
     @Query private var customCategories: [CustomCategory]
     @State private var confirmSample = false
     @State private var confirmErase = false
+    @State private var showStatementImport = false
+    @State private var showStatementExport = false
     @State private var geminiOn = GeminiAccount.isConfigured
 
     private var netWorth: Double { Finance(transactions: [], accounts: accounts).netWorth }
@@ -75,7 +77,13 @@ struct ProfileView: View {
                     }
                 }
 
-                Section("Import transactions") {
+                Section("Import & Export") {
+                    Button { showStatementImport = true } label: {
+                        row("Import Bank Statement", "doc.badge.arrow.up.fill", Theme.cobalt)
+                    }
+                    Button { showStatementExport = true } label: {
+                        row("Export Statement (PDF/Excel)", "square.and.arrow.up.fill", SpendCategory.shopping.color)
+                    }
                     NavigationLink { SMSSetupGuideView() } label: {
                         row("Automatic SMS import", "message.badge.filled.fill", Theme.positive)
                     }
@@ -163,6 +171,12 @@ struct ProfileView: View {
             } message: {
                 Text("This permanently deletes everything on this iPhone and can't be undone.")
             }
+            .sheet(isPresented: $showStatementImport) {
+                StatementImportSheet()
+            }
+            .sheet(isPresented: $showStatementExport) {
+                StatementExportSheet()
+            }
         }
     }
 
@@ -179,6 +193,12 @@ struct ProfileView: View {
             Spacer()
             if let value {
                 Text(value).foregroundStyle(Theme.secondaryInk)
+            }
+            .sheet(isPresented: $showStatementImport) {
+                StatementImportSheet()
+            }
+            .sheet(isPresented: $showStatementExport) {
+                StatementExportSheet()
             }
         }
     }

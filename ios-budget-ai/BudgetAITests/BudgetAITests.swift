@@ -1891,4 +1891,127 @@ struct BudgetAITests {
 
         store.deleteAll()
     }
+
+    // MARK: - 9. Bank Statement Import & Export Feature Tests
+
+    @Test func testBankStatementParsingAndDeduplication() throws {
+        let context = makeCleanContext()
+
+        // 1. Setup existing accounts
+        let ilaBank = Account(name: "ila Current", kind: .bank, institution: "ila Bank", balance: 500.0)
+        ilaBank.smsMatch = "3876" // last 4 digits
+        let bisbCredit = Account(name: "BisB Platinum Credit", kind: .creditCard, institution: "BisB", balance: 150.0)
+        bisbCredit.smsMatch = "4821" // card digits
+        context.insert(ilaBank)
+        context.insert(bisbCredit)
+
+        // 2. Setup existing transaction to test duplicate detection
+        let existingTx = MoneyTransaction(
+            amount: 15.500,
+            isIncome: false,
+            merchant: "Alosra Supermarket",
+            category: .groceries,
+            date: Date(),
+            source: .sms,
+            accountID: ilaBank.id
+        )
+        existingTx.smsReference = "BIB103KAK000KZUM"
+        context.insert(existingTx)
+        try context.save()
+
+        // 3. Test Statement Line Parsing (CSV / Text statement)
+        let sampleStatement = """
+        Bank: ila Bank
+        Account: BH29ILAB00000012343876
+        Date,Description,Debit,Credit,Reference
+        2026-11-10,Alosra Supermarket,15.500,,BIB103KAK000KZUM
+        2026-11-09,Costa Coffee,2.750,,TXN889901
+        2026-11-08,Salary Transfer,,450.000,SALARY202611
+        2026-11-07,TALABAT BAHRAIN,6.500,,
+        """
+
+        let parseResult = StatementService.parse(
+            fileData: sampleStatement.data(using: .utf8)!,
+            filename: "ila_statement_nov2026.csv",
+            existingAccounts: [ilaBank, bisbCredit],
+            existingTransactions: [existingTx]
+        )
+
+        // Verify account auto-matching via IBAN suffix "3876"
+        #expect(parseResult.matchedAccountID == ilaBank.id)
+        #expect(parseResult.detectedBank == "ila Bank")
+        #expect(parseResult.items.count == 4)
+
+        // Verify Duplicate Detection flagged Alosra with BIB103KAK000KZUM
+        let alosraItem = try #require(parseResult.items.first(where: { $0.merchant.contains("Alosra") }))
+        #expect(alosraItem.isDuplicate == true)
+        #expect(alosraItem.isSelected == false) // Unchecked by default
+        #expect(alosraItem.duplicateReason != nil)
+
+        // Verify Costa Coffee is recognized as new and categorized as dining
+        let costaItem = try #require(parseResult.items.first(where: { $0.merchant.contains("Costa") }))
+        #expect(costaItem.isDuplicate == false)
+        #expect(costaItem.category == .dining)
+        #expect(abs(costaItem.amount - 2.750) < 0.001)
+        #expect(costaItem.isIncome == false)
+
+        // Verify Salary is recognized as income
+        let salaryItem = try #require(parseResult.items.first(where: { $0.merchant.contains("Salary") }))
+        #expect(salaryItem.isIncome == true)
+        #expect(abs(salaryItem.amount - 450.000) < 0.001)
+
+        // 4. Test Safe Import: Never modifies account balances!
+        let initialIlaBalance = ilaBank.balance
+        let initialBisbBalance = bisbCredit.balance
+
+        let importOutcome = StatementService.importConfirmedTransactions(
+            parseResult.items,
+            into: parseResult.matchedAccountID,
+            sourceBank: parseResult.detectedBank,
+            context: context
+        )
+
+        #expect(importOutcome.importedCount == 3) // Costa, Salary, Talabat
+        #expect(importOutcome.skippedCount == 1)  // Alosra (duplicate)
+
+        // CRITICAL CHECK: Account balances MUST remain strictly unmodified!
+        #expect(abs(ilaBank.balance - initialIlaBalance) < 0.0001)
+        #expect(abs(bisbCredit.balance - initialBisbBalance) < 0.0001)
+
+        // Verify transactions exist in database
+        let updatedTxs = try context.fetch(FetchDescriptor<MoneyTransaction>())
+        #expect(updatedTxs.count == 4) // 1 existing + 3 newly imported
+        #expect(updatedTxs.contains(where: { $0.merchant == "Costa Coffee" }))
+        #expect(updatedTxs.contains(where: { $0.merchant == "Salary Transfer" }))
+
+        // 5. Test Export to PDF and Excel
+        let excelData = StatementExportService.createExcelData(
+            transactions: updatedTxs,
+            accounts: [ilaBank, bisbCredit],
+            currency: "BHD"
+        )
+        #expect(!excelData.isEmpty)
+        let excelStr = String(data: excelData, encoding: .utf8) ?? ""
+        #expect(excelStr.contains("Budget AI — Transaction Statement"))
+        #expect(excelStr.contains("Costa Coffee"))
+        #expect(excelStr.contains("Salary Transfer"))
+
+        let pdfData = StatementExportService.createPDFData(
+            transactions: updatedTxs,
+            accounts: [ilaBank, bisbCredit],
+            currency: "BHD"
+        )
+        #expect(!pdfData.isEmpty)
+        #expect(pdfData.count > 500)
+    }
+
+    @Test func testCreditCardLast4MatchingInStatement() throws {
+        let card = Account(name: "My Visa Card", kind: .creditCard, institution: "BisB", balance: 120.0)
+        card.smsMatch = "9012"
+
+        let accounts = [card]
+
+        let matched = StatementService.matchAccount(ibanOrAcc: nil, cardLast4: "9012", bank: "BisB", in: accounts)
+        #expect(matched?.id == card.id)
+    }
 }
