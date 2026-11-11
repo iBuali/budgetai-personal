@@ -6,168 +6,166 @@ import CryptoKit
 
 // MARK: - Snapshot Codable Entities
 
-public struct BackupMetadata: Codable, Identifiable, Hashable, Sendable {
-    public var id: UUID
-    public var createdAt: Date
-    public var deviceName: String
-    public var appVersion: String
-    public var transactionsCount: Int
-    public var accountsCount: Int
-    public var budgetsCount: Int
-    public var goalsCount: Int
-    public var billsCount: Int
-    public var rulesCount: Int
-    public var fileSizeBytes: Int64
-    public var sha256Checksum: String
-    public var isCloudSynced: Bool
-    public var cloudRecordID: String?
-    public var filename: String
+struct BackupMetadata: Codable, Identifiable, Hashable, Sendable {
+    var id: UUID
+    var createdAt: Date
+    var deviceName: String
+    var appVersion: String
+    var transactionsCount: Int
+    var accountsCount: Int
+    var budgetsCount: Int
+    var goalsCount: Int
+    var billsCount: Int
+    var rulesCount: Int
+    var fileSizeBytes: Int64
+    var sha256Checksum: String
+    var isCloudSynced: Bool
+    var cloudRecordID: String?
+    var filename: String
 
-    public var formattedDate: String {
+    var formattedDate: String {
         let f = DateFormatter()
         f.dateStyle = .medium
         f.timeStyle = .short
         return f.string(from: createdAt)
     }
 
-    public var formattedSize: String {
+    var formattedSize: String {
         ByteCountFormatter.string(fromByteCount: fileSizeBytes, countStyle: .file)
     }
 }
 
-public struct BackupAccountRecord: Codable, Hashable, Sendable {
-    public var id: UUID
-    public var name: String
-    public var kindRaw: String
-    public var institution: String
-    public var balance: Double
-    public var emoji: String
-    public var includeInNetWorth: Bool
-    public var smsMatch: String
-    public var paymentDueDate: Date
+struct BackupAccountRecord: Codable, Hashable, Sendable {
+    var id: UUID
+    var name: String
+    var kindRaw: String
+    var institution: String
+    var balance: Double
+    var emoji: String
+    var includeInNetWorth: Bool
+    var smsMatch: String
+    var paymentDueDate: Date
 }
 
-public struct BackupTransactionRecord: Codable, Hashable, Sendable {
-    public var id: UUID
-    public var amount: Double
-    public var isIncome: Bool
-    public var merchant: String
-    public var categoryRaw: String
-    public var date: Date
-    public var note: String
-    public var sourceRaw: String
-    public var accountID: UUID?
-    public var toAccountID: UUID?
-    public var goalID: UUID?
-    public var isPending: Bool
-    public var isPossibleDuplicate: Bool
-    public var smsRecipientSuffix: String?
-    public var smsAccountSuffix: String?
-    public var smsBank: String?
-    public var smsSender: String?
-    public var smsTransactionTypeRaw: String?
-    public var smsReference: String?
-    public var smsConfidenceRaw: String?
-    public var smsClassificationReason: String?
-    public var balanceAdjustment: Double
-    public var toBalanceAdjustment: Double
-    public var previousBalance: Double?
-    public var newBalance: Double?
-    public var locationName: String?
-    public var locationAddress: String?
-    public var latitude: Double?
-    public var longitude: Double?
+struct BackupTransactionRecord: Codable, Hashable, Sendable {
+    var id: UUID
+    var amount: Double
+    var isIncome: Bool
+    var merchant: String
+    var categoryRaw: String
+    var date: Date
+    var note: String
+    var sourceRaw: String
+    var accountID: UUID?
+    var toAccountID: UUID?
+    var goalID: UUID?
+    var isPending: Bool
+    var isPossibleDuplicate: Bool
+    var smsRecipientSuffix: String?
+    var smsAccountSuffix: String?
+    var smsBank: String?
+    var smsSender: String?
+    var smsTransactionTypeRaw: String?
+    var smsReference: String?
+    var smsConfidenceRaw: String?
+    var smsClassificationReason: String?
+    var balanceAdjustment: Double
+    var toBalanceAdjustment: Double
+    var smsBalance: Double?
+    var locationName: String?
+    var locationAddress: String?
+    var latitude: Double?
+    var longitude: Double?
 }
 
-public struct BackupBudgetRecord: Codable, Hashable, Sendable {
-    public var id: UUID
-    public var name: String
-    public var categoryRaw: String
-    public var categoryKeysRaw: String
-    public var limit: Double
+struct BackupBudgetRecord: Codable, Hashable, Sendable {
+    var id: UUID
+    var name: String
+    var categoryRaw: String
+    var categoryKeysRaw: String
+    var limit: Double
 }
 
-public struct BackupGoalRecord: Codable, Hashable, Sendable {
-    public var id: UUID
-    public var name: String
-    public var symbol: String
-    public var target: Double
-    public var saved: Double
-    public var targetDate: Date
-    public var monthlyCommitment: Double
-    public var linkedAccountID: UUID?
-    public var smsMatch: String
+struct BackupGoalRecord: Codable, Hashable, Sendable {
+    var id: UUID
+    var name: String
+    var symbol: String
+    var target: Double
+    var saved: Double
+    var targetDate: Date
+    var monthlyCommitment: Double
+    var linkedAccountID: UUID?
+    var smsMatch: String
 }
 
-public struct BackupBillRecord: Codable, Hashable, Sendable {
-    public var id: UUID
-    public var name: String
-    public var amount: Double
-    public var categoryRaw: String
-    public var nextDueDate: Date
-    public var frequencyRaw: String
-    public var isSubscription: Bool
-    public var keywordsRaw: String
-    public var isAutoPaid: Bool
-    public var accountID: UUID?
-    public var lastPaidAt: Date?
-    public var lastPaidAmount: Double?
-    public var lastPaidMethodRaw: String?
+struct BackupBillRecord: Codable, Hashable, Sendable {
+    var id: UUID
+    var name: String
+    var amount: Double
+    var categoryRaw: String
+    var nextDueDate: Date
+    var frequencyRaw: String
+    var isSubscription: Bool
+    var keywordsRaw: String
+    var remindersOn: Bool
+    var lastPaidAt: Date?
+    var lastPaidAmount: Double?
+    var lastPaidMethodRaw: String?
 }
 
-public struct BackupNetWorthRecord: Codable, Hashable, Sendable {
-    public var id: UUID
-    public var day: Date
-    public var assets: Double
-    public var liabilities: Double
+struct BackupNetWorthRecord: Codable, Hashable, Sendable {
+    var id: UUID
+    var day: Date
+    var assets: Double
+    var liabilities: Double
 }
 
-public struct BackupCategoryRecord: Codable, Hashable, Sendable {
-    public var id: UUID
-    public var key: String
-    public var name: String
-    public var emoji: String
-    public var colorHex: Int
-    public var parentKey: String
-    public var isIncome: Bool
-    public var isEssential: Bool
+struct BackupCategoryRecord: Codable, Hashable, Sendable {
+    var id: UUID
+    var key: String
+    var name: String
+    var emoji: String
+    var colorHex: Int
+    var parentKey: String
+    var isIncome: Bool
+    var isEssential: Bool
 }
 
-public struct BackupSettingsRecord: Codable, Hashable, Sendable {
-    public var userName: String
-    public var currency: String
-    public var cycleStartDay: Int
-    public var faceID: Bool
-    public var billReminders: Bool
-    public var budgetAlerts: Bool
-    public var smsAutoApprove: Bool
-    public var smsSyncBalance: Bool
+struct BackupSettingsRecord: Codable, Hashable, Sendable {
+    var userName: String
+    var currency: String
+    var cycleStartDay: Int
+    var faceID: Bool
+    var billReminders: Bool
+    var budgetAlerts: Bool
+    var smsAutoApprove: Bool
+    var smsSyncBalance: Bool
 }
 
-public struct BudgetAIBackupSnapshot: Codable, Sendable {
-    public var manifest: BackupMetadata
-    public var accounts: [BackupAccountRecord]
-    public var transactions: [BackupTransactionRecord]
-    public var budgets: [BackupBudgetRecord]
-    public var goals: [BackupGoalRecord]
-    public var bills: [BackupBillRecord]
-    public var netWorthSnapshots: [BackupNetWorthRecord]
-    public var customCategories: [BackupCategoryRecord]
-    public var rules: [TransactionRule]
-    public var settings: BackupSettingsRecord
+struct BudgetAIBackupSnapshot: Codable, Sendable {
+    var manifest: BackupMetadata
+    var accounts: [BackupAccountRecord]
+    var transactions: [BackupTransactionRecord]
+    var budgets: [BackupBudgetRecord]
+    var goals: [BackupGoalRecord]
+    var bills: [BackupBillRecord]
+    var netWorthSnapshots: [BackupNetWorthRecord]
+    var customCategories: [BackupCategoryRecord]
+    var rules: [TransactionRule]
+    var settings: BackupSettingsRecord
 }
 
 // MARK: - Backup Schedules & Status
 
-public enum BackupSchedule: String, CaseIterable, Identifiable, Codable {
+enum BackupSchedule: String, CaseIterable, Identifiable, Codable {
     case weekly = "weekly"
     case daily = "daily"
     case monthly = "monthly"
     case off = "off"
 
-    public var id: String { rawValue }
+    var id: String { rawValue }
 
-    public var title: String {
+    var title: String {
         switch self {
         case .weekly: return "Weekly (Recommended)"
         case .daily: return "Daily"
@@ -176,7 +174,7 @@ public enum BackupSchedule: String, CaseIterable, Identifiable, Codable {
         }
     }
 
-    public var intervalDays: Int {
+    var intervalDays: Int {
         switch self {
         case .daily: return 1
         case .weekly: return 7
@@ -186,13 +184,13 @@ public enum BackupSchedule: String, CaseIterable, Identifiable, Codable {
     }
 }
 
-public enum BackupStatus: Equatable, Sendable {
+enum BackupStatus: Equatable, Sendable {
     case idle
     case inProgress(String)
     case success(Date)
     case failed(String)
 
-    public var displayText: String {
+    var displayText: String {
         switch self {
         case .idle: return "Ready"
         case .inProgress(let s): return s
@@ -206,36 +204,36 @@ public enum BackupStatus: Equatable, Sendable {
     }
 }
 
-public enum RestoreMode {
+enum RestoreMode {
     case merge
     case replace
 }
 
-public struct RestoreSummary: Equatable {
-    public var restoredTransactionsCount: Int
-    public var skippedDuplicateTransactionsCount: Int
-    public var restoredAccountsCount: Int
-    public var restoredBudgetsCount: Int
-    public var restoredGoalsCount: Int
-    public var restoredBillsCount: Int
-    public var restoredRulesCount: Int
-    public var mode: RestoreMode
+struct RestoreSummary: Equatable {
+    var restoredTransactionsCount: Int
+    var skippedDuplicateTransactionsCount: Int
+    var restoredAccountsCount: Int
+    var restoredBudgetsCount: Int
+    var restoredGoalsCount: Int
+    var restoredBillsCount: Int
+    var restoredRulesCount: Int
+    var mode: RestoreMode
 }
 
 // MARK: - iCloud Backup Service
 
 @Observable
-public final class ICloudBackupService {
-    public static let shared = ICloudBackupService()
+final class ICloudBackupService {
+    static let shared = ICloudBackupService()
 
-    public private(set) var isBackingUp = false
-    public private(set) var isRestoring = false
-    public private(set) var backupStatus: BackupStatus = .idle
-    public private(set) var availableBackups: [BackupMetadata] = []
-    public private(set) var isICloudAvailable: Bool = false
-    public private(set) var lastErrorMessage: String?
+    private(set) var isBackingUp = false
+    private(set) var isRestoring = false
+    private(set) var backupStatus: BackupStatus = .idle
+    private(set) var availableBackups: [BackupMetadata] = []
+    private(set) var isICloudAvailable: Bool = false
+    private(set) var lastErrorMessage: String?
 
-    public var isAutoBackupEnabled: Bool {
+    var isAutoBackupEnabled: Bool {
         get { UserDefaults.standard.object(forKey: Keys.iCloudAutoBackupEnabled) as? Bool ?? true }
         set {
             UserDefaults.standard.set(newValue, forKey: Keys.iCloudAutoBackupEnabled)
@@ -244,7 +242,7 @@ public final class ICloudBackupService {
         }
     }
 
-    public var autoBackupSchedule: BackupSchedule {
+    var autoBackupSchedule: BackupSchedule {
         get {
             guard let raw = UserDefaults.standard.string(forKey: Keys.iCloudBackupSchedule),
                   let s = BackupSchedule(rawValue: raw) else { return .weekly }
@@ -257,7 +255,7 @@ public final class ICloudBackupService {
         }
     }
 
-    public var lastBackupDate: Date? {
+    var lastBackupDate: Date? {
         get {
             if let date = UserDefaults.standard.object(forKey: Keys.iCloudLastBackupDate) as? Date {
                 return date
@@ -319,7 +317,7 @@ public final class ICloudBackupService {
         return dir
     }
 
-    public func checkICloudAvailability() {
+    func checkICloudAvailability() {
         let token = FileManager.default.ubiquityIdentityToken
         if token != nil {
             self.isICloudAvailable = true
@@ -342,7 +340,7 @@ public final class ICloudBackupService {
     // MARK: - Create Backup
 
     @MainActor
-    public func createBackup(context: ModelContext, isAutomatic: Bool = false) async throws -> BackupMetadata {
+    func createBackup(context: ModelContext, isAutomatic: Bool = false) async throws -> BackupMetadata {
         isBackingUp = true
         lastErrorMessage = nil
         backupStatus = .inProgress("Gathering app data...")
@@ -413,8 +411,7 @@ public final class ICloudBackupService {
                     smsClassificationReason: $0.smsClassificationReason,
                     balanceAdjustment: $0.balanceAdjustment,
                     toBalanceAdjustment: $0.toBalanceAdjustment,
-                    previousBalance: $0.previousBalance,
-                    newBalance: $0.newBalance,
+                    smsBalance: $0.smsBalance,
                     locationName: $0.locationName,
                     locationAddress: $0.locationAddress,
                     latitude: $0.latitude,
@@ -456,8 +453,7 @@ public final class ICloudBackupService {
                     frequencyRaw: $0.frequencyRaw,
                     isSubscription: $0.isSubscription,
                     keywordsRaw: $0.keywordsRaw,
-                    isAutoPaid: $0.isAutoPaid,
-                    accountID: $0.accountID,
+                    remindersOn: $0.remindersOn,
                     lastPaidAt: $0.lastPaidAt,
                     lastPaidAmount: $0.lastPaidAmount,
                     lastPaidMethodRaw: $0.lastPaidMethodRaw
@@ -549,7 +545,7 @@ public final class ICloudBackupService {
 
             // 4. Save to Local Directory
             let localURL = localBackupDirectory.appendingPathComponent(filename)
-            try finalData.write(to: localURL, options: .atomic)
+            try finalData.write(to: localURL, options: .atomicWrite)
 
             // 5. Save to iCloud Ubiquity Documents Container (if available)
             var cloudUploaded = false
@@ -557,7 +553,7 @@ public final class ICloudBackupService {
                 backupStatus = .inProgress("Uploading to personal iCloud...")
                 let cloudURL = cloudDir.appendingPathComponent(filename)
                 do {
-                    try finalData.write(to: cloudURL, options: .atomic)
+                    try finalData.write(to: cloudURL, options: .atomicWrite)
                     cloudUploaded = true
                 } catch {
                     // Continue with local save if iCloud write times out
@@ -591,7 +587,7 @@ public final class ICloudBackupService {
     // MARK: - Restore Backup
 
     @MainActor
-    public func restoreBackup(
+    func restoreBackup(
         from metadata: BackupMetadata,
         mode: RestoreMode,
         context: ModelContext
@@ -725,11 +721,10 @@ public final class ICloudBackupService {
                 if let confRaw = txRec.smsConfidenceRaw {
                     tx.smsConfidence = SMSConfidence(rawValue: confRaw) ?? .high
                 }
-                tx.smsClassificationReason = txRec.smsClassificationReason
+                tx.smsClassificationReason = txRec.smsClassificationReason ?? ""
                 tx.balanceAdjustment = txRec.balanceAdjustment
                 tx.toBalanceAdjustment = txRec.toBalanceAdjustment
-                tx.previousBalance = txRec.previousBalance
-                tx.newBalance = txRec.newBalance
+                tx.smsBalance = txRec.smsBalance
                 tx.locationName = txRec.locationName
                 tx.locationAddress = txRec.locationAddress
                 tx.latitude = txRec.latitude
@@ -782,8 +777,7 @@ public final class ICloudBackupService {
                         keywords: billRec.keywordsRaw
                     )
                     bill.id = billRec.id
-                    bill.isAutoPaid = billRec.isAutoPaid
-                    bill.accountID = billRec.accountID
+                    bill.remindersOn = billRec.remindersOn
                     bill.lastPaidAt = billRec.lastPaidAt
                     bill.lastPaidAmount = billRec.lastPaidAmount
                     bill.lastPaidMethodRaw = billRec.lastPaidMethodRaw
@@ -849,7 +843,7 @@ public final class ICloudBackupService {
 
     // MARK: - Automatic Backup Engine
 
-    public func performAutoBackupIfDue(context: ModelContext) {
+    func performAutoBackupIfDue(context: ModelContext) {
         guard isAutoBackupEnabled && autoBackupSchedule != .off else { return }
         let now = Date.now
         if let last = lastBackupDate {
@@ -863,7 +857,7 @@ public final class ICloudBackupService {
 
     // MARK: - Backup File Management
 
-    public func refreshAvailableBackups() {
+    func refreshAvailableBackups() {
         var found: [BackupMetadata] = []
 
         // 1. Load from local directory
@@ -926,7 +920,7 @@ public final class ICloudBackupService {
         return nil
     }
 
-    public func deleteBackup(_ metadata: BackupMetadata) {
+    func deleteBackup(_ metadata: BackupMetadata) {
         let local = localBackupDirectory.appendingPathComponent(metadata.filename)
         try? FileManager.default.removeItem(at: local)
 

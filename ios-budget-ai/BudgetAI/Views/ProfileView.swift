@@ -194,12 +194,6 @@ struct ProfileView: View {
             if let value {
                 Text(value).foregroundStyle(Theme.secondaryInk)
             }
-            .sheet(isPresented: $showStatementImport) {
-                StatementImportSheet()
-            }
-            .sheet(isPresented: $showStatementExport) {
-                StatementExportSheet()
-            }
         }
     }
 }

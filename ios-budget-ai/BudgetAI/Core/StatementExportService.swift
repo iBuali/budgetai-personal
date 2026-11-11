@@ -4,11 +4,11 @@ import PDFKit
 
 // MARK: - Statement Export Service
 
-public enum StatementExportService {
+enum StatementExportService {
 
     // MARK: - Excel Export (HTML / XML Spreadsheet readable by Microsoft Excel, Numbers, and Google Sheets)
 
-    public static func createExcelData(
+    static func createExcelData(
         transactions: [MoneyTransaction],
         accounts: [Account],
         currency: String = "BHD"
@@ -88,7 +88,7 @@ public enum StatementExportService {
 
     // MARK: - PDF Export (Vector-drawn Crisp PDF Document)
 
-    public static func createPDFData(
+    static func createPDFData(
         transactions: [MoneyTransaction],
         accounts: [Account],
         currency: String = "BHD"

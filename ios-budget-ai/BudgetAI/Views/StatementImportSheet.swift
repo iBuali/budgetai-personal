@@ -527,7 +527,7 @@ struct StatementImportSheet: View {
             context: context
         )
 
-        importSummary = outcome
+        importSummary = (imported: outcome.importedCount, skipped: outcome.skippedCount)
         showSuccessAlert = true
     }
 }

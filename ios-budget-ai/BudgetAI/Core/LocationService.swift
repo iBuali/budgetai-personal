@@ -3,7 +3,7 @@ import CoreLocation
 import MapKit
 import SwiftUI
 
-struct TransactionLocationData: Equatable, Sendable {
+struct TransactionLocationData: Equatable, Hashable, Sendable {
     var name: String
     var address: String?
     var latitude: Double?

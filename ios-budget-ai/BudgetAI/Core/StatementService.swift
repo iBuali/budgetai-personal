@@ -5,15 +5,15 @@ import UniformTypeIdentifiers
 
 // MARK: - Statement Format & Model
 
-public enum StatementFileFormat: String, CaseIterable, Identifiable {
+enum StatementFileFormat: String, CaseIterable, Identifiable {
     case pdf = "PDF"
     case excelXLSX = "Excel (.xlsx)"
     case excelXLS = "Excel (.xls / XML)"
     case csv = "CSV / Delimited"
 
-    public var id: String { rawValue }
+    var id: String { rawValue }
 
-    public var symbol: String {
+    var symbol: String {
         switch self {
         case .pdf: return "doc.richtext"
         case .excelXLSX, .excelXLS: return "tablecells"
@@ -22,22 +22,22 @@ public enum StatementFileFormat: String, CaseIterable, Identifiable {
     }
 }
 
-public struct ParsedStatementItem: Identifiable, Hashable {
-    public var id: UUID = UUID()
-    public var date: Date
-    public var merchant: String
-    public var amount: Double
-    public var isIncome: Bool
-    public var reference: String?
-    public var category: SpendCategory
-    public var subcategoryKey: String = ""
-    public var rawDescription: String
-    public var isSelected: Bool = true
-    public var isDuplicate: Bool = false
-    public var duplicateReason: String? = nil
-    public var aiSuggestedCategory: Bool = false
+struct ParsedStatementItem: Identifiable, Hashable {
+    var id: UUID = UUID()
+    var date: Date
+    var merchant: String
+    var amount: Double
+    var isIncome: Bool
+    var reference: String?
+    var category: SpendCategory
+    var subcategoryKey: String = ""
+    var rawDescription: String
+    var isSelected: Bool = true
+    var isDuplicate: Bool = false
+    var duplicateReason: String? = nil
+    var aiSuggestedCategory: Bool = false
 
-    public init(
+    init(
         id: UUID = UUID(),
         date: Date,
         merchant: String,
@@ -66,29 +66,29 @@ public struct ParsedStatementItem: Identifiable, Hashable {
     }
 }
 
-public struct StatementParseResult {
-    public var items: [ParsedStatementItem]
-    public var detectedBank: String?
-    public var detectedAccountIBAN: String?
-    public var detectedCardLast4: String?
-    public var matchedAccountID: UUID?
-    public var format: StatementFileFormat
-    public var statementPeriodStart: Date?
-    public var statementPeriodEnd: Date?
-    public var rawTextSnippet: String = ""
+struct StatementParseResult {
+    var items: [ParsedStatementItem]
+    var detectedBank: String?
+    var detectedAccountIBAN: String?
+    var detectedCardLast4: String?
+    var matchedAccountID: UUID?
+    var format: StatementFileFormat
+    var statementPeriodStart: Date?
+    var statementPeriodEnd: Date?
+    var rawTextSnippet: String = ""
 
-    public var totalItemsCount: Int { items.count }
-    public var newItemsCount: Int { items.filter { !$0.isDuplicate }.count }
-    public var duplicatesCount: Int { items.filter { $0.isDuplicate }.count }
+    var totalItemsCount: Int { items.count }
+    var newItemsCount: Int { items.filter { !$0.isDuplicate }.count }
+    var duplicatesCount: Int { items.filter { $0.isDuplicate }.count }
 }
 
 // MARK: - Bank Statement Service
 
-public enum StatementService {
+enum StatementService {
 
     // MARK: - Main Parser Entry Point
 
-    public static func parse(fileData: Data, filename: String, existingAccounts: [Account], existingTransactions: [MoneyTransaction]) -> StatementParseResult {
+    static func parse(fileData: Data, filename: String, existingAccounts: [Account], existingTransactions: [MoneyTransaction]) -> StatementParseResult {
         let ext = (filename as NSString).pathExtension.lowercased()
         let result: StatementParseResult
 
@@ -115,7 +115,7 @@ public enum StatementService {
 
     // MARK: - Duplicate Detection
 
-    public static func flagDuplicates(in result: StatementParseResult, against existing: [MoneyTransaction]) -> StatementParseResult {
+    static func flagDuplicates(in result: StatementParseResult, against existing: [MoneyTransaction]) -> StatementParseResult {
         var copy = result
         for idx in copy.items.indices {
             let item = copy.items[idx]
@@ -155,7 +155,7 @@ public enum StatementService {
 
     // MARK: - Account Auto-Matching
 
-    public static func matchAccount(ibanOrAcc: String?, cardLast4: String?, bank: String?, in accounts: [Account]) -> Account? {
+    static func matchAccount(ibanOrAcc: String?, cardLast4: String?, bank: String?, in accounts: [Account]) -> Account? {
         // 1. Match card last 4 digits
         if let card = cardLast4?.trimmingCharacters(in: .whitespacesAndNewlines), card.count >= 4 {
             let suffix = String(card.suffix(4))
@@ -192,7 +192,7 @@ public enum StatementService {
 
     // MARK: - PDF Parsing
 
-    public static func parsePDF(data: Data, accounts: [Account]) -> StatementParseResult {
+    static func parsePDF(data: Data, accounts: [Account]) -> StatementParseResult {
         guard let doc = PDFDocument(data: data) else {
             return StatementParseResult(items: [], detectedBank: nil, format: .pdf)
         }
@@ -224,7 +224,7 @@ public enum StatementService {
 
     // MARK: - CSV & Delimited Parsing
 
-    public static func parseCSV(data: Data, accounts: [Account]) -> StatementParseResult {
+    static func parseCSV(data: Data, accounts: [Account]) -> StatementParseResult {
         let text = decodeString(from: data)
         let detected = extractHeaderMetadata(from: text)
         let matchedAcc = matchAccount(ibanOrAcc: detected.iban, cardLast4: detected.cardLast4, bank: detected.bank, in: accounts)
@@ -246,7 +246,7 @@ public enum StatementService {
 
     // MARK: - Excel (XLS / XML) Parsing
 
-    public static func parseXLS(data: Data, accounts: [Account]) -> StatementParseResult {
+    static func parseXLS(data: Data, accounts: [Account]) -> StatementParseResult {
         let text = decodeString(from: data)
         let detected = extractHeaderMetadata(from: text)
         let matchedAcc = matchAccount(ibanOrAcc: detected.iban, cardLast4: detected.cardLast4, bank: detected.bank, in: accounts)
@@ -274,7 +274,7 @@ public enum StatementService {
 
     // MARK: - Excel (XLSX) OpenXML Parsing
 
-    public static func parseXLSX(data: Data, accounts: [Account]) -> StatementParseResult {
+    static func parseXLSX(data: Data, accounts: [Account]) -> StatementParseResult {
         let extractedStrings = extractStringsFromOpenXML(data: data)
         let combined = extractedStrings.joined(separator: "\n")
 
@@ -363,7 +363,7 @@ public enum StatementService {
 
     // MARK: - Line-by-Line Statement Parser
 
-    public static func parseTextLinesToItems(_ text: String) -> [ParsedStatementItem] {
+    static func parseTextLinesToItems(_ text: String) -> [ParsedStatementItem] {
         var items: [ParsedStatementItem] = []
         let rawLines = text.components(separatedBy: .newlines)
 
@@ -381,7 +381,7 @@ public enum StatementService {
         return items
     }
 
-    public static func isHeaderOrFooterLine(_ line: String) -> Bool {
+    static func isHeaderOrFooterLine(_ line: String) -> Bool {
         let l = line.lowercased()
         if l.contains("date") && (l.contains("description") || l.contains("amount") || l.contains("particulars") || l.contains("balance")) {
             return true
@@ -397,7 +397,7 @@ public enum StatementService {
 
     // MARK: - Line Regex & Field Extraction
 
-    public static func parseStatementLine(_ line: String) -> ParsedStatementItem? {
+    static func parseStatementLine(_ line: String) -> ParsedStatementItem? {
         // Date formats commonly found in bank statements:
         // 2026-10-25, 25/10/2026, 25-10-2026, 25 Oct 2026, 25-Oct-2026, 10/25/2026
         let datePattern = #"\b(\d{1,4}[-/\.]\d{1,2}[-/\.]\d{1,4}|\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{2,4}|\d{1,2}-(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*-\d{2,4})\b"#
@@ -492,7 +492,7 @@ public enum StatementService {
 
     // MARK: - CSV Parsing
 
-    public static func parseCSVRows(_ csvText: String) -> [ParsedStatementItem] {
+    static func parseCSVRows(_ csvText: String) -> [ParsedStatementItem] {
         var items: [ParsedStatementItem] = []
         let lines = csvText.components(separatedBy: .newlines)
         guard lines.count > 1 else { return [] }
@@ -609,7 +609,7 @@ public enum StatementService {
 
     // MARK: - XML Spreadsheet Parser
 
-    public static func parseXMLSpreadsheet(_ xml: String) -> [ParsedStatementItem] {
+    static func parseXMLSpreadsheet(_ xml: String) -> [ParsedStatementItem] {
         var rows: [String] = []
         let rowComponents = xml.components(separatedBy: "<Row")
         for (idx, r) in rowComponents.enumerated() {
@@ -633,7 +633,7 @@ public enum StatementService {
 
     // MARK: - OpenXML / XLSX String Extraction
 
-    public static func extractStringsFromOpenXML(data: Data) -> [String] {
+    static func extractStringsFromOpenXML(data: Data) -> [String] {
         // XLSX files are zip archives containing xml parts (sheet1.xml, sharedStrings.xml).
         // Extract UTF-8 text strings directly from uncompressed segments and XML tags.
         let stringData = decodeString(from: data)
@@ -665,7 +665,7 @@ public enum StatementService {
 
     // MARK: - Date & Amount Helpers
 
-    public static func parseDate(_ string: String) -> Date? {
+    static func parseDate(_ string: String) -> Date? {
         let clean = string.trimmingCharacters(in: .whitespacesAndNewlines)
         let formats = [
             "yyyy-MM-dd",
@@ -695,7 +695,7 @@ public enum StatementService {
         return nil
     }
 
-    public static func parseAmount(_ string: String) -> Double {
+    static func parseAmount(_ string: String) -> Double {
         let clean = string
             .replacingOccurrences(of: #"[^0-9\.\-]"#, with: "", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -715,7 +715,7 @@ public enum StatementService {
     /// Imports confirmed transactions into SwiftData.
     /// STRICT RULE: Never updates or modifies account balances. Only inserts into history.
     @discardableResult
-    public static func importConfirmedTransactions(
+    static func importConfirmedTransactions(
         _ items: [ParsedStatementItem],
         into accountID: UUID?,
         sourceBank: String?,
@@ -762,7 +762,7 @@ public enum StatementService {
 
     // MARK: - AI Categorization Suggestion
 
-    public static func requestAICategorySuggestions(for items: [ParsedStatementItem]) async throws -> [UUID: SpendCategory] {
+    static func requestAICategorySuggestions(for items: [ParsedStatementItem]) async throws -> [UUID: SpendCategory] {
         let unassigned = items.filter { $0.category == .other }
         guard !unassigned.isEmpty else { return [:] }
 
