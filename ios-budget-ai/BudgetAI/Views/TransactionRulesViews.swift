@@ -32,6 +32,7 @@ struct TransactionRuleBuilderSheet: View {
     @State private var logic: RuleConditionLogic = .and
     @State private var availableConditions: [RuleCondition] = []
     @State private var selectedFields: Set<RuleConditionField> = []
+    @State private var locationRadius: Double = 15.0
 
     // THEN – Actions
     @State private var enableSetCategory: Bool = false
@@ -130,38 +131,91 @@ struct TransactionRuleBuilderSheet: View {
     @ViewBuilder
     private func conditionRow(_ cond: RuleCondition) -> some View {
         let isSelected = selectedFields.contains(cond.field)
-        Button {
-            if isSelected {
-                selectedFields.remove(cond.field)
-            } else {
-                selectedFields.insert(cond.field)
-            }
-        } label: {
-            HStack(spacing: 12) {
-                Image(systemName: isSelected ? "checkmark.square.fill" : "square")
-                    .font(.title3)
-                    .foregroundStyle(isSelected ? Theme.brand : .secondary)
-
-                Image(systemName: cond.field.symbol)
-                    .font(.subheadline)
-                    .foregroundStyle(Theme.brand)
-                    .frame(width: 24)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(cond.field.label)
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(Theme.ink)
-                    Text(cond.displayValue)
-                        .font(.caption)
-                        .foregroundStyle(Theme.secondaryInk)
-                        .lineLimit(1)
+        VStack(alignment: .leading, spacing: 8) {
+            Button {
+                if isSelected {
+                    selectedFields.remove(cond.field)
+                } else {
+                    selectedFields.insert(cond.field)
                 }
+            } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: isSelected ? "checkmark.square.fill" : "square")
+                        .font(.title3)
+                        .foregroundStyle(isSelected ? Theme.brand : .secondary)
 
-                Spacer()
+                    Image(systemName: cond.field.symbol)
+                        .font(.subheadline)
+                        .foregroundStyle(Theme.brand)
+                        .frame(width: 24)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(cond.field.label)
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(Theme.ink)
+                        Text(displayValue(for: cond))
+                            .font(.caption)
+                            .foregroundStyle(Theme.secondaryInk)
+                            .lineLimit(1)
+                    }
+
+                    Spacer()
+                }
+                .contentShape(Rectangle())
             }
-            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+
+            // If this is the Location condition and it is selected with GPS coordinates, offer radius customization
+            if cond.field == .location && isSelected && (cond.latitude != nil || actionLatitude != nil) {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Label("Matching Radius", systemImage: "circle.circle")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Theme.brand)
+                        Spacer()
+                        Text("\(Int(locationRadius)) meters")
+                            .font(.caption.weight(.bold))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 2)
+                            .background(Theme.brand.opacity(0.12), in: Capsule())
+                            .foregroundStyle(Theme.brand)
+                    }
+
+                    HStack(spacing: 6) {
+                        ForEach([10.0, 15.0, 25.0, 50.0, 100.0], id: \.self) { r in
+                            Button {
+                                locationRadius = r
+                            } label: {
+                                Text("\(Int(r))m")
+                                    .font(.caption2.weight(locationRadius == r ? .bold : .regular))
+                                    .padding(.horizontal, 9)
+                                    .padding(.vertical, 4)
+                                    .background(locationRadius == r ? Theme.brand : Theme.track, in: Capsule())
+                                    .foregroundStyle(locationRadius == r ? .white : Theme.ink)
+                            }
+                            .buttonStyle(.plain)
+                        }
+
+                        Stepper("", value: $locationRadius, in: 5...500, step: 5)
+                            .labelsHidden()
+                    }
+
+                    Text("Matches any transaction within \(Int(locationRadius)) meters of this GPS coordinate, regardless of place name.")
+                        .font(.caption2)
+                        .foregroundStyle(Theme.secondaryInk)
+                }
+                .padding(.leading, 36)
+                .padding(.top, 4)
+            }
         }
-        .buttonStyle(.plain)
+    }
+
+    private func displayValue(for cond: RuleCondition) -> String {
+        if cond.field == .location && (cond.latitude != nil || actionLatitude != nil) {
+            let place = cond.value.isEmpty ? "GPS Location" : cond.value
+            return "\(place) (within \(Int(locationRadius))m)"
+        }
+        return cond.displayValue
     }
 
     @ViewBuilder
@@ -340,6 +394,10 @@ struct TransactionRuleBuilderSheet: View {
             }
             selectedFields = Set(existingRule.conditions.map(\.field))
 
+            if let locCond = existingRule.conditions.first(where: { $0.field == .location }) {
+                locationRadius = locCond.radiusMeters > 0 ? locCond.radiusMeters : 15.0
+            }
+
             let act = existingRule.actions
             if let cat = act.category {
                 enableSetCategory = true
@@ -427,7 +485,21 @@ struct TransactionRuleBuilderSheet: View {
     }
 
     private func buildRule() -> TransactionRule {
-        let chosenConditions = selectedConditionsList
+        var chosenConditions = selectedConditionsList
+
+        // Synchronize custom radius and display for location condition
+        for idx in chosenConditions.indices where chosenConditions[idx].field == .location {
+            chosenConditions[idx].radiusMeters = locationRadius
+            if chosenConditions[idx].latitude != nil || actionLatitude != nil {
+                let place = chosenConditions[idx].value.isEmpty ? "GPS Location" : chosenConditions[idx].value
+                chosenConditions[idx].displayValue = "\(place) (within \(Int(locationRadius))m)"
+                if chosenConditions[idx].latitude == nil {
+                    chosenConditions[idx].latitude = actionLatitude
+                    chosenConditions[idx].longitude = actionLongitude
+                }
+            }
+        }
+
         let effectiveCat: SpendCategory? = enableSetCategory ? selectedCategory : nil
 
         var actions = RuleActions(

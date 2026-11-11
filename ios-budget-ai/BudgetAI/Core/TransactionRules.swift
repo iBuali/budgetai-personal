@@ -1,6 +1,7 @@
 import Foundation
 import SwiftData
 import Observation
+import CoreLocation
 
 // MARK: - Condition Logic & Fields
 
@@ -76,10 +77,68 @@ enum RuleConditionField: String, Codable, CaseIterable, Identifiable {
 struct RuleCondition: Codable, Hashable, Identifiable {
     var id: UUID = UUID()
     var field: RuleConditionField
-    /// Raw value used for matching (e.g. UUID string for accountID, numeric string for amount).
+    /// Raw value used for matching (e.g. UUID string for accountID, numeric string for amount, or place name).
     var value: String
-    /// Human-readable value captured from the transaction (e.g. account name or formatted BHD amount).
+    /// Human-readable value captured from the transaction (e.g. account name, formatted BHD amount, or location name).
     var displayValue: String
+    /// Optional GPS latitude for coordinate-based location matching.
+    var latitude: Double?
+    /// Optional GPS longitude for coordinate-based location matching.
+    var longitude: Double?
+    /// Radius in meters for coordinate-based matching. Default is 15 meters.
+    var radiusMeters: Double = 15.0
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case field
+        case value
+        case displayValue
+        case latitude
+        case longitude
+        case radiusMeters
+    }
+
+    init(
+        id: UUID = UUID(),
+        field: RuleConditionField,
+        value: String,
+        displayValue: String,
+        latitude: Double? = nil,
+        longitude: Double? = nil,
+        radiusMeters: Double = 15.0
+    ) {
+        self.id = id
+        self.field = field
+        self.value = value
+        self.displayValue = displayValue
+        self.latitude = latitude
+        self.longitude = longitude
+        self.radiusMeters = radiusMeters
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        self.field = try container.decode(RuleConditionField.self, forKey: .field)
+        self.value = try container.decode(String.self, forKey: .value)
+        self.displayValue = try container.decode(String.self, forKey: .displayValue)
+        self.latitude = try container.decodeIfPresent(Double.self, forKey: .latitude)
+        self.longitude = try container.decodeIfPresent(Double.self, forKey: .longitude)
+        self.radiusMeters = try container.decodeIfPresent(Double.self, forKey: .radiusMeters) ?? 15.0
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(field, forKey: .field)
+        try container.encode(value, forKey: .value)
+        try container.encode(displayValue, forKey: .displayValue)
+        try container.encodeIfPresent(latitude, forKey: .latitude)
+        try container.encodeIfPresent(longitude, forKey: .longitude)
+        if radiusMeters != 15.0 || latitude != nil {
+            try container.encode(radiusMeters, forKey: .radiusMeters)
+        }
+    }
 }
 
 // MARK: - Transfer Kind & Rule Actions
@@ -254,7 +313,12 @@ struct TransactionRule: Codable, Hashable, Identifiable {
     /// Normalized signature of this rule's conditions used to detect conflicting/duplicate rules.
     var conditionSignature: String {
         let sorted = conditions
-            .map { "\($0.field.rawValue)=\($0.value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())" }
+            .map { cond -> String in
+                if cond.field == .location, let lat = cond.latitude, let lon = cond.longitude {
+                    return "location=geo:\(String(format: "%.4f,%.4f,%.0fm", lat, lon, cond.radiusMeters))"
+                }
+                return "\(cond.field.rawValue)=\(cond.value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())"
+            }
             .sorted()
             .joined(separator: "&")
         return "\(logic.rawValue):\(sorted)"
@@ -271,6 +335,8 @@ struct RuleEvaluationContext {
     var smsSender: String?
     var accountID: UUID?
     var locationName: String?
+    var latitude: Double?
+    var longitude: Double?
     var amount: Double
     var isIncome: Bool
     var reference: String?
@@ -285,6 +351,8 @@ struct RuleEvaluationContext {
         self.smsSender = tx.smsSender
         self.accountID = tx.accountID
         self.locationName = tx.locationName
+        self.latitude = tx.latitude
+        self.longitude = tx.longitude
         self.amount = tx.amount
         self.isIncome = tx.isIncome
         self.reference = tx.smsReference
@@ -300,6 +368,8 @@ struct RuleEvaluationContext {
         smsSender: String? = nil,
         accountID: UUID? = nil,
         locationName: String? = nil,
+        latitude: Double? = nil,
+        longitude: Double? = nil,
         amount: Double,
         isIncome: Bool,
         reference: String? = nil,
@@ -313,6 +383,8 @@ struct RuleEvaluationContext {
         self.smsSender = smsSender
         self.accountID = accountID
         self.locationName = locationName
+        self.latitude = latitude
+        self.longitude = longitude
         self.amount = amount
         self.isIncome = isIncome
         self.reference = reference
@@ -404,11 +476,24 @@ final class TransactionRuleStore {
             ))
         }
 
-        if let loc = tx.locationName?.trimmingCharacters(in: .whitespacesAndNewlines), !loc.isEmpty {
+        let hasCoords = (tx.latitude != nil && tx.longitude != nil)
+        let locName = tx.locationName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if hasCoords || (locName != nil && !locName!.isEmpty) {
+            let placeName = (locName != nil && !locName!.isEmpty) ? locName! : "GPS Location"
+            let display: String = {
+                if hasCoords {
+                    return "\(placeName) (within 15m)"
+                } else {
+                    return placeName
+                }
+            }()
             captured.append(RuleCondition(
                 field: .location,
-                value: loc,
-                displayValue: loc
+                value: placeName,
+                displayValue: display,
+                latitude: tx.latitude,
+                longitude: tx.longitude,
+                radiusMeters: 15.0
             ))
         }
 
@@ -636,6 +721,18 @@ final class TransactionRuleStore {
             return acct.uuidString.caseInsensitiveCompare(target) == .orderedSame
 
         case .location:
+            // 1. Primary matching: GPS coordinates and radius-based distance
+            if let ruleLat = condition.latitude, let ruleLon = condition.longitude {
+                if let txLat = context.latitude, let txLon = context.longitude {
+                    let distanceMeters = Self.distanceBetween(lat1: ruleLat, lon1: ruleLon, lat2: txLat, lon2: txLon)
+                    let allowedRadius = condition.radiusMeters > 0 ? condition.radiusMeters : 15.0
+                    return distanceMeters <= allowedRadius
+                }
+                // If transaction lacks coordinates, do not trigger false positive based solely on name
+                return false
+            }
+
+            // 2. Fallback for legacy rules without coordinates: match location place name
             if let loc = context.locationName?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !loc.isEmpty {
                 if loc == targetLower || loc.contains(targetLower) || targetLower.contains(loc) {
                     return true
@@ -754,5 +851,14 @@ final class TransactionRuleStore {
         tx.smsConfidence = .high
         tx.smsClassificationReason = "Matched Rule \(priorityNumber): \(rule.name)"
         tx.aiCategorized = false
+    }
+
+    // MARK: - Distance Calculation Helper
+
+    /// Calculates the geodetic distance in meters between two GPS coordinates using WGS 84 ellipsoid (CoreLocation).
+    static func distanceBetween(lat1: Double, lon1: Double, lat2: Double, lon2: Double) -> Double {
+        let loc1 = CLLocation(latitude: lat1, longitude: lon1)
+        let loc2 = CLLocation(latitude: lat2, longitude: lon2)
+        return loc1.distance(from: loc2)
     }
 }

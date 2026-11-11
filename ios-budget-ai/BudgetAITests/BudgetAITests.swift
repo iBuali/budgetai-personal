@@ -1759,4 +1759,136 @@ struct BudgetAITests {
         backupService.deleteBackup(metadata)
         TransactionRuleStore.shared.deleteAll()
     }
+
+    // MARK: - 8. GPS Coordinates & Radius-Based Transaction Rules Matching
+
+    @Test func testGPSCoordinatesAndRadiusMatchingInTransactionRules() throws {
+        let store = TransactionRuleStore.shared
+        store.deleteAll()
+
+        // Reference coordinates (e.g., The Avenues Mall Bahrain: 26.2415, 50.5840)
+        let mallLat = 26.2415
+        let mallLon = 50.5840
+
+        // 1. Create a rule with GPS coordinates and default 15m radius
+        let locationRule = TransactionRule(
+            name: "Avenues Mall Coffee Rule",
+            isEnabled: true,
+            logic: .and,
+            conditions: [
+                RuleCondition(
+                    field: .location,
+                    value: "The Avenues Mall",
+                    displayValue: "The Avenues Mall (within 15m)",
+                    latitude: mallLat,
+                    longitude: mallLon,
+                    radiusMeters: 15.0
+                )
+            ],
+            actions: RuleActions(
+                setCategoryRaw: SpendCategory.dining.rawValue,
+                setMerchant: "Mall Cafe"
+            )
+        )
+        store.addRule(locationRule)
+
+        // 2. Transaction exactly at the coordinates, with completely different location name
+        let txExact = MoneyTransaction(
+            amount: 3.500,
+            isIncome: false,
+            merchant: "Point of Sale 102",
+            category: SpendCategory.other,
+            date: .now,
+            source: .sms
+        )
+        txExact.latitude = mallLat
+        txExact.longitude = mallLon
+        txExact.locationName = "Unknown Store #42" // Different place name
+
+        let contextExact = RuleEvaluationContext(from: txExact)
+        #expect(store.matches(rule: locationRule, context: contextExact, ignoreEnabledState: true))
+
+        // 3. Transaction ~8 meters away (well within 15 meters radius)
+        // 0.000072 degrees latitude is approximately 8 meters
+        let txWithin8m = MoneyTransaction(
+            amount: 2.200,
+            isIncome: false,
+            merchant: "POS Unknown",
+            category: SpendCategory.other,
+            date: .now,
+            source: .sms
+        )
+        txWithin8m.latitude = mallLat + 0.000072
+        txWithin8m.longitude = mallLon
+        txWithin8m.locationName = nil // No location name at all
+
+        let contextWithin = RuleEvaluationContext(from: txWithin8m)
+        let dist = TransactionRuleStore.distanceBetween(lat1: mallLat, lon1: mallLon, lat2: txWithin8m.latitude!, lon2: txWithin8m.longitude!)
+        #expect(dist < 15.0)
+        #expect(store.matches(rule: locationRule, context: contextWithin, ignoreEnabledState: true))
+
+        // 4. Transaction ~45 meters away (OUTSIDE 15 meters radius)
+        // 0.00040 degrees latitude is approximately 44.5 meters
+        let txOutside = MoneyTransaction(
+            amount: 5.000,
+            isIncome: false,
+            merchant: "POS Unknown",
+            category: SpendCategory.other,
+            date: .now,
+            source: .sms
+        )
+        txOutside.latitude = mallLat + 0.00040
+        txOutside.longitude = mallLon
+        txOutside.locationName = "The Avenues Mall" // Even with matching name, coordinates take precedence!
+
+        let contextOutside = RuleEvaluationContext(from: txOutside)
+        let distOutside = TransactionRuleStore.distanceBetween(lat1: mallLat, lon1: mallLon, lat2: txOutside.latitude!, lon2: txOutside.longitude!)
+        #expect(distOutside > 15.0)
+        #expect(!store.matches(rule: locationRule, context: contextOutside, ignoreEnabledState: true))
+
+        // 5. Test Custom Radius (e.g. 50 meters)
+        var wideRadiusRule = locationRule
+        wideRadiusRule.id = UUID()
+        wideRadiusRule.conditions[0].radiusMeters = 50.0
+        wideRadiusRule.conditions[0].displayValue = "The Avenues Mall (within 50m)"
+        store.addRule(wideRadiusRule)
+
+        // Now txOutside (~45m) should MATCH wideRadiusRule
+        #expect(store.matches(rule: wideRadiusRule, context: contextOutside, ignoreEnabledState: true))
+
+        // 6. Test applying the rule to txWithin8m
+        store.apply(rule: locationRule, to: txWithin8m, priorityNumber: 1)
+        #expect(txWithin8m.category == SpendCategory.dining)
+        #expect(txWithin8m.merchant == "Mall Cafe")
+
+        // 7. Test backward compatibility: legacy rule with only location name and no coordinates
+        let legacyRule = TransactionRule(
+            name: "Legacy Name Rule",
+            isEnabled: true,
+            logic: .and,
+            conditions: [
+                RuleCondition(
+                    field: .location,
+                    value: "Seef Mall",
+                    displayValue: "Seef Mall"
+                )
+            ],
+            actions: RuleActions(setCategoryRaw: SpendCategory.shopping.rawValue)
+        )
+        store.addRule(legacyRule)
+
+        let legacyTx = MoneyTransaction(
+            amount: 20.000,
+            isIncome: false,
+            merchant: "Zara",
+            category: SpendCategory.other,
+            date: .now,
+            source: .sms
+        )
+        legacyTx.locationName = "Seef Mall, Manama"
+        let legacyContext = RuleEvaluationContext(from: legacyTx)
+        #expect(store.matches(rule: legacyRule, context: legacyContext, ignoreEnabledState: true))
+
+        store.deleteAll()
+    }
 }
