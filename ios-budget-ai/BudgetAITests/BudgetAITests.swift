@@ -1583,9 +1583,9 @@ struct BudgetAITests {
         let store = TransactionRuleStore.shared
         store.deleteAll()
 
-        let checkingAccount = Account(name: "BisB Checking", kind: .checking, currentBalance: 500)
-        let savingsAccount = Account(name: "ila Savings", kind: .savings, currentBalance: 1000)
-        let designatedAccount = Account(name: "NBB Credit Card", kind: .creditCard, currentBalance: 200)
+        let checkingAccount = Account(name: "BisB Checking", kind: .bank, balance: 500)
+        let savingsAccount = Account(name: "ila Savings", kind: .bank, balance: 1000)
+        let designatedAccount = Account(name: "NBB Credit Card", kind: .creditCard, balance: 200)
 
         // 1. Test optional category: rule with no category leaves original category intact
         let ruleWithoutCategory = TransactionRule(
@@ -1607,15 +1607,14 @@ struct BudgetAITests {
         store.addRule(ruleWithoutCategory)
 
         let tx = MoneyTransaction(
-            title: "TALABAT*123",
             amount: 4.500,
-            category: .food, // Original category
-            date: .now,
             isIncome: false,
+            merchant: "TALABAT*123",
+            category: SpendCategory.dining, // Original category
+            date: .now,
             source: .sms,
             accountID: checkingAccount.id
         )
-        tx.merchant = "TALABAT*123"
 
         // Evaluation context matches
         let context = RuleEvaluationContext(from: tx)
@@ -1623,7 +1622,7 @@ struct BudgetAITests {
 
         // Apply rule
         store.apply(rule: ruleWithoutCategory, to: tx, priorityNumber: 1)
-        #expect(tx.category == .food) // Remains .food because setCategory was not enabled
+        #expect(tx.category == SpendCategory.dining) // Remains .dining because setCategory was not enabled
         #expect(tx.merchant == "Talabat Delivery") // Cleaned up
         #expect(tx.accountID == designatedAccount.id) // Override Account force-routed it
         #expect(tx.smsBank == "BisB")
@@ -1647,17 +1646,16 @@ struct BudgetAITests {
         store.addRule(internalTransferRule)
 
         let transferTx = MoneyTransaction(
-            title: "Monthly Savings",
             amount: 100.000,
-            category: .other,
-            date: .now,
             isIncome: false,
+            merchant: "Monthly Savings",
+            category: SpendCategory.other,
+            date: .now,
             source: .manual
         )
-        transferTx.merchant = "Monthly Savings"
 
         store.apply(rule: internalTransferRule, to: transferTx, priorityNumber: 2)
-        #expect(transferTx.category == .internalTransfer)
+        #expect(transferTx.category == SpendCategory.internalTransfer)
         #expect(transferTx.accountID == checkingAccount.id)
         #expect(transferTx.toAccountID == savingsAccount.id)
 
