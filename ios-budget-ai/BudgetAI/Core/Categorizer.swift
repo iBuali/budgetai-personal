@@ -718,18 +718,20 @@ enum SMSParser {
                         parsed.accountID = fromID
                     }
                 }
-            } else {
-                parsed.category = act.category
-                if act.category.isIncomeCategory {
+            } else if let cat = act.category {
+                parsed.category = cat
+                if cat.isIncomeCategory {
                     parsed.isIncome = true
                     parsed.transactionType = .income
                 } else {
                     parsed.transactionType = parsed.isIncome ? .income : .expense
                     parsed.toAccountID = nil
                 }
-                if let fromID = act.fromAccountID {
+                if let fromID = act.overrideAccountID ?? act.fromAccountID {
                     parsed.accountID = fromID
                 }
+            } else if let fromID = act.overrideAccountID ?? act.fromAccountID {
+                parsed.accountID = fromID
             }
             if let m = act.setMerchant?.trimmingCharacters(in: .whitespacesAndNewlines), !m.isEmpty {
                 parsed.merchant = m
