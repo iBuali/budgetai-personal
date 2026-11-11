@@ -144,18 +144,6 @@ final class LocationService: NSObject, CLLocationManagerDelegate {
         )
     }
 
-        if placeName.isEmpty {
-            placeName = "Purchase Location"
-        }
-
-        return TransactionLocationData(
-            name: placeName,
-            address: addressParts.isEmpty ? nil : addressParts.joined(separator: ", "),
-            latitude: location.coordinate.latitude,
-            longitude: location.coordinate.longitude
-        )
-    }
-
     private func isGenericPlaceName(_ name: String) -> Bool {
         let lower = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let generics: Set<String> = [
