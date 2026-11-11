@@ -10,7 +10,6 @@ struct StatementExportSheet: View {
     @Query(sort: \MoneyTransaction.date, order: .reverse) private var allTransactions: [MoneyTransaction]
     @AppStorage(Keys.currency) private var currency = "BHD"
 
-    @State private var exportFormat: ExportFormat = .pdf
     @State private var selectedAccountFilter: UUID? = nil
     @State private var dateRange: ExportDateRange = .allTime
     @State private var customStartDate: Date = Calendar.current.date(byAdding: .month, value: -1, to: .now) ?? .now
@@ -18,20 +17,6 @@ struct StatementExportSheet: View {
     @State private var isExporting = false
     @State private var exportedFileURL: URL?
     @State private var showShareSheet = false
-
-    enum ExportFormat: String, CaseIterable, Identifiable {
-        case pdf = "PDF Document (.pdf)"
-        case excel = "Excel Spreadsheet (.xls)"
-
-        var id: String { rawValue }
-
-        var symbol: String {
-            switch self {
-            case .pdf: return "doc.richtext.fill"
-            case .excel: return "tablecells.fill"
-            }
-        }
-    }
 
     enum ExportDateRange: String, CaseIterable, Identifiable {
         case thisMonth = "This Month"
@@ -87,13 +72,22 @@ struct StatementExportSheet: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("Export Format") {
-                    Picker("Format", selection: $exportFormat) {
-                        ForEach(ExportFormat.allCases) { fmt in
-                            Label(fmt.rawValue, systemImage: fmt.symbol).tag(fmt)
+                Section {
+                    HStack(spacing: 12) {
+                        Image(systemName: "tablecells.fill")
+                            .font(.title2)
+                            .foregroundStyle(Theme.brand)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Excel Spreadsheet (.xls)")
+                                .font(.headline)
+                            Text("Standard spreadsheet compatible with Microsoft Excel, Apple Numbers, and Google Sheets.")
+                                .font(.caption)
+                                .foregroundStyle(Theme.secondaryInk)
                         }
                     }
-                    .pickerStyle(.inline)
+                    .padding(.vertical, 4)
+                } header: {
+                    Text("Export Format")
                 }
 
                 Section("Filter by Account") {
@@ -162,7 +156,7 @@ struct StatementExportSheet: View {
                                     .padding(.trailing, 6)
                             }
                             Image(systemName: "square.and.arrow.up.fill")
-                            Text("Export Statement")
+                            Text("Export to Excel (.xls)")
                                 .fontWeight(.semibold)
                             Spacer()
                         }
@@ -190,25 +184,15 @@ struct StatementExportSheet: View {
         let txs = targetTransactions
         let accs = accounts
         let cur = currency
-        let fmt = exportFormat
 
         DispatchQueue.global(qos: .userInitiated).async {
-            let data: Data
-            let ext: String
             let df = DateFormatter()
             df.dateFormat = "yyyyMMdd-HHmm"
             let timestamp = df.string(from: Date())
 
-            if fmt == .pdf {
-                data = StatementExportService.createPDFData(transactions: txs, accounts: accs, currency: cur)
-                ext = "pdf"
-            } else {
-                data = StatementExportService.createExcelData(transactions: txs, accounts: accs, currency: cur)
-                ext = "xls"
-            }
-
+            let data = StatementExportService.createExcelData(transactions: txs, accounts: accs, currency: cur)
             let tempDir = FileManager.default.temporaryDirectory
-            let fileURL = tempDir.appendingPathComponent("BudgetAI-Statement-\(timestamp).\(ext)")
+            let fileURL = tempDir.appendingPathComponent("BudgetAI-Statement-\(timestamp).xls")
 
             try? data.write(to: fileURL)
 

@@ -333,7 +333,7 @@ struct TransactionsView: View {
                         Button("Paste bank SMS", systemImage: "message") { appState.showPasteSMS = true }
                         Divider()
                         Button("Import Bank Statement", systemImage: "doc.badge.arrow.up") { showStatementImport = true }
-                        Button("Export Statement (PDF/Excel)", systemImage: "square.and.arrow.up") { showStatementExport = true }
+                        Button("Export Statement (Excel)", systemImage: "square.and.arrow.up") { showStatementExport = true }
                     } label: {
                         Image(systemName: "plus")
                     }

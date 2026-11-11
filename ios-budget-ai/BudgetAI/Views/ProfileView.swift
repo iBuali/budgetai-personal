@@ -82,7 +82,7 @@ struct ProfileView: View {
                         row("Import Bank Statement", "doc.badge.arrow.up.fill", Theme.cobalt)
                     }
                     Button { showStatementExport = true } label: {
-                        row("Export Statement (PDF/Excel)", "square.and.arrow.up.fill", SpendCategory.shopping.color)
+                        row("Export Statement (Excel)", "square.and.arrow.up.fill", SpendCategory.shopping.color)
                     }
                     NavigationLink { SMSSetupGuideView() } label: {
                         row("Automatic SMS import", "message.badge.filled.fill", Theme.positive)

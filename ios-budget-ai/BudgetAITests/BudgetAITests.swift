@@ -2051,4 +2051,132 @@ struct BudgetAITests {
         #expect(tx.latitude != nil)
         #expect(tx.longitude != nil)
     }
+
+    @Test func testMultiLinePDFStatementParsing() throws {
+        // Simulates multi-line text extracted by PDFKit from a bank statement
+        let multilinePDFText = """
+        NATIONAL BANK OF BAHRAIN
+        Account: BH29 NBBB 0000 0012 3456 78
+        Statement of Account
+
+        15/10/2026
+        STARBUCKS SEEF MALL
+        POS PURCHASE REF123456
+        4.500 DR
+        210.500
+
+        16/10/2026
+        AL MEERA SUPERMARKET
+        DEBIT CARD 9012
+        18.750 DR
+        191.750
+
+        20/10/2026
+        SALARY OCTOBER
+        CREDIT SALARY TRANSFER
+        650.000 CR
+        841.750
+        """
+
+        let nbbAccount = Account(name: "NBB Checking", kind: .checking, institution: "NBB", balance: 100.0)
+        nbbAccount.smsMatch = "5678"
+
+        let items = StatementService.parseTextLinesToItems(multilinePDFText)
+        #expect(items.count == 3)
+
+        let starbucks = try #require(items.first(where: { $0.merchant.contains("STARBUCKS") }))
+        #expect(abs(starbucks.amount - 4.500) < 0.001)
+        #expect(starbucks.isIncome == false)
+        #expect(starbucks.category == .dining)
+
+        let almeera = try #require(items.first(where: { $0.merchant.contains("AL MEERA") }))
+        #expect(abs(almeera.amount - 18.750) < 0.001)
+        #expect(almeera.isIncome == false)
+        #expect(almeera.category == .groceries)
+
+        let salary = try #require(items.first(where: { $0.merchant.contains("SALARY") }))
+        #expect(abs(salary.amount - 650.000) < 0.001)
+        #expect(salary.isIncome == true)
+    }
+
+    @Test func testExcelHTMLStatementParsing() throws {
+        // Simulates an HTML table statement exported as .xls
+        let htmlTable = """
+        <html>
+        <body>
+        <table border="1">
+            <tr>
+                <th>Date</th>
+                <th>Description</th>
+                <th>Debit</th>
+                <th>Credit</th>
+                <th>Balance</th>
+            </tr>
+            <tr>
+                <td>01/11/2026</td>
+                <td>Costa Coffee Seef</td>
+                <td>2.850</td>
+                <td></td>
+                <td>120.000</td>
+            </tr>
+            <tr>
+                <td>02/11/2026</td>
+                <td>Client Transfer In</td>
+                <td></td>
+                <td>150.000</td>
+                <td>270.000</td>
+            </tr>
+        </table>
+        </body>
+        </html>
+        """
+
+        let htmlItems = StatementService.parseHTMLTable(htmlTable)
+        #expect(htmlItems.count == 2)
+
+        let costa = try #require(htmlItems.first(where: { $0.merchant.contains("Costa") }))
+        #expect(abs(costa.amount - 2.850) < 0.001)
+        #expect(costa.isIncome == false)
+
+        let transfer = try #require(htmlItems.first(where: { $0.merchant.contains("Client Transfer") }))
+        #expect(abs(transfer.amount - 150.000) < 0.001)
+        #expect(transfer.isIncome == true)
+    }
+
+    @Test func testRuleActionSetLocationWithPinCoordinates() throws {
+        // Tests RuleActions with location coordinates and place name
+        let actions = RuleActions(
+            setCategoryRaw: SpendCategory.dining.rawValue,
+            setLocationName: "The Avenues Bahrain",
+            setLocationAddress: "Manama Corniche, Bahrain",
+            setLatitude: 26.2412,
+            setLongitude: 50.5794
+        )
+
+        #expect(actions.setLocationName == "The Avenues Bahrain")
+        #expect(actions.setLocationAddress == "Manama Corniche, Bahrain")
+        #expect(abs(actions.setLatitude! - 26.2412) < 0.0001)
+        #expect(abs(actions.setLongitude! - 50.5794) < 0.0001)
+
+        let testTx = MoneyTransaction(
+            amount: 5.500,
+            isIncome: false,
+            merchant: "Shake Shack",
+            category: .dining,
+            date: .now
+        )
+
+        // Apply rule actions to transaction
+        if let loc = actions.setLocationName {
+            testTx.locationName = loc
+            testTx.locationAddress = actions.setLocationAddress
+            testTx.latitude = actions.setLatitude
+            testTx.longitude = actions.setLongitude
+        }
+
+        #expect(testTx.hasLocation == true)
+        #expect(testTx.locationName == "The Avenues Bahrain")
+        #expect(testTx.latitude == 26.2412)
+        #expect(testTx.longitude == 50.5794)
+    }
 }

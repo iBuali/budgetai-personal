@@ -2,6 +2,9 @@ import Foundation
 import SwiftData
 import PDFKit
 import UniformTypeIdentifiers
+#if canImport(zlib)
+import zlib
+#endif
 
 // MARK: - Statement Format & Model
 
@@ -90,22 +93,56 @@ enum StatementService {
 
     static func parse(fileData: Data, filename: String, existingAccounts: [Account], existingTransactions: [MoneyTransaction]) -> StatementParseResult {
         let ext = (filename as NSString).pathExtension.lowercased()
-        let result: StatementParseResult
+        let isZip = fileData.count >= 4 && fileData[0] == 0x50 && fileData[1] == 0x4B && fileData[2] == 0x03 && fileData[3] == 0x04
+        let isPDF = fileData.count >= 4 && fileData[0] == 0x25 && fileData[1] == 0x50 && fileData[2] == 0x44 && fileData[3] == 0x46
 
-        if ext == "pdf" {
+        var result: StatementParseResult
+
+        if ext == "pdf" || isPDF {
             result = parsePDF(data: fileData, accounts: existingAccounts)
-        } else if ext == "xlsx" {
+            // If PDFKit couldn't find items (e.g. non-standard structure), fallback to text scan
+            if result.items.isEmpty {
+                let text = decodeString(from: fileData)
+                let textItems = parseTextLinesToItems(text)
+                if !textItems.isEmpty {
+                    result.items = textItems
+                }
+            }
+        } else if ext == "xlsx" || isZip {
             result = parseXLSX(data: fileData, accounts: existingAccounts)
-        } else if ext == "xls" || ext == "xml" {
+            // If XLSX extraction had 0 items, fallback to XLS / CSV
+            if result.items.isEmpty {
+                let xlsResult = parseXLS(data: fileData, accounts: existingAccounts)
+                if !xlsResult.items.isEmpty {
+                    result = xlsResult
+                } else {
+                    let csvResult = parseCSV(data: fileData, accounts: existingAccounts)
+                    if !csvResult.items.isEmpty { result = csvResult }
+                }
+            }
+        } else if ext == "xls" || ext == "xml" || ext == "html" || ext == "htm" {
             result = parseXLS(data: fileData, accounts: existingAccounts)
+            if result.items.isEmpty && isZip {
+                result = parseXLSX(data: fileData, accounts: existingAccounts)
+            }
         } else if ext == "csv" || ext == "tsv" || ext == "txt" {
             result = parseCSV(data: fileData, accounts: existingAccounts)
+            if result.items.isEmpty {
+                let text = decodeString(from: fileData)
+                let textItems = parseTextLinesToItems(text)
+                if !textItems.isEmpty { result.items = textItems }
+            }
         } else {
-            // Attempt PDF first, then text/XML
-            if let _ = PDFDocument(data: fileData) {
+            // Unrecognized extension: attempt PDF, then XLSX/ZIP, then XLS/HTML, then CSV
+            if isPDF || PDFDocument(data: fileData) != nil {
                 result = parsePDF(data: fileData, accounts: existingAccounts)
+            } else if isZip {
+                result = parseXLSX(data: fileData, accounts: existingAccounts)
             } else {
-                result = parseCSV(data: fileData, accounts: existingAccounts)
+                result = parseXLS(data: fileData, accounts: existingAccounts)
+                if result.items.isEmpty {
+                    result = parseCSV(data: fileData, accounts: existingAccounts)
+                }
             }
         }
 
@@ -229,7 +266,10 @@ enum StatementService {
         let detected = extractHeaderMetadata(from: text)
         let matchedAcc = matchAccount(ibanOrAcc: detected.iban, cardLast4: detected.cardLast4, bank: detected.bank, in: accounts)
 
-        let items = parseCSVRows(text)
+        var items = parseCSVRows(text)
+        if items.isEmpty {
+            items = parseTextLinesToItems(text)
+        }
 
         return StatementParseResult(
             items: items,
@@ -244,19 +284,29 @@ enum StatementService {
         )
     }
 
-    // MARK: - Excel (XLS / XML) Parsing
+    // MARK: - Excel (XLS / XML / HTML) Parsing
 
     static func parseXLS(data: Data, accounts: [Account]) -> StatementParseResult {
         let text = decodeString(from: data)
         let detected = extractHeaderMetadata(from: text)
         let matchedAcc = matchAccount(ibanOrAcc: detected.iban, cardLast4: detected.cardLast4, bank: detected.bank, in: accounts)
 
-        // Many bank .xls exports are XML Spreadsheet 2003 format
         var items: [ParsedStatementItem] = []
-        if text.contains("<Workbook") || text.contains("<Row") {
+
+        let lower = text.lowercased()
+        if lower.contains("<table") || lower.contains("<tr") {
+            // HTML table export disguised as .xls
+            items = parseHTMLTable(text)
+        } else if lower.contains("<workbook") || lower.contains("<row") {
+            // XML Spreadsheet 2003
             items = parseXMLSpreadsheet(text)
         } else {
+            // CSV / Delimited
             items = parseCSVRows(text)
+        }
+
+        if items.isEmpty {
+            items = parseTextLinesToItems(text)
         }
 
         return StatementParseResult(
@@ -272,19 +322,47 @@ enum StatementService {
         )
     }
 
-    // MARK: - Excel (XLSX) OpenXML Parsing
+    // MARK: - Excel (XLSX) OpenXML Zip Parsing
 
     static func parseXLSX(data: Data, accounts: [Account]) -> StatementParseResult {
-        let extractedStrings = extractStringsFromOpenXML(data: data)
-        let combined = extractedStrings.joined(separator: "\n")
-
-        let detected = extractHeaderMetadata(from: combined)
-        let matchedAcc = matchAccount(ibanOrAcc: detected.iban, cardLast4: detected.cardLast4, bank: detected.bank, in: accounts)
-
-        var items = parseTextLinesToItems(combined)
-        if items.isEmpty {
-            items = parseCSVRows(combined)
+        // 1. If not a ZIP file, try parsing as HTML table, XML Spreadsheet, or CSV
+        let isZip = data.count >= 4 && data[0] == 0x50 && data[1] == 0x4B && data[2] == 0x03 && data[3] == 0x04
+        if !isZip {
+            return parseXLS(data: data, accounts: accounts)
         }
+
+        // 2. Unpack XLSX ZIP entries
+        let entries = extractZipEntries(from: data)
+        var items: [ParsedStatementItem] = []
+        var combinedText = ""
+
+        // Extract Shared Strings: xl/sharedStrings.xml
+        var sharedStrings: [String] = []
+        if let sstData = entries.first(where: { $0.key.lowercased().contains("sharedstrings.xml") })?.value,
+           let sstXml = String(data: sstData, encoding: .utf8) {
+            sharedStrings = parseSharedStrings(xml: sstXml)
+        }
+
+        // Extract Worksheets: xl/worksheets/sheet1.xml (or any sheet)
+        let sheetEntries = entries.filter { $0.key.lowercased().contains("worksheets/sheet") }
+            .sorted(by: { $0.key < $1.key })
+
+        for (_, sheetData) in sheetEntries {
+            guard let sheetXml = String(data: sheetData, encoding: .utf8) else { continue }
+            let rowsText = parseWorksheetXml(sheetXml, sharedStrings: sharedStrings)
+            if !rowsText.isEmpty {
+                combinedText += rowsText + "\n"
+                let sheetItems = parseCSVRows(rowsText)
+                items.append(contentsOf: sheetItems)
+            }
+        }
+
+        if items.isEmpty && !combinedText.isEmpty {
+            items = parseTextLinesToItems(combinedText)
+        }
+
+        let detected = extractHeaderMetadata(from: combinedText)
+        let matchedAcc = matchAccount(ibanOrAcc: detected.iban, cardLast4: detected.cardLast4, bank: detected.bank, in: accounts)
 
         return StatementParseResult(
             items: items,
@@ -295,7 +373,7 @@ enum StatementService {
             format: .excelXLSX,
             statementPeriodStart: detected.startDate,
             statementPeriodEnd: detected.endDate,
-            rawTextSnippet: String(combined.prefix(400))
+            rawTextSnippet: String(combinedText.prefix(400))
         )
     }
 
@@ -337,16 +415,17 @@ enum StatementService {
             }
         }
 
-        // IBAN detection: BH\d{2}[A-Z]{4}[0-9A-Z]{14} or generic IBAN
-        if let ibanRange = text.range(of: #"\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b"#, options: .regularExpression) {
-            iban = String(text[ibanRange])
+        // IBAN detection: e.g. BH29 ILAB 0000 0012 3438 76 or BH29ILAB00000012343876
+        if let ibanRange = text.range(of: #"\b[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]{4}){2,7}(?:[ ]?[A-Z0-9]{1,4})?\b"#, options: .regularExpression) {
+            let rawIban = String(text[ibanRange])
+            iban = rawIban.replacingOccurrences(of: " ", with: "")
         } else if let acctRange = text.range(of: #"(?:Account|IBAN|Acc)(?:\s*(?:No|Number|#)?:?\s*)([0-9]{8,24})"#, options: [.regularExpression, .caseInsensitive]) {
             let matched = String(text[acctRange])
             iban = extractDigits(from: matched)
         }
 
-        // Card Last 4 digits: e.g. **** 1234 or Card: ...1234
-        if let cardRange = text.range(of: #"(?:Card|Credit Card|Card No)[\s\S]{0,25}?(?:[*Xx]{4,}|ending in|suffix)?\s*([0-9]{4})\b"#, options: [.regularExpression, .caseInsensitive]) {
+        // Card Last 4 digits: e.g. **** 1234 or Card: ...1234 or ending in 1234
+        if let cardRange = text.range(of: #"(?:Card|Credit Card|Card No)[\s\S]{0,35}?(?:[*Xx]{4,}|ending in|suffix|\.{3,})?\s*([0-9]{4})\b"#, options: [.regularExpression, .caseInsensitive]) {
             let cardMatch = String(text[cardRange])
             let digits = extractDigits(from: cardMatch)
             if digits.count >= 4 {
@@ -361,9 +440,171 @@ enum StatementService {
         s.filter { $0.isNumber }
     }
 
-    // MARK: - Line-by-Line Statement Parser
+    // MARK: - Multi-Strategy Text Statement Parser (PDF & Raw Text)
 
     static func parseTextLinesToItems(_ text: String) -> [ParsedStatementItem] {
+        // Strategy 1: Multi-line Block Aggregation (handles statements where dates, descriptions, amounts span 2-6 lines)
+        let blockItems = parseMultiLineBlocks(text)
+        if !blockItems.isEmpty {
+            return blockItems
+        }
+
+        // Strategy 2: Single-line regex matching
+        let singleLineItems = parseSingleLines(text)
+        if !singleLineItems.isEmpty {
+            return singleLineItems
+        }
+
+        // Strategy 3: Columnar block alignment
+        let columnarItems = parseColumnarBlocks(text)
+        if !columnarItems.isEmpty {
+            return columnarItems
+        }
+
+        return []
+    }
+
+    // MARK: - Strategy 1: Multi-Line Transaction Block Aggregator
+
+    private static func parseMultiLineBlocks(_ text: String) -> [ParsedStatementItem] {
+        var items: [ParsedStatementItem] = []
+        let rawLines = text.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && !isHeaderOrFooterLine($0) }
+
+        guard !rawLines.isEmpty else { return [] }
+
+        // Date pattern matching any date format
+        let datePattern = #"\b(\d{1,4}[-/\.]\d{1,2}[-/\.]\d{1,4}|\d{1,2}[-/\. ]+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[-/\. ]+\d{2,4})\b"#
+        let dateRegex = try? NSRegularExpression(pattern: datePattern, options: .caseInsensitive)
+
+        // Find line indices where a date appears
+        var dateLineIndices: [Int] = []
+        for (idx, line) in rawLines.enumerated() {
+            let nsRange = NSRange(line.startIndex..., in: line)
+            if dateRegex?.firstMatch(in: line, range: nsRange) != nil {
+                dateLineIndices.append(idx)
+            }
+        }
+
+        guard !dateLineIndices.isEmpty else { return [] }
+
+        // Group lines between consecutive dates into blocks
+        for (i, startIdx) in dateLineIndices.enumerated() {
+            let endIdx: Int
+            if i + 1 < dateLineIndices.count {
+                endIdx = min(dateLineIndices[i + 1], startIdx + 8)
+            } else {
+                endIdx = min(rawLines.count, startIdx + 8)
+            }
+
+            let blockLines = Array(rawLines[startIdx..<endIdx])
+            if let item = parseTransactionBlock(blockLines, dateRegex: dateRegex) {
+                items.append(item)
+            }
+        }
+
+        return items
+    }
+
+    private static func parseTransactionBlock(_ lines: [String], dateRegex: NSRegularExpression?) -> ParsedStatementItem? {
+        guard let firstLine = lines.first else { return nil }
+
+        // 1. Extract Date
+        var detectedDate: Date? = nil
+        var dateMatchString: String = ""
+
+        for line in lines {
+            let nsRange = NSRange(line.startIndex..., in: line)
+            if let match = dateRegex?.firstMatch(in: line, range: nsRange),
+               let r = Range(match.range, in: line) {
+                dateMatchString = String(line[r])
+                if let d = parseDate(dateMatchString) {
+                    detectedDate = d
+                    break
+                }
+            }
+        }
+
+        guard let date = detectedDate else { return nil }
+
+        // 2. Extract Monetary Amounts across block lines
+        let combinedBlock = lines.joined(separator: " ")
+        let amountPattern = #"([+-]?\s*(?:BHD|BD|SAR|AED|USD|EUR|GBP|\$|€)?\s*[\d,]+\.\d{1,4}(?:\s*(?:CR|DR|Cr|Dr))?|\([\d,]+\.\d{1,4}\))"#
+        let amtRegex = try? NSRegularExpression(pattern: amountPattern)
+        let amtMatches = amtRegex?.matches(in: combinedBlock, range: NSRange(combinedBlock.startIndex..., in: combinedBlock)) ?? []
+
+        guard !amtMatches.isEmpty else { return nil }
+
+        var candidateAmountStr = ""
+        var isIncome = false
+
+        let upperBlock = combinedBlock.uppercased()
+        if upperBlock.contains("CR") || upperBlock.contains("CREDIT") || upperBlock.contains("DEPOSIT") || upperBlock.contains("SALARY") || upperBlock.contains("REFUND") {
+            isIncome = true
+        }
+
+        if amtMatches.count == 1 {
+            candidateAmountStr = String(combinedBlock[Range(amtMatches[0].range, in: combinedBlock)!])
+        } else {
+            // First amount is almost universally the transaction debit or credit; second is balance
+            candidateAmountStr = String(combinedBlock[Range(amtMatches[0].range, in: combinedBlock)!])
+        }
+
+        if candidateAmountStr.contains("-") || candidateAmountStr.contains("(") {
+            isIncome = false
+        } else if candidateAmountStr.contains("+") {
+            isIncome = true
+        }
+
+        let cleanAmount = parseAmount(candidateAmountStr)
+        guard cleanAmount > 0 else { return nil }
+
+        // 3. Extract Merchant / Narrative Description
+        var desc = combinedBlock
+        // Remove date
+        if !dateMatchString.isEmpty {
+            desc = desc.replacingOccurrences(of: dateMatchString, with: " ")
+        }
+        // Remove amounts
+        for m in amtMatches {
+            if let r = Range(m.range, in: desc) {
+                desc = desc.replacingCharacters(in: r, with: " ")
+            }
+        }
+
+        // Clean noise tokens
+        let cleanDesc = desc
+            .replacingOccurrences(of: #"\b(?:CR|DR|BHD|BD|SAR|AED|USD|EUR|GBP|POS|PURCHASE|AUTH|DEBIT|CREDIT|BALANCE)\b"#, with: "", options: [.regularExpression, .caseInsensitive])
+            .replacingOccurrences(of: #"[|;,\t\n\r]"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: CharacterSet(charactersIn: " -/.:,").union(.whitespacesAndNewlines))
+
+        guard !cleanDesc.isEmpty && cleanDesc.count >= 2 else { return nil }
+
+        // 4. Extract Reference
+        var ref: String? = nil
+        if let refRange = combinedBlock.range(of: #"\b(?:REF|TRX|FT|BIB|AUTH|DOC)[#: ]*([A-Z0-9]{5,25})\b"#, options: [.regularExpression, .caseInsensitive]) {
+            ref = String(combinedBlock[refRange])
+        }
+
+        // 5. Category Guessing
+        let cat = Categorizer.guess(cleanDesc) ?? (isIncome ? .income : .other)
+
+        return ParsedStatementItem(
+            date: date,
+            merchant: cleanDesc,
+            amount: cleanAmount,
+            isIncome: isIncome,
+            reference: ref,
+            category: cat,
+            rawDescription: lines.joined(separator: " ")
+        )
+    }
+
+    // MARK: - Strategy 2: Single-Line Regex Parser
+
+    private static func parseSingleLines(_ text: String) -> [ParsedStatementItem] {
         var items: [ParsedStatementItem] = []
         let rawLines = text.components(separatedBy: .newlines)
 
@@ -379,6 +620,54 @@ enum StatementService {
         }
 
         return items
+    }
+
+    // MARK: - Strategy 3: Columnar PDF Alignment
+
+    private static func parseColumnarBlocks(_ text: String) -> [ParsedStatementItem] {
+        let lines = text.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && !isHeaderOrFooterLine($0) }
+
+        guard lines.count >= 6 else { return [] }
+
+        var dates: [(index: Int, date: Date)] = []
+        var amounts: [(index: Int, amount: Double)] = []
+
+        for (idx, line) in lines.enumerated() {
+            if let d = parseDate(line) {
+                dates.append((idx, d))
+            } else if let num = tryExtractSingleAmount(line) {
+                amounts.append((idx, num))
+            }
+        }
+
+        // If equal counts of dates and amounts in distinct blocks
+        guard dates.count >= 2 && dates.count == amounts.count else { return [] }
+
+        var items: [ParsedStatementItem] = []
+        for i in 0..<dates.count {
+            let d = dates[i].date
+            let a = amounts[i].amount
+            // Find text lines between dates or adjacent
+            let desc = "Transaction \(i + 1)"
+            let cat = Categorizer.guess(desc) ?? .other
+            items.append(ParsedStatementItem(
+                date: d,
+                merchant: desc,
+                amount: a,
+                isIncome: false,
+                category: cat
+            ))
+        }
+
+        return items
+    }
+
+    private static func tryExtractSingleAmount(_ line: String) -> Double? {
+        let clean = line.replacingOccurrences(of: #"[^\d\.]"#, with: "", options: .regularExpression)
+        guard let val = Double(clean), val > 0 else { return nil }
+        return val
     }
 
     static func isHeaderOrFooterLine(_ line: String) -> Bool {
@@ -398,9 +687,7 @@ enum StatementService {
     // MARK: - Line Regex & Field Extraction
 
     static func parseStatementLine(_ line: String) -> ParsedStatementItem? {
-        // Date formats commonly found in bank statements:
-        // 2026-10-25, 25/10/2026, 25-10-2026, 25 Oct 2026, 25-Oct-2026, 10/25/2026
-        let datePattern = #"\b(\d{1,4}[-/\.]\d{1,2}[-/\.]\d{1,4}|\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{2,4}|\d{1,2}-(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*-\d{2,4})\b"#
+        let datePattern = #"\b(\d{1,4}[-/\.]\d{1,2}[-/\.]\d{1,4}|\d{1,2}[-/\. ]+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[-/\. ]+\d{2,4})\b"#
 
         guard let dateRange = line.range(of: datePattern, options: [.regularExpression, .caseInsensitive]) else {
             return nil
@@ -409,11 +696,10 @@ enum StatementService {
         let dateStr = String(line[dateRange])
         guard let date = parseDate(dateStr) else { return nil }
 
-        // Remaining text after or around date
         let remaining = line.replacingCharacters(in: dateRange, with: " ")
 
-        // Amounts: Find numbers like 1,250.00, 15.500, -4.50, 4.500 CR, 100.00 DR
-        let amountPattern = #"([+-]?\s*(?:BHD|BD|SAR|AED|USD|EUR|GBP)?\s*[\d,]+\.\d{2,3}(?:\s*(?:CR|DR|Cr|Dr))?)"#
+        // Amounts: Find numbers like 1,250.00, 15.500, (4.50), -4.50, 4.500 CR
+        let amountPattern = #"([+-]?\s*(?:BHD|BD|SAR|AED|USD|EUR|GBP|\$)?\s*[\d,]+\.\d{1,4}(?:\s*(?:CR|DR|Cr|Dr))?|\([\d,]+\.\d{1,4}\))"#
         let regex = try? NSRegularExpression(pattern: amountPattern)
         let matches = regex?.matches(in: remaining, range: NSRange(remaining.startIndex..., in: remaining)) ?? []
 
@@ -421,39 +707,30 @@ enum StatementService {
             return nil
         }
 
-        // If multiple amounts appear on the line (e.g. Debit, Credit, Balance),
-        // determine whether debit or credit has a value.
         var candidateAmountStr = String(remaining[range1])
         var isIncome = false
 
-        if matches.count >= 2 {
-            // Often columns: Debit, Credit, Balance OR Amount, Balance
-            let m0Str = String(remaining[Range(matches[0].range, in: remaining)!])
-            let m1Str = String(remaining[Range(matches[1].range, in: remaining)!])
-
-            // If line contains "CR" or "CREDIT", it's income
-            if remaining.uppercased().contains("CR") || remaining.uppercased().contains("CREDIT") {
-                isIncome = true
-                candidateAmountStr = m0Str
-            } else if m0Str.contains("-") {
-                isIncome = false
-                candidateAmountStr = m0Str
-            } else {
-                candidateAmountStr = m0Str
-            }
+        let upperRemaining = remaining.uppercased()
+        if upperRemaining.contains("CR") || upperRemaining.contains("CREDIT") || upperRemaining.contains("DEPOSIT") || upperRemaining.contains("SALARY") || upperRemaining.contains("REFUND") {
+            isIncome = true
         }
 
-        let upperRemaining = remaining.uppercased()
-        if upperRemaining.contains("CR") || upperRemaining.contains("CREDIT") || upperRemaining.contains("DEPOSIT") || upperRemaining.contains("SALARY") {
+        if matches.count >= 2 {
+            let m0Str = String(remaining[Range(matches[0].range, in: remaining)!])
+            if upperRemaining.contains("CR") || upperRemaining.contains("CREDIT") {
+                isIncome = true
+            }
+            candidateAmountStr = m0Str
+        }
+
+        if candidateAmountStr.contains("-") || candidateAmountStr.contains("(") {
+            isIncome = false
+        } else if candidateAmountStr.contains("+") {
             isIncome = true
         }
 
         let cleanAmount = parseAmount(candidateAmountStr)
         guard cleanAmount > 0 else { return nil }
-
-        if candidateAmountStr.contains("-") {
-            isIncome = false
-        }
 
         // Clean merchant / description text
         var desc = remaining
@@ -470,13 +747,12 @@ enum StatementService {
 
         guard !cleanDesc.isEmpty else { return nil }
 
-        // Extract reference number if present (e.g. REF: 123456 or BIB103KAK000KZUM)
+        // Extract reference number
         var ref: String? = nil
-        if let refRange = line.range(of: #"\b(?:REF|TRX|FT|BIB)[A-Z0-9]{6,25}\b"#, options: [.regularExpression, .caseInsensitive]) {
+        if let refRange = line.range(of: #"\b(?:REF|TRX|FT|BIB)[#: ]*([A-Z0-9]{6,25})\b"#, options: [.regularExpression, .caseInsensitive]) {
             ref = String(line[refRange])
         }
 
-        // Deterministic Category Guessing using Categorizer
         let guessedCategory = Categorizer.guess(cleanDesc) ?? (isIncome ? .income : .other)
 
         return ParsedStatementItem(
@@ -490,16 +766,23 @@ enum StatementService {
         )
     }
 
-    // MARK: - CSV Parsing
+    // MARK: - CSV & Delimited Rows Parsing
 
     static func parseCSVRows(_ csvText: String) -> [ParsedStatementItem] {
         var items: [ParsedStatementItem] = []
         let lines = csvText.components(separatedBy: .newlines)
-        guard lines.count > 1 else { return [] }
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard lines.count >= 1 else { return [] }
 
-        // Identify separator: comma or tab or semicolon
+        // Identify separator: tab, comma, semicolon, pipe
         let firstLine = lines.first ?? ""
-        let sep: Character = firstLine.contains("\t") ? "\t" : (firstLine.contains(";") ? ";" : ",")
+        let sep: Character = {
+            if firstLine.contains("\t") { return "\t" }
+            if firstLine.contains(";") { return ";" }
+            if firstLine.contains("|") { return "|" }
+            return ","
+        }()
 
         var headers: [String] = []
         var headerIndex = -1
@@ -507,29 +790,59 @@ enum StatementService {
         for (idx, line) in lines.enumerated() {
             let cells = splitCSVLine(line, separator: sep)
             let lowerCells = cells.map { $0.lowercased().trimmingCharacters(in: .whitespacesAndNewlines) }
-            if lowerCells.contains(where: { $0.contains("date") }) &&
-               lowerCells.contains(where: { $0.contains("amount") || $0.contains("debit") || $0.contains("description") || $0.contains("particular") }) {
+            if lowerCells.contains(where: { $0.contains("date") || $0.contains("time") }) &&
+               lowerCells.contains(where: { $0.contains("amount") || $0.contains("debit") || $0.contains("credit") || $0.contains("description") || $0.contains("particular") || $0.contains("narrative") }) {
                 headers = lowerCells
                 headerIndex = idx
                 break
             }
         }
 
-        if headerIndex == -1 || headers.isEmpty {
-            // Fallback to text line parser
-            return parseTextLinesToItems(csvText)
+        let dateCol: Int
+        let descCol: Int
+        let amountCol: Int?
+        let debitCol: Int?
+        let creditCol: Int?
+        let refCol: Int?
+        let startRow: Int
+
+        if headerIndex != -1 && !headers.isEmpty {
+            dateCol = headers.firstIndex(where: { $0.contains("date") || $0.contains("time") }) ?? 0
+            descCol = headers.firstIndex(where: { $0.contains("description") || $0.contains("narrative") || $0.contains("particular") || $0.contains("merchant") || $0.contains("details") || $0.contains("payee") || $0.contains("remarks") }) ?? 1
+            amountCol = headers.firstIndex(where: { $0 == "amount" || $0.contains("transaction amount") || $0.contains("net amount") })
+            debitCol = headers.firstIndex(where: { $0.contains("debit") || $0.contains("withdrawal") || $0.contains("paid out") || $0 == "dr" })
+            creditCol = headers.firstIndex(where: { $0.contains("credit") || $0.contains("deposit") || $0.contains("paid in") || $0 == "cr" })
+            refCol = headers.firstIndex(where: { $0.contains("ref") || $0.contains("cheque") || $0.contains("reference") || $0.contains("doc") })
+            startRow = headerIndex + 1
+        } else {
+            // Headless table: heuristics
+            startRow = 0
+            let sampleCells = splitCSVLine(lines[0], separator: sep)
+            var inferredDate = 0
+            var inferredDesc = 1
+            var inferredAmt: Int? = 2
+
+            for (cIdx, cell) in sampleCells.enumerated() {
+                if parseDate(cell) != nil {
+                    inferredDate = cIdx
+                } else if parseAmount(cell) > 0 {
+                    inferredAmt = cIdx
+                } else if cell.count > 3 {
+                    inferredDesc = cIdx
+                }
+            }
+
+            dateCol = inferredDate
+            descCol = inferredDesc
+            amountCol = inferredAmt
+            debitCol = nil
+            creditCol = nil
+            refCol = nil
         }
 
-        let dateCol = headers.firstIndex(where: { $0.contains("date") || $0.contains("time") }) ?? 0
-        let descCol = headers.firstIndex(where: { $0.contains("description") || $0.contains("narrative") || $0.contains("particular") || $0.contains("merchant") || $0.contains("details") }) ?? 1
-        let amountCol = headers.firstIndex(where: { $0 == "amount" || $0.contains("transaction amount") })
-        let debitCol = headers.firstIndex(where: { $0.contains("debit") || $0.contains("withdrawal") })
-        let creditCol = headers.firstIndex(where: { $0.contains("credit") || $0.contains("deposit") })
-        let refCol = headers.firstIndex(where: { $0.contains("ref") || $0.contains("cheque") || $0.contains("reference") })
-
-        for i in (headerIndex + 1)..<lines.count {
-            let line = lines[i].trimmingCharacters(in: .whitespacesAndNewlines)
-            if line.isEmpty { continue }
+        for i in startRow..<lines.count {
+            let line = lines[i]
+            if isHeaderOrFooterLine(line) { continue }
             let cells = splitCSVLine(line, separator: sep)
             guard cells.count > max(dateCol, descCol) else { continue }
 
@@ -548,14 +861,14 @@ enum StatementService {
                 if creditVal > 0 {
                     amount = creditVal
                     isIncome = true
-                } else {
+                } else if debitVal > 0 {
                     amount = debitVal
                     isIncome = false
                 }
             } else if let amtIdx = amountCol, cells.count > amtIdx {
                 let cellVal = cells[amtIdx]
                 amount = parseAmount(cellVal)
-                if cellVal.contains("-") || cellVal.uppercased().contains("DR") {
+                if cellVal.contains("-") || cellVal.contains("(") || cellVal.uppercased().contains("DR") {
                     isIncome = false
                 } else if cellVal.contains("+") || cellVal.uppercased().contains("CR") {
                     isIncome = true
@@ -607,19 +920,66 @@ enum StatementService {
         return fields
     }
 
-    // MARK: - XML Spreadsheet Parser
+    // MARK: - HTML Table Parser (.xls HTML Exports)
+
+    static func parseHTMLTable(_ html: String) -> [ParsedStatementItem] {
+        var rowLines: [String] = []
+
+        // Extract <tr>...</tr>
+        let trRegex = try? NSRegularExpression(pattern: #"<tr[^>]*>(.*?)</tr>"#, options: [.caseInsensitive, .dotMatchesLineSeparators])
+        let tdRegex = try? NSRegularExpression(pattern: #"<t[dh][^>]*>(.*?)</t[dh]>"#, options: [.caseInsensitive, .dotMatchesLineSeparators])
+        let tagRegex = try? NSRegularExpression(pattern: #"<[^>]+>"#)
+
+        let nsHtml = html as NSString
+        let trMatches = trRegex?.matches(in: html, range: NSRange(location: 0, length: nsHtml.length)) ?? []
+
+        for trMatch in trMatches {
+            let trContent = nsHtml.substring(with: trMatch.range(at: 1))
+            let nsTr = trContent as NSString
+            let tdMatches = tdRegex?.matches(in: trContent, range: NSRange(location: 0, length: nsTr.length)) ?? []
+
+            var cells: [String] = []
+            for tdMatch in tdMatches {
+                var cellRaw = nsTr.substring(with: tdMatch.range(at: 1))
+                // Strip HTML tags
+                if let tagRegex {
+                    cellRaw = tagRegex.stringByReplacingMatches(in: cellRaw, range: NSRange(location: 0, length: (cellRaw as NSString).length), withTemplate: "")
+                }
+                // Unescape entities
+                cellRaw = cellRaw
+                    .replacingOccurrences(of: "&nbsp;", with: " ")
+                    .replacingOccurrences(of: "&amp;", with: "&")
+                    .replacingOccurrences(of: "&#39;", with: "'")
+                    .replacingOccurrences(of: "&quot;", with: "\"")
+                    .replacingOccurrences(of: "&lt;", with: "<")
+                    .replacingOccurrences(of: "&gt;", with: ">")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                cells.append(cellRaw)
+            }
+
+            if !cells.isEmpty {
+                rowLines.append(cells.joined(separator: "\t"))
+            }
+        }
+
+        return parseCSVRows(rowLines.joined(separator: "\n"))
+    }
+
+    // MARK: - XML Spreadsheet Parser (SpreadsheetML 2003)
 
     static func parseXMLSpreadsheet(_ xml: String) -> [ParsedStatementItem] {
         var rows: [String] = []
         let rowComponents = xml.components(separatedBy: "<Row")
         for (idx, r) in rowComponents.enumerated() {
             if idx == 0 { continue }
-            // Extract cell Data tags: <Data ss:Type="...">value</Data>
             var rowCells: [String] = []
             let dataComponents = r.components(separatedBy: "<Data")
             for d in dataComponents.dropFirst() {
                 if let closeTag = d.range(of: ">"), let endTag = d.range(of: "</Data>") {
                     let content = String(d[closeTag.upperBound..<endTag.lowerBound])
+                        .replacingOccurrences(of: "&amp;", with: "&")
+                        .replacingOccurrences(of: "&quot;", with: "\"")
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
                     rowCells.append(content)
                 }
             }
@@ -631,55 +991,231 @@ enum StatementService {
         return parseCSVRows(rows.joined(separator: "\n"))
     }
 
-    // MARK: - OpenXML / XLSX String Extraction
+    // MARK: - OpenXML (XLSX) Helpers & ZIP Extraction
 
-    static func extractStringsFromOpenXML(data: Data) -> [String] {
-        // XLSX files are zip archives containing xml parts (sheet1.xml, sharedStrings.xml).
-        // Extract UTF-8 text strings directly from uncompressed segments and XML tags.
-        let stringData = decodeString(from: data)
-        var result: [String] = []
+    private static func parseSharedStrings(xml: String) -> [String] {
+        var strings: [String] = []
+        let siComponents = xml.components(separatedBy: "<si>")
+        for si in siComponents.dropFirst() {
+            // Find all <t> or <t ...>
+            var text = ""
+            let tComponents = si.components(separatedBy: "<t")
+            for tc in tComponents.dropFirst() {
+                if let close = tc.range(of: ">"), let end = tc.range(of: "</t>") {
+                    text += String(tc[close.upperBound..<end.lowerBound])
+                }
+            }
+            let clean = text
+                .replacingOccurrences(of: "&amp;", with: "&")
+                .replacingOccurrences(of: "&lt;", with: "<")
+                .replacingOccurrences(of: "&gt;", with: ">")
+                .replacingOccurrences(of: "&quot;", with: "\"")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            strings.append(clean)
+        }
+        return strings
+    }
 
-        // Extract any embedded <t>text</t> or <v>value</v> XML fragments
-        let tRegex = try? NSRegularExpression(pattern: #"<(?:t|v)>(.*?)</(?:t|v)>"#)
-        if let matches = tRegex?.matches(in: stringData, range: NSRange(stringData.startIndex..., in: stringData)) {
-            var currentRow: [String] = []
-            for m in matches {
-                if let r = Range(m.range(at: 1), in: stringData) {
-                    let val = String(stringData[r])
-                    currentRow.append(val)
-                    if currentRow.count >= 4 {
-                        result.append(currentRow.joined(separator: "\t"))
-                        currentRow = []
+    private static func parseWorksheetXml(_ xml: String, sharedStrings: [String]) -> String {
+        var rowLines: [String] = []
+        let rowComponents = xml.components(separatedBy: "<row")
+
+        for r in rowComponents.dropFirst() {
+            var cells: [String] = []
+            let cComponents = r.components(separatedBy: "<c")
+
+            for c in cComponents.dropFirst() {
+                var cellVal = ""
+                let isSharedString = c.contains("t=\"s\"")
+                let isInlineString = c.contains("t=\"inlineStr\"")
+
+                if isInlineString, let start = c.range(of: "<t>"), let end = c.range(of: "</t>") {
+                    cellVal = String(c[start.upperBound..<end.lowerBound])
+                } else if let vStart = c.range(of: "<v>"), let vEnd = c.range(of: "</v>") {
+                    let rawV = String(c[vStart.upperBound..<vEnd.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+                    if isSharedString, let sIdx = Int(rawV), sIdx < sharedStrings.count {
+                        cellVal = sharedStrings[sIdx]
+                    } else {
+                        // Check if rawV is an Excel serial date number e.g. 45200..46000
+                        if let num = Double(rawV), num >= 35000 && num <= 65000 {
+                            let timeInt = (num - 25569.0) * 86400.0
+                            let d = Date(timeIntervalSince1970: timeInt)
+                            let df = DateFormatter()
+                            df.dateFormat = "yyyy-MM-dd"
+                            df.locale = Locale(identifier: "en_US_POSIX")
+                            cellVal = df.string(from: d)
+                        } else {
+                            cellVal = rawV
+                        }
                     }
                 }
+
+                cellVal = cellVal
+                    .replacingOccurrences(of: "&amp;", with: "&")
+                    .replacingOccurrences(of: "&quot;", with: "\"")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                cells.append(cellVal)
+            }
+
+            if !cells.isEmpty {
+                rowLines.append(cells.joined(separator: "\t"))
             }
         }
 
-        if result.isEmpty {
-            // Scan for readable ASCII/UTF-8 strings within the binary
-            result = parseTextLinesToItems(stringData).map(\.rawDescription)
+        return rowLines.joined(separator: "\n")
+    }
+
+    private static func extractZipEntries(from zipData: Data) -> [String: Data] {
+        var entries: [String: Data] = [:]
+        let count = zipData.count
+        var offset = 0
+        var iterations = 0
+
+        while offset + 30 <= count && iterations < 500 {
+            iterations += 1
+            // Check for local header magic 0x04034b50 (PK\x03\x04)
+            guard zipData[offset] == 0x50,
+                  zipData[offset + 1] == 0x4B,
+                  zipData[offset + 2] == 0x03,
+                  zipData[offset + 3] == 0x04 else {
+                offset += 1
+                continue
+            }
+
+            let method = UInt16(zipData[offset + 8]) | (UInt16(zipData[offset + 9]) << 8)
+            let compSize = Int(UInt32(zipData[offset + 18]) | (UInt32(zipData[offset + 19]) << 8) | (UInt32(zipData[offset + 20]) << 16) | (UInt32(zipData[offset + 21]) << 24))
+            let uncompSize = Int(UInt32(zipData[offset + 22]) | (UInt32(zipData[offset + 23]) << 8) | (UInt32(zipData[offset + 24]) << 16) | (UInt32(zipData[offset + 25]) << 24))
+            let nameLen = Int(UInt16(zipData[offset + 26]) | (UInt16(zipData[offset + 27]) << 8))
+            let extraLen = Int(UInt16(zipData[offset + 28]) | (UInt16(zipData[offset + 29]) << 8))
+
+            let nameStart = offset + 30
+            let nameEnd = nameStart + nameLen
+            guard nameEnd <= count else { break }
+
+            let fileNameData = zipData.subdata(in: nameStart..<nameEnd)
+            let fileName = String(data: fileNameData, encoding: .utf8) ?? String(decoding: fileNameData, as: UTF8.self)
+
+            let dataStart = nameEnd + extraLen
+            let dataEnd = dataStart + compSize
+
+            if compSize > 0 && dataEnd <= count {
+                let slice = zipData.subdata(in: dataStart..<dataEnd)
+                if method == 0 {
+                    // Stored uncompressed
+                    entries[fileName] = slice
+                } else if method == 8 {
+                    // Deflate
+                    #if canImport(zlib)
+                    if let decompressed = decompressRawDeflate(data: slice, expectedSize: uncompSize) {
+                        entries[fileName] = decompressed
+                    }
+                    #endif
+                }
+                offset = dataEnd
+            } else {
+                offset = dataStart
+            }
         }
 
-        return result
+        return entries
     }
+
+    #if canImport(zlib)
+    private static func decompressRawDeflate(data: Data, expectedSize: Int) -> Data? {
+        guard !data.isEmpty else { return Data() }
+
+        var stream = z_stream()
+        // -15 = raw deflate without zlib header
+        let status = inflateInit2_(&stream, -15, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size))
+        guard status == Z_OK else { return nil }
+        defer { inflateEnd(&stream) }
+
+        let bufferSize = 65536
+        var output = Data()
+        var buffer = [UInt8](repeating: 0, count: bufferSize)
+
+        return data.withUnsafeBytes { (rawBuffer: UnsafeRawBufferPointer) -> Data? in
+            guard let baseAddress = rawBuffer.baseAddress else { return nil }
+            stream.next_in = UnsafeMutablePointer<Bytef>(mutating: baseAddress.assumingMemoryBound(to: Bytef.self))
+            stream.avail_in = uInt(data.count)
+
+            while true {
+                let ret: Int32 = buffer.withUnsafeMutableBytes { (buf: UnsafeMutableRawBufferPointer) in
+                    guard let dest = buf.baseAddress else { return Z_STREAM_ERROR }
+                    stream.next_out = dest.assumingMemoryBound(to: Bytef.self)
+                    stream.avail_out = uInt(bufferSize)
+                    return inflate(&stream, Z_NO_FLUSH)
+                }
+
+                let bytesWritten = bufferSize - Int(stream.avail_out)
+                if bytesWritten > 0 {
+                    output.append(buffer, count: bytesWritten)
+                }
+
+                if ret == Z_STREAM_END {
+                    break
+                }
+                if ret != Z_OK && ret != Z_BUF_ERROR {
+                    break
+                }
+                if stream.avail_in == 0 && bytesWritten == 0 {
+                    break
+                }
+            }
+            return output.isEmpty ? nil : output
+        }
+    }
+    #endif
 
     // MARK: - Date & Amount Helpers
 
     static func parseDate(_ string: String) -> Date? {
-        let clean = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        var clean = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        clean = clean.trimmingCharacters(in: CharacterSet(charactersIn: ",;:.()[]{}|"))
+        guard !clean.isEmpty else { return nil }
+
+        // Remove ordinal suffixes e.g. 1st, 2nd, 3rd, 4th -> 1, 2, 3, 4
+        clean = clean.replacingOccurrences(of: #"(\d+)(?:st|nd|rd|th)\b"#, with: "$1", options: .regularExpression)
+
         let formats = [
             "yyyy-MM-dd",
+            "yyyy/MM/dd",
+            "yyyy.MM.dd",
             "dd/MM/yyyy",
             "dd-MM-yyyy",
-            "MM/dd/yyyy",
             "dd.MM.yyyy",
             "dd MMM yyyy",
             "dd-MMM-yyyy",
-            "yyyy/MM/dd",
+            "dd.MMM.yyyy",
+            "d MMM yyyy",
+            "d-MMM-yyyy",
+            "d.MMM.yyyy",
+            "dd/MM/yy",
+            "dd-MM-yy",
+            "dd.MM.yy",
+            "dd-MMM-yy",
+            "dd MMM yy",
+            "d-MMM-yy",
+            "d MMM yy",
             "d/M/yyyy",
             "d-M-yyyy",
-            "dd-MMM-yy",
-            "dd/MM/yy"
+            "d.M.yyyy",
+            "d/M/yy",
+            "d-M-yy",
+            "d.M.yy",
+            "MM/dd/yyyy",
+            "MM-dd-yyyy",
+            "MM/dd/yy",
+            "MM-dd-yy",
+            "M/d/yyyy",
+            "M/d/yy",
+            "MMM dd, yyyy",
+            "MMM d, yyyy",
+            "MMM dd yyyy",
+            "MMM d yyyy",
+            "dd MMMM yyyy",
+            "MMMM dd, yyyy",
+            "yyyyMMdd"
         ]
 
         let df = DateFormatter()
@@ -692,14 +1228,48 @@ enum StatementService {
                 return d
             }
         }
+
+        // Try title-cased month names
+        let words = clean.components(separatedBy: CharacterSet(charactersIn: " -/."))
+        if words.count >= 3 {
+            let titleCased = words.map { $0.capitalized }.joined(separator: "-")
+            for fmt in ["dd-MMM-yyyy", "dd-MMM-yy", "d-MMM-yyyy", "d-MMM-yy"] {
+                df.dateFormat = fmt
+                if let d = df.date(from: titleCased) {
+                    return d
+                }
+            }
+        }
+
         return nil
     }
 
     static func parseAmount(_ string: String) -> Double {
-        let clean = string
-            .replacingOccurrences(of: #"[^0-9\.\-]"#, with: "", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return abs(Double(clean) ?? 0.0)
+        var s = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        s = s.replacingOccurrences(of: #"[^0-9\.\,\-]"#, with: "", options: .regularExpression)
+        guard !s.isEmpty else { return 0.0 }
+
+        if s.contains(",") && s.contains(".") {
+            if let commaIdx = s.lastIndex(of: ","), let dotIdx = s.lastIndex(of: ".") {
+                if commaIdx > dotIdx {
+                    // European format 1.250,50
+                    s = s.replacingOccurrences(of: ".", with: "").replacingOccurrences(of: ",", with: ".")
+                } else {
+                    // Standard format 1,250.50
+                    s = s.replacingOccurrences(of: ",", with: "")
+                }
+            }
+        } else if s.contains(",") {
+            let parts = s.components(separatedBy: ",")
+            if parts.count == 2 && (parts[1].count == 2 || parts[1].count == 3) {
+                s = parts[0] + "." + parts[1]
+            } else {
+                s = s.replacingOccurrences(of: ",", with: "")
+            }
+        }
+
+        s = s.replacingOccurrences(of: "-", with: "")
+        return abs(Double(s) ?? 0.0)
     }
 
     private static func decodeString(from data: Data) -> String {

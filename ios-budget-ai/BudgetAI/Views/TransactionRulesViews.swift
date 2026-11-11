@@ -55,6 +55,7 @@ struct TransactionRuleBuilderSheet: View {
     @State private var actionLocationAddress: String?
     @State private var actionLatitude: Double?
     @State private var actionLongitude: Double?
+    @State private var showLocationPicker: Bool = false
 
     @State private var enableSetNote: Bool = false
     @State private var actionNote: String = ""
@@ -105,6 +106,18 @@ struct TransactionRuleBuilderSheet: View {
                 Button("Cancel", role: .cancel) { }
             } message: {
                 Text("A rule (\"\(conflictingRuleName)\") already uses these exact conditions. Would you like to update that rule with these actions instead?")
+            }
+            .sheet(isPresented: $showLocationPicker) {
+                LocationPickerSheet(
+                    initialName: actionLocationName,
+                    initialLatitude: actionLatitude,
+                    initialLongitude: actionLongitude
+                ) { loc in
+                    actionLocationName = loc.name
+                    actionLocationAddress = loc.address
+                    actionLatitude = loc.latitude
+                    actionLongitude = loc.longitude
+                }
             }
         }
     }
@@ -327,13 +340,48 @@ struct TransactionRuleBuilderSheet: View {
                     .textFieldStyle(.roundedBorder)
             }
 
-            // 5. Set Location (Fully editable place / location name)
+            // 5. Set Location (Transaction Location Editor: Search + Interactive Movable Pin Map)
             Toggle(isOn: $enableSetLocation) {
-                Label("Set Location", systemImage: "mappin.and.ellipse")
+                VStack(alignment: .leading, spacing: 2) {
+                    Label("Set Location", systemImage: "mappin.and.ellipse")
+                    Text("Search place or drop & move pin on interactive map")
+                        .font(.caption2)
+                        .foregroundStyle(Theme.secondaryInk)
+                }
             }
             if enableSetLocation {
-                TextField("Location / Place Name", text: $actionLocationName)
-                    .textFieldStyle(.roundedBorder)
+                if !actionLocationName.isEmpty || actionLatitude != nil {
+                    TransactionLocationCard(
+                        placeName: actionLocationName.isEmpty ? "Pinned Map Location" : actionLocationName,
+                        address: actionLocationAddress,
+                        latitude: actionLatitude,
+                        longitude: actionLongitude,
+                        onSearchPlace: { showLocationPicker = true },
+                        onRemove: {
+                            actionLocationName = ""
+                            actionLocationAddress = nil
+                            actionLatitude = nil
+                            actionLongitude = nil
+                        }
+                    )
+                    .listRowInsets(EdgeInsets(top: 4, leading: 12, bottom: 4, trailing: 12))
+                    .listRowBackground(Color.clear)
+                } else {
+                    Button {
+                        showLocationPicker = true
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "mappin.and.ellipse")
+                            Text("Select Location / Search on Map")
+                        }
+                        .font(.subheadline.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Theme.brand)
+                    .padding(.vertical, 4)
+                }
             }
 
             // 6. Set Note (Always enabled, write inside even if empty originally)
@@ -428,6 +476,12 @@ struct TransactionRuleBuilderSheet: View {
                 actionLocationAddress = act.setLocationAddress
                 actionLatitude = act.setLatitude
                 actionLongitude = act.setLongitude
+            } else if act.setLatitude != nil {
+                enableSetLocation = true
+                actionLocationName = act.setLocationAddress ?? "Pinned Location"
+                actionLocationAddress = act.setLocationAddress
+                actionLatitude = act.setLatitude
+                actionLongitude = act.setLongitude
             }
             if let g = act.setGoalID {
                 enableSetGoal = true
@@ -502,6 +556,15 @@ struct TransactionRuleBuilderSheet: View {
 
         let effectiveCat: SpendCategory? = enableSetCategory ? selectedCategory : nil
 
+        let effectiveLocationName: String? = {
+            guard enableSetLocation else { return nil }
+            let trimmed = actionLocationName.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { return trimmed }
+            if let addr = actionLocationAddress, !addr.isEmpty { return addr }
+            if actionLatitude != nil { return "Pinned Location" }
+            return nil
+        }()
+
         var actions = RuleActions(
             setCategoryRaw: effectiveCat?.rawValue,
             overrideAccountID: enableOverrideAccount ? overrideAccountID : nil,
@@ -509,7 +572,7 @@ struct TransactionRuleBuilderSheet: View {
             toAccountID: (effectiveCat == .internalTransfer) ? toAccountID : nil,
             setMerchant: enableSetMerchant && !actionMerchant.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? actionMerchant.trimmingCharacters(in: .whitespacesAndNewlines) : nil,
             setBank: enableSetBank && !actionBank.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? actionBank.trimmingCharacters(in: .whitespacesAndNewlines) : nil,
-            setLocationName: enableSetLocation && !actionLocationName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? actionLocationName.trimmingCharacters(in: .whitespacesAndNewlines) : nil,
+            setLocationName: effectiveLocationName,
             setLocationAddress: enableSetLocation ? actionLocationAddress : nil,
             setLatitude: enableSetLocation ? actionLatitude : nil,
             setLongitude: enableSetLocation ? actionLongitude : nil,
@@ -786,6 +849,13 @@ struct TransactionRuleRowCard: View {
 
                 if let merchant = rule.actions.setMerchant {
                     Text("• \"\(merchant)\"")
+                        .font(.caption2)
+                        .foregroundStyle(Theme.secondaryInk)
+                        .lineLimit(1)
+                }
+
+                if let loc = rule.actions.setLocationName {
+                    Label(loc, systemImage: "mappin.and.ellipse")
                         .font(.caption2)
                         .foregroundStyle(Theme.secondaryInk)
                         .lineLimit(1)
