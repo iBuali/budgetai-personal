@@ -25,20 +25,34 @@ final class LocationService: NSObject, CLLocationManagerDelegate {
         manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
     }
 
+    /// Fast non-blocking check for a recently cached GPS location
+    var cachedRecentLocation: CLLocation? {
+        guard let loc = manager.location else { return nil }
+        if abs(loc.timestamp.timeIntervalSinceNow) < 900,
+           (-90.0...90.0).contains(loc.coordinate.latitude),
+           (-180.0...180.0).contains(loc.coordinate.longitude),
+           (abs(loc.coordinate.latitude) > 0.0001 || abs(loc.coordinate.longitude) > 0.0001) {
+            return loc
+        }
+        return nil
+    }
+
     @MainActor
-    func captureCurrentLocation(fallbackPlaceName: String? = nil, timeoutSeconds: Double = 3.5) async -> TransactionLocationData? {
+    func captureCurrentLocation(fallbackPlaceName: String? = nil, timeoutSeconds: Double = 1.0) async -> TransactionLocationData? {
+        // Fast-path: use cached recent location without waking GPS hardware
+        if let cached = cachedRecentLocation {
+            return await reverseGeocode(location: cached, fallbackPlaceName: fallbackPlaceName, maxWaitSeconds: 0.8)
+        }
+
         isFetching = true
         lastError = nil
         defer { isFetching = false }
 
-        let status = manager.authorizationStatus
-        if status == .notDetermined {
-            manager.requestWhenInUseAuthorization()
-            try? await Task.sleep(nanoseconds: 500_000_000)
-        }
-
         let currentStatus = manager.authorizationStatus
         guard currentStatus == .authorizedWhenInUse || currentStatus == .authorizedAlways else {
+            if currentStatus == .notDetermined {
+                manager.requestWhenInUseAuthorization()
+            }
             lastError = "Location access is not enabled in Settings."
             return nil
         }
@@ -55,7 +69,7 @@ final class LocationService: NSObject, CLLocationManagerDelegate {
                 }
             }
             group.addTask {
-                let nanoseconds = UInt64(max(0.5, timeoutSeconds) * 1_000_000_000)
+                let nanoseconds = UInt64(max(0.3, timeoutSeconds) * 1_000_000_000)
                 try? await Task.sleep(nanoseconds: nanoseconds)
                 return nil
             }
@@ -75,15 +89,32 @@ final class LocationService: NSObject, CLLocationManagerDelegate {
             return nil
         }
 
-        return await reverseGeocode(location: loc, fallbackPlaceName: fallbackPlaceName)
+        return await reverseGeocode(location: loc, fallbackPlaceName: fallbackPlaceName, maxWaitSeconds: 0.8)
     }
 
-    func reverseGeocode(location: CLLocation, fallbackPlaceName: String? = nil) async -> TransactionLocationData {
-        let geocoder = CLGeocoder()
+    func reverseGeocode(location: CLLocation, fallbackPlaceName: String? = nil, maxWaitSeconds: Double = 0.8) async -> TransactionLocationData {
         var placeName = fallbackPlaceName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         var addressParts: [String] = []
 
-        if let placemarks = try? await geocoder.reverseGeocodeLocation(location), let pm = placemarks.first {
+        let placemark: CLPlacemark? = await withTaskGroup(of: CLPlacemark?.self) { group in
+            group.addTask {
+                let geocoder = CLGeocoder()
+                if let placemarks = try? await geocoder.reverseGeocodeLocation(location), let first = placemarks.first {
+                    return first
+                }
+                return nil
+            }
+            group.addTask {
+                let nanos = UInt64(max(0.2, maxWaitSeconds) * 1_000_000_000)
+                try? await Task.sleep(nanoseconds: nanos)
+                return nil
+            }
+            let res = await group.next() ?? nil
+            group.cancelAll()
+            return res
+        }
+
+        if let pm = placemark {
             if placeName.isEmpty || isGenericPlaceName(placeName) {
                 placeName = pm.name ?? pm.subLocality ?? pm.locality ?? "Current Location"
             }
@@ -100,6 +131,18 @@ final class LocationService: NSObject, CLLocationManagerDelegate {
                 addressParts.append(country)
             }
         }
+
+        if placeName.isEmpty {
+            placeName = "Purchase Location"
+        }
+
+        return TransactionLocationData(
+            name: placeName,
+            address: addressParts.isEmpty ? nil : addressParts.joined(separator: ", "),
+            latitude: location.coordinate.latitude,
+            longitude: location.coordinate.longitude
+        )
+    }
 
         if placeName.isEmpty {
             placeName = "Purchase Location"
@@ -142,19 +185,35 @@ final class LocationService: NSObject, CLLocationManagerDelegate {
            (-90.0...90.0).contains(lat), (-180.0...180.0).contains(lon),
            (abs(lat) > 0.0001 || abs(lon) > 0.0001) {
             let clLoc = CLLocation(latitude: lat, longitude: lon)
-            return await reverseGeocode(location: clLoc, fallbackPlaceName: merchant ?? rawInput)
+            return await reverseGeocode(location: clLoc, fallbackPlaceName: merchant ?? rawInput, maxWaitSeconds: 0.8)
         }
 
         // 2. Coordinate numbers or address passed as rawInput string
         if let raw = rawInput?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty {
             if let coords = Self.parseCoordinates(from: raw) {
                 let clLoc = CLLocation(latitude: coords.latitude, longitude: coords.longitude)
-                return await reverseGeocode(location: clLoc, fallbackPlaceName: merchant)
+                return await reverseGeocode(location: clLoc, fallbackPlaceName: merchant, maxWaitSeconds: 0.8)
             }
 
             if !isGenericPlaceName(raw) {
-                let geocoder = CLGeocoder()
-                if let placemarks = try? await geocoder.geocodeAddressString(raw), let pm = placemarks.first, let loc = pm.location {
+                let placemark: CLPlacemark? = await withTaskGroup(of: CLPlacemark?.self) { group in
+                    group.addTask {
+                        let geocoder = CLGeocoder()
+                        if let placemarks = try? await geocoder.geocodeAddressString(raw), let pm = placemarks.first {
+                            return pm
+                        }
+                        return nil
+                    }
+                    group.addTask {
+                        try? await Task.sleep(nanoseconds: 800_000_000)
+                        return nil
+                    }
+                    let res = await group.next() ?? nil
+                    group.cancelAll()
+                    return res
+                }
+
+                if let pm = placemark, let loc = pm.location {
                     var parts: [String] = []
                     if let thoroughfare = pm.thoroughfare { parts.append(thoroughfare) }
                     if let sub = pm.subLocality, !parts.contains(sub) { parts.append(sub) }
@@ -184,7 +243,7 @@ final class LocationService: NSObject, CLLocationManagerDelegate {
 
         // 3. Automatic GPS capture when triggered by live SMS automation (AddBankSMSIntent)
         if autoCaptureGPS {
-            if let liveGPS = await captureCurrentLocation(fallbackPlaceName: merchant, timeoutSeconds: 3.5) {
+            if let liveGPS = await captureCurrentLocation(fallbackPlaceName: merchant, timeoutSeconds: 1.0) {
                 return liveGPS
             }
         }

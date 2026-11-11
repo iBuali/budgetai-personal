@@ -99,11 +99,15 @@ enum RuleTransferKind: String, Codable, CaseIterable, Identifiable {
 }
 
 struct RuleActions: Codable, Hashable {
-    /// Default action: Set Category.
-    var categoryRaw: String = SpendCategory.other.rawValue
+    /// Optional Category override. If nil, rule leaves transaction category unchanged.
+    var setCategoryRaw: String?
+    /// Legacy field for backward compatibility
+    var categoryRaw: String?
     /// When the rule classifies a transaction as a Transfer, defines whether it is Internal or External.
     var transferKind: RuleTransferKind?
-    /// For Internal Transfers (or general account assignment): From Account (`accountID`).
+    /// Force-routes the transaction to a designated account.
+    var overrideAccountID: UUID?
+    /// For Internal Transfers: From Account (`accountID`).
     var fromAccountID: UUID?
     /// For Internal Transfers: To Account (`toAccountID`).
     var toAccountID: UUID?
@@ -119,13 +123,111 @@ struct RuleActions: Codable, Hashable {
     var setGoalID: UUID?
     var setIsIncome: Bool?
 
-    var category: SpendCategory {
-        get { SpendCategory(rawValue: categoryRaw) ?? .other }
-        set { categoryRaw = newValue.rawValue }
+    enum CodingKeys: String, CodingKey {
+        case setCategoryRaw
+        case categoryRaw
+        case transferKind
+        case overrideAccountID
+        case fromAccountID
+        case toAccountID
+        case setMerchant
+        case setBank
+        case setLocationName
+        case setLocationAddress
+        case setLatitude
+        case setLongitude
+        case setNote
+        case setGoalID
+        case setIsIncome
+    }
+
+    init(
+        setCategoryRaw: String? = nil,
+        categoryRaw: String? = nil,
+        transferKind: RuleTransferKind? = nil,
+        overrideAccountID: UUID? = nil,
+        fromAccountID: UUID? = nil,
+        toAccountID: UUID? = nil,
+        setMerchant: String? = nil,
+        setBank: String? = nil,
+        setLocationName: String? = nil,
+        setLocationAddress: String? = nil,
+        setLatitude: Double? = nil,
+        setLongitude: Double? = nil,
+        setNote: String? = nil,
+        setGoalID: UUID? = nil,
+        setIsIncome: Bool? = nil
+    ) {
+        self.setCategoryRaw = setCategoryRaw ?? categoryRaw
+        self.categoryRaw = self.setCategoryRaw
+        self.transferKind = transferKind
+        self.overrideAccountID = overrideAccountID
+        self.fromAccountID = fromAccountID
+        self.toAccountID = toAccountID
+        self.setMerchant = setMerchant
+        self.setBank = setBank
+        self.setLocationName = setLocationName
+        self.setLocationAddress = setLocationAddress
+        self.setLatitude = setLatitude
+        self.setLongitude = setLongitude
+        self.setNote = setNote
+        self.setGoalID = setGoalID
+        self.setIsIncome = setIsIncome
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let raw = try container.decodeIfPresent(String.self, forKey: .setCategoryRaw)
+            ?? container.decodeIfPresent(String.self, forKey: .categoryRaw)
+        self.setCategoryRaw = raw
+        self.categoryRaw = raw
+        self.transferKind = try container.decodeIfPresent(RuleTransferKind.self, forKey: .transferKind)
+        self.overrideAccountID = try container.decodeIfPresent(UUID.self, forKey: .overrideAccountID)
+        self.fromAccountID = try container.decodeIfPresent(UUID.self, forKey: .fromAccountID)
+        self.toAccountID = try container.decodeIfPresent(UUID.self, forKey: .toAccountID)
+        self.setMerchant = try container.decodeIfPresent(String.self, forKey: .setMerchant)
+        self.setBank = try container.decodeIfPresent(String.self, forKey: .setBank)
+        self.setLocationName = try container.decodeIfPresent(String.self, forKey: .setLocationName)
+        self.setLocationAddress = try container.decodeIfPresent(String.self, forKey: .setLocationAddress)
+        self.setLatitude = try container.decodeIfPresent(Double.self, forKey: .setLatitude)
+        self.setLongitude = try container.decodeIfPresent(Double.self, forKey: .setLongitude)
+        self.setNote = try container.decodeIfPresent(String.self, forKey: .setNote)
+        self.setGoalID = try container.decodeIfPresent(UUID.self, forKey: .setGoalID)
+        self.setIsIncome = try container.decodeIfPresent(Bool.self, forKey: .setIsIncome)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(setCategoryRaw ?? categoryRaw, forKey: .setCategoryRaw)
+        try container.encodeIfPresent(setCategoryRaw ?? categoryRaw, forKey: .categoryRaw)
+        try container.encodeIfPresent(transferKind, forKey: .transferKind)
+        try container.encodeIfPresent(overrideAccountID, forKey: .overrideAccountID)
+        try container.encodeIfPresent(fromAccountID, forKey: .fromAccountID)
+        try container.encodeIfPresent(toAccountID, forKey: .toAccountID)
+        try container.encodeIfPresent(setMerchant, forKey: .setMerchant)
+        try container.encodeIfPresent(setBank, forKey: .setBank)
+        try container.encodeIfPresent(setLocationName, forKey: .setLocationName)
+        try container.encodeIfPresent(setLocationAddress, forKey: .setLocationAddress)
+        try container.encodeIfPresent(setLatitude, forKey: .setLatitude)
+        try container.encodeIfPresent(setLongitude, forKey: .setLongitude)
+        try container.encodeIfPresent(setNote, forKey: .setNote)
+        try container.encodeIfPresent(setGoalID, forKey: .setGoalID)
+        try container.encodeIfPresent(setIsIncome, forKey: .setIsIncome)
+    }
+
+    var category: SpendCategory? {
+        get {
+            guard let raw = setCategoryRaw ?? categoryRaw, !raw.isEmpty else { return nil }
+            return SpendCategory(rawValue: raw)
+        }
+        set {
+            setCategoryRaw = newValue?.rawValue
+            categoryRaw = newValue?.rawValue
+        }
     }
 
     var isTransferCategory: Bool {
-        let cat = category
+        guard let cat = category else { return transferKind != nil }
         return cat == .transfers || cat == .internalTransfer || transferKind != nil
     }
 
@@ -580,14 +682,19 @@ final class TransactionRuleStore {
             tx.isIncome = setIsIncome
         }
 
-        // 2. Category & Transfer handling (Internal vs External Transfer)
+        // 2. Override Account (Force-routes the transaction to designated account)
+        if let overrideID = actions.overrideAccountID ?? actions.fromAccountID {
+            tx.accountID = overrideID
+        }
+
+        // 3. Category & Transfer handling
         if let transferKind = actions.effectiveTransferKind {
             switch transferKind {
             case .internalTransfer:
                 tx.category = .internalTransfer
                 tx.smsTransactionType = .internalTransfer
                 tx.isIncome = false
-                if let fromID = actions.fromAccountID {
+                if let fromID = actions.fromAccountID ?? actions.overrideAccountID {
                     tx.accountID = fromID
                 }
                 if let toID = actions.toAccountID, toID != tx.accountID {
@@ -598,13 +705,13 @@ final class TransactionRuleStore {
                 tx.smsTransactionType = tx.isIncome ? .transferIn : .transferOut
                 tx.toAccountID = nil
                 tx.goalID = nil
-                if let fromID = actions.fromAccountID {
+                if let fromID = actions.fromAccountID ?? actions.overrideAccountID {
                     tx.accountID = fromID
                 }
             }
-        } else {
-            tx.category = actions.category
-            if actions.category.isIncomeCategory {
+        } else if let cat = actions.category {
+            tx.category = cat
+            if cat.isIncomeCategory {
                 tx.isIncome = true
                 if tx.source == .sms {
                     tx.smsTransactionType = .income
@@ -612,10 +719,10 @@ final class TransactionRuleStore {
             } else if tx.source == .sms && (tx.smsTransactionType == nil || tx.smsTransactionType == .unknown || tx.smsTransactionType == .internalTransfer || tx.smsTransactionType == .transferOut) {
                 tx.smsTransactionType = tx.isIncome ? .income : .expense
             }
-            if let fromID = actions.fromAccountID {
+            if let fromID = actions.fromAccountID ?? actions.overrideAccountID {
                 tx.accountID = fromID
             }
-            if actions.category != .internalTransfer && actions.category != .visaTransfer {
+            if cat != .internalTransfer && cat != .visaTransfer {
                 tx.toAccountID = nil
             }
         }

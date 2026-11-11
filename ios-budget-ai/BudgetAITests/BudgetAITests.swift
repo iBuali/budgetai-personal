@@ -1578,4 +1578,95 @@ struct BudgetAITests {
         #expect(intent.latitude == 26.2335)
         #expect(intent.longitude == 50.5414)
     }
+
+    @Test func testEnhancedTransactionRulesEngine() async throws {
+        let store = TransactionRuleStore.shared
+        store.deleteAll()
+
+        let checkingAccount = Account(name: "BisB Checking", kind: .checking, currentBalance: 500)
+        let savingsAccount = Account(name: "ila Savings", kind: .savings, currentBalance: 1000)
+        let designatedAccount = Account(name: "NBB Credit Card", kind: .creditCard, currentBalance: 200)
+
+        // 1. Test optional category: rule with no category leaves original category intact
+        let ruleWithoutCategory = TransactionRule(
+            name: "Merchant Cleanup Rule",
+            isEnabled: true,
+            logic: .and,
+            conditions: [
+                RuleCondition(field: .merchant, value: "TALABAT*123", displayValue: "TALABAT*123")
+            ],
+            actions: RuleActions(
+                setCategoryRaw: nil, // Category switch OFF
+                overrideAccountID: designatedAccount.id,
+                setMerchant: "Talabat Delivery",
+                setBank: "BisB",
+                setLocationName: "Manama",
+                setNote: "Lunch delivery"
+            )
+        )
+        store.addRule(ruleWithoutCategory)
+
+        let tx = MoneyTransaction(
+            title: "TALABAT*123",
+            amount: 4.500,
+            category: .food, // Original category
+            date: .now,
+            isIncome: false,
+            source: .sms,
+            accountID: checkingAccount.id
+        )
+        tx.merchant = "TALABAT*123"
+
+        // Evaluation context matches
+        let context = RuleEvaluationContext(from: tx)
+        #expect(store.matches(rule: ruleWithoutCategory, context: context, ignoreEnabledState: true))
+
+        // Apply rule
+        store.apply(rule: ruleWithoutCategory, to: tx, priorityNumber: 1)
+        #expect(tx.category == .food) // Remains .food because setCategory was not enabled
+        #expect(tx.merchant == "Talabat Delivery") // Cleaned up
+        #expect(tx.accountID == designatedAccount.id) // Override Account force-routed it
+        #expect(tx.smsBank == "BisB")
+        #expect(tx.locationName == "Manama")
+        #expect(tx.note == "Lunch delivery")
+
+        // 2. Test Category-based internal transfer setting from/to accounts
+        let internalTransferRule = TransactionRule(
+            name: "Savings Allocation",
+            isEnabled: true,
+            logic: .and,
+            conditions: [
+                RuleCondition(field: .merchant, value: "Monthly Savings", displayValue: "Monthly Savings")
+            ],
+            actions: RuleActions(
+                setCategoryRaw: SpendCategory.internalTransfer.rawValue,
+                fromAccountID: checkingAccount.id,
+                toAccountID: savingsAccount.id
+            )
+        )
+        store.addRule(internalTransferRule)
+
+        let transferTx = MoneyTransaction(
+            title: "Monthly Savings",
+            amount: 100.000,
+            category: .other,
+            date: .now,
+            isIncome: false,
+            source: .manual
+        )
+        transferTx.merchant = "Monthly Savings"
+
+        store.apply(rule: internalTransferRule, to: transferTx, priorityNumber: 2)
+        #expect(transferTx.category == .internalTransfer)
+        #expect(transferTx.accountID == checkingAccount.id)
+        #expect(transferTx.toAccountID == savingsAccount.id)
+
+        // 3. Test matching filter: only matching rules are returned for tx
+        let allRules = store.rules
+        let matched = allRules.filter { store.matches(rule: $0, context: RuleEvaluationContext(from: tx), ignoreEnabledState: true) }
+        #expect(matched.count == 1)
+        #expect(matched.first?.name == "Merchant Cleanup Rule")
+
+        store.deleteAll()
+    }
 }

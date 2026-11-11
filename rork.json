@@ -1,0 +1,13 @@
+{
+  "apps": [
+    {
+      "name": "Budget AI",
+      "path": "ios-budget-ai",
+      "framework": "swift",
+      "settings": {
+        "swiftSibling": false
+      }
+    }
+  ],
+  "$schema": "https://rork.com/schema/rork.json"
+}

@@ -479,15 +479,27 @@ enum SMSImporter {
         var parsed: ParsedSMS? = deterministic
         var usedAI = false
 
-        // 2. Use AI only as a fallback when deterministic parsing is nil or uncertain
+        // 2. Use AI only as a fallback when deterministic parsing is nil or uncertain (bounded to 1.5s to avoid Shortcuts watchdog timeouts)
         if (deterministic == nil || deterministic?.requiresReview == true) && GeminiAccount.isConfigured {
             do {
-                if let aiParsed = try await AIService.parseSMS(trimmed, sender: effectiveSender, context: context) {
+                let aiParsed: ParsedSMS? = try await withThrowingTaskGroup(of: ParsedSMS?.self) { group in
+                    group.addTask {
+                        try await AIService.parseSMS(trimmed, sender: effectiveSender, context: context)
+                    }
+                    group.addTask {
+                        try await Task.sleep(nanoseconds: 1_500_000_000)
+                        return nil
+                    }
+                    let res = try await group.next() ?? nil
+                    group.cancelAll()
+                    return res
+                }
+                if let aiParsed {
                     parsed = aiParsed
                     usedAI = true
                 }
             } catch {
-                // Keep deterministic result on AI error
+                // Keep deterministic result on AI error or timeout
             }
         }
 
