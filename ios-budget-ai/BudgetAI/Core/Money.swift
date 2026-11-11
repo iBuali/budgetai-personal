@@ -12,6 +12,10 @@ enum Keys {
     static let smsAutoApprove = "smsAutoApprove"
     static let smsAccountID = "smsAccountID"
     static let smsSyncBalance = "smsSyncBalance"
+    static let iCloudAutoBackupEnabled = "iCloudAutoBackupEnabled"
+    static let iCloudBackupSchedule = "iCloudBackupSchedule"
+    static let iCloudLastBackupDate = "iCloudLastBackupDate"
+    static let iCloudLastBackupStatus = "iCloudLastBackupStatus"
 }
 
 enum AppSettings {

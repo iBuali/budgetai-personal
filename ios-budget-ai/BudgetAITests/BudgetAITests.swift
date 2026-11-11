@@ -1676,4 +1676,87 @@ struct BudgetAITests {
 
         store.deleteAll()
     }
+
+    @Test func testICloudBackupAndRestoreFeature() async throws {
+        let context = makeCleanContext()
+        let backupService = ICloudBackupService.shared
+
+        // 1. Setup sample data
+        let acc1 = Account(name: "ila Main", kind: .bank, balance: 1250.0)
+        let acc2 = Account(name: "BisB Credit", kind: .creditCard, balance: 340.0)
+        context.insert(acc1)
+        context.insert(acc2)
+
+        let tx1 = MoneyTransaction(amount: 15.500, isIncome: false, merchant: "Alosra Supermarket", category: .groceries, date: .now, source: .sms, accountID: acc1.id)
+        tx1.smsReference = "REF9901"
+        let tx2 = MoneyTransaction(amount: 450.000, isIncome: true, merchant: "Salary Transfer", category: .income, date: .now, source: .sms, accountID: acc1.id)
+        context.insert(tx1)
+        context.insert(tx2)
+
+        let budget = Budget(name: "Monthly Groceries", categories: [.groceries], limit: 120.0)
+        context.insert(budget)
+
+        let rule = TransactionRule(
+            name: "Alosra Auto Rule",
+            isEnabled: true,
+            logic: .and,
+            conditions: [RuleCondition(field: .merchant, value: "Alosra", displayValue: "Alosra")],
+            actions: RuleActions(setCategoryRaw: SpendCategory.groceries.rawValue)
+        )
+        TransactionRuleStore.shared.addRule(rule)
+
+        try context.save()
+
+        // 2. Test Backup Creation
+        let metadata = try await backupService.createBackup(context: context)
+        #expect(metadata.transactionsCount >= 2)
+        #expect(metadata.accountsCount >= 2)
+        #expect(metadata.rulesCount >= 1)
+        #expect(!metadata.sha256Checksum.isEmpty)
+        #expect(metadata.fileSizeBytes > 0)
+        #expect(backupService.lastBackupDate != nil)
+
+        // Verify available backups list contains this backup
+        backupService.refreshAvailableBackups()
+        #expect(backupService.availableBackups.contains(where: { $0.id == metadata.id }))
+
+        // 3. Test Restore with Deduplication (Merge Mode)
+        // Add a new local transaction that is not in the backup
+        let newTx = MoneyTransaction(amount: 3.200, isIncome: false, merchant: "Costa Coffee", category: .dining, date: .now, source: .manual, accountID: acc1.id)
+        context.insert(newTx)
+        try context.save()
+
+        let mergeSummary = try await backupService.restoreBackup(from: metadata, mode: .merge, context: context)
+        #expect(mergeSummary.mode == .merge)
+        // tx1 and tx2 already exist, so they should be detected as duplicates and skipped
+        #expect(mergeSummary.skippedDuplicateTransactionsCount >= 2)
+
+        // Verify all 3 transactions exist (no duplicates created)
+        let allTx = try context.fetch(FetchDescriptor<MoneyTransaction>())
+        let alosraCount = allTx.filter { $0.merchant == "Alosra Supermarket" }.count
+        #expect(alosraCount == 1) // NOT duplicated!
+        #expect(allTx.contains(where: { $0.merchant == "Costa Coffee" })) // Preserved!
+
+        // 4. Test Restore in Replace Mode
+        let replaceSummary = try await backupService.restoreBackup(from: metadata, mode: .replace, context: context)
+        #expect(replaceSummary.mode == .replace)
+        #expect(replaceSummary.restoredTransactionsCount >= 2)
+
+        // 5. Test Automatic Backup Schedule Settings
+        backupService.isAutoBackupEnabled = true
+        backupService.autoBackupSchedule = .weekly
+        #expect(backupService.isAutoBackupEnabled == true)
+        #expect(backupService.autoBackupSchedule == .weekly)
+        #expect(backupService.autoBackupSchedule.intervalDays == 7)
+
+        backupService.autoBackupSchedule = .daily
+        #expect(backupService.autoBackupSchedule.intervalDays == 1)
+
+        backupService.autoBackupSchedule = .monthly
+        #expect(backupService.autoBackupSchedule.intervalDays == 30)
+
+        // Clean up backup file
+        backupService.deleteBackup(metadata)
+        TransactionRuleStore.shared.deleteAll()
+    }
 }

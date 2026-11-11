@@ -114,6 +114,12 @@ struct ProfileView: View {
                 }
 
                 Section {
+                    NavigationLink {
+                        ICloudBackupView()
+                    } label: {
+                        row("iCloud Backup & Restore", "icloud.and.arrow.up.fill", Theme.cobalt,
+                            value: ICloudBackupService.shared.lastBackupDate != nil ? "Protected" : "Setup")
+                    }
                     Button { confirmSample = true } label: {
                         row("Load sample data", "wand.and.stars", SpendCategory.shopping.color)
                     }
@@ -121,9 +127,9 @@ struct ProfileView: View {
                         Label("Erase all data", systemImage: "trash").foregroundStyle(Theme.negative)
                     }
                 } header: {
-                    Text("Data")
+                    Text("Data & Backup")
                 } footer: {
-                    Label("All data stays on this iPhone.", systemImage: "lock.fill")
+                    Label("Financial data is stored locally and securely backed up to your personal iCloud.", systemImage: "lock.shield.fill")
                         .font(.footnote)
                         .frame(maxWidth: .infinity)
                         .padding(.top, 12)

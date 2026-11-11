@@ -80,12 +80,14 @@ struct RootView: View {
             SMSImporter.reconcileExistingTransactions(context: context)
             Ledger.recordSnapshot(context: context)
             Ledger.refreshCardReminders(context: context)
+            ICloudBackupService.shared.performAutoBackupIfDue(context: context)
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .background && faceID { locked = true }
             if phase == .active {
                 SMSImporter.reconcileExistingTransactions(context: context)
                 if faceID && locked { authenticate() }
+                ICloudBackupService.shared.performAutoBackupIfDue(context: context)
             }
         }
     }
