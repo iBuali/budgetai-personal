@@ -1014,7 +1014,11 @@ struct TransactionDetailView: View {
             }
         }
         .sheet(isPresented: $showLocationPicker) {
-            LocationPickerSheet(initialName: tx.locationName ?? tx.merchant) { loc in
+            LocationPickerSheet(
+                initialName: tx.locationName ?? tx.merchant,
+                initialLatitude: tx.latitude,
+                initialLongitude: tx.longitude
+            ) { loc in
                 tx.locationName = loc.name
                 tx.locationAddress = loc.address
                 tx.latitude = loc.latitude
@@ -1401,9 +1405,6 @@ struct TransactionDetailView: View {
                     address: loc.address,
                     latitude: loc.latitude,
                     longitude: loc.longitude,
-                    onCaptureCurrent: {
-                        captureGPSLocation()
-                    },
                     onSearchPlace: {
                         showLocationPicker = true
                     },
@@ -1418,50 +1419,19 @@ struct TransactionDetailView: View {
                 .listRowInsets(EdgeInsets())
                 .listRowBackground(Color.clear)
             } else {
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(spacing: 10) {
-                        Image(systemName: "map.fill")
-                            .font(.title3)
-                            .foregroundStyle(Theme.brand)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Add Purchase Location")
-                                .font(.subheadline.weight(.semibold))
-                                .foregroundStyle(Theme.ink)
-                            Text("Show a map and place of purchase like Apple Wallet.")
-                                .font(.caption)
-                                .foregroundStyle(Theme.secondaryInk)
-                        }
+                Button {
+                    showLocationPicker = true
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "mappin.and.ellipse")
+                        Text("Add Location / Search on Map")
                     }
-
-                    HStack(spacing: 10) {
-                        Button {
-                            captureGPSLocation()
-                        } label: {
-                            HStack(spacing: 6) {
-                                if isCapturingGPS {
-                                    ProgressView().controlSize(.small)
-                                } else {
-                                    Image(systemName: "location.fill")
-                                }
-                                Text("Current Location")
-                            }
-                            .font(.caption.weight(.semibold))
-                            .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .tint(Theme.brand)
-                        .disabled(isCapturingGPS)
-
-                        Button {
-                            showLocationPicker = true
-                        } label: {
-                            Label("Search Place", systemImage: "magnifyingglass")
-                                .font(.caption.weight(.semibold))
-                                .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.bordered)
-                    }
+                    .font(.subheadline.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
                 }
+                .buttonStyle(.borderedProminent)
+                .tint(Theme.brand)
                 .padding(.vertical, 4)
             }
         }

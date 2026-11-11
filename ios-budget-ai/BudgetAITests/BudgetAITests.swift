@@ -2014,4 +2014,41 @@ struct BudgetAITests {
         let matched = StatementService.matchAccount(ibanOrAcc: nil, cardLast4: "9012", bank: "BisB", in: accounts)
         #expect(matched?.id == card.id)
     }
+
+    // MARK: - 10. Transaction Location Search & Interactive Map Pin Tests
+
+    @Test func testLocationSearchAndPinCoordinateData() throws {
+        // Test TransactionLocationData initialization and coordinate precision
+        let mallLocation = TransactionLocationData(
+            name: "City Centre Bahrain",
+            address: "Seef District, Manama, Bahrain",
+            latitude: 26.2336,
+            longitude: 50.5532
+        )
+
+        #expect(mallLocation.name == "City Centre Bahrain")
+        #expect(mallLocation.address?.contains("Seef") == true)
+        #expect(abs(mallLocation.latitude! - 26.2336) < 0.0001)
+        #expect(abs(mallLocation.longitude! - 50.5532) < 0.0001)
+
+        // Test saving location into MoneyTransaction
+        let tx = MoneyTransaction(
+            amount: 14.500,
+            isIncome: false,
+            merchant: "Carrefour Seef",
+            category: .groceries,
+            date: .now,
+            source: .manual
+        )
+
+        tx.locationName = mallLocation.name
+        tx.locationAddress = mallLocation.address
+        tx.latitude = mallLocation.latitude
+        tx.longitude = mallLocation.longitude
+
+        #expect(tx.hasLocation == true)
+        #expect(tx.locationName == "City Centre Bahrain")
+        #expect(tx.latitude != nil)
+        #expect(tx.longitude != nil)
+    }
 }

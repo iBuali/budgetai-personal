@@ -453,26 +453,19 @@ struct TransactionLocationCard: View {
 
                 Spacer()
 
-                if onCaptureCurrent != nil || onSearchPlace != nil || onRemove != nil {
+                if onSearchPlace != nil || onRemove != nil {
                     Menu {
                         if let onSearchPlace {
                             Button {
                                 onSearchPlace()
                             } label: {
-                                Label("Change / Search Place", systemImage: "magnifyingglass")
-                            }
-                        }
-                        if let onCaptureCurrent {
-                            Button {
-                                onCaptureCurrent()
-                            } label: {
-                                Label("Use Current GPS Location", systemImage: "location.fill")
+                                Label("Edit Location / Move Pin", systemImage: "map.fill")
                             }
                         }
                         Button {
                             openInAppleMaps()
                         } label: {
-                            Label("Open in Apple Maps", systemImage: "map")
+                            Label("Open in Apple Maps", systemImage: "arrow.up.right.square")
                         }
                         if let onRemove {
                             Divider()
@@ -510,126 +503,55 @@ struct TransactionLocationCard: View {
     }
 }
 
-// MARK: - Location Picker Sheet
+// MARK: - Location Picker Sheet (Search + Interactive Movable Pin Map)
 
 struct LocationPickerSheet: View {
     @Environment(\.dismiss) private var dismiss
     let initialName: String
+    var initialLatitude: Double? = nil
+    var initialLongitude: Double? = nil
     let onSelect: (TransactionLocationData) -> Void
 
+    init(
+        initialName: String,
+        initialLatitude: Double? = nil,
+        initialLongitude: Double? = nil,
+        onSelect: @escaping (TransactionLocationData) -> Void
+    ) {
+        self.initialName = initialName
+        self.initialLatitude = initialLatitude
+        self.initialLongitude = initialLongitude
+        self.onSelect = onSelect
+    }
+
+    // Default coordinate: provided coordinates, or center of Manama, Bahrain (26.2235, 50.5876)
+    @State private var pinCoordinate: CLLocationCoordinate2D = CLLocationCoordinate2D(latitude: 26.2235, longitude: 50.5876)
+    @State private var cameraPosition: MapCameraPosition = .automatic
+    @State private var placeName: String = ""
+    @State private var placeAddress: String = ""
     @State private var searchQuery: String = ""
-    @State private var customPlaceName: String = ""
-    @State private var customAddress: String = ""
-    @State private var results: [TransactionLocationData] = []
+    @State private var searchResults: [TransactionLocationData] = []
     @State private var isSearching = false
-    @State private var isCapturingGPS = false
+    @State private var isReverseGeocoding = false
+    @State private var hasDroppedPin: Bool = false
+    @State private var reverseGeocodeTask: Task<Void, Never>? = nil
 
     var body: some View {
         NavigationStack {
-            List {
-                Section {
-                    Button {
-                        Task {
-                            isCapturingGPS = true
-                            if let loc = await LocationService.shared.captureCurrentLocation(fallbackPlaceName: initialName.isEmpty ? nil : initialName) {
-                                onSelect(loc)
-                                dismiss()
-                            }
-                            isCapturingGPS = false
-                        }
-                    } label: {
-                        HStack(spacing: 12) {
-                            Image(systemName: "location.fill")
-                                .foregroundStyle(.white)
-                                .frame(width: 32, height: 32)
-                                .background(Theme.brand, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Use Current Location")
-                                    .font(.subheadline.weight(.semibold))
-                                    .foregroundStyle(Theme.ink)
-                                Text("Capture GPS coordinates and place name now")
-                                    .font(.caption)
-                                    .foregroundStyle(Theme.secondaryInk)
-                            }
-                            Spacer()
-                            if isCapturingGPS {
-                                ProgressView()
-                            }
-                        }
-                    }
-                    .disabled(isCapturingGPS)
+            VStack(spacing: 0) {
+                // Top Search Bar
+                searchHeaderView
+
+                // Search Results Dropdown List (if search is active with results)
+                if !searchResults.isEmpty {
+                    searchResultsListView
                 }
 
-                Section("Search Place on Map") {
-                    HStack {
-                        Image(systemName: "magnifyingglass")
-                            .foregroundStyle(.secondary)
-                        TextField("Search store, restaurant, mall...", text: $searchQuery)
-                            .submitLabel(.search)
-                            .onSubmit {
-                                runSearch()
-                            }
-                        if isSearching {
-                            ProgressView()
-                        } else if !searchQuery.isEmpty {
-                            Button("Search") {
-                                runSearch()
-                            }
-                            .font(.subheadline.weight(.semibold))
-                        }
-                    }
+                // Interactive Map View with Movable Pin
+                interactiveMapView
 
-                    ForEach(Array(results.enumerated()), id: \.offset) { _, item in
-                        Button {
-                            onSelect(item)
-                            dismiss()
-                        } label: {
-                            HStack(spacing: 10) {
-                                Image(systemName: "mappin.circle.fill")
-                                    .font(.title3)
-                                    .foregroundStyle(Theme.brand)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(item.name)
-                                        .font(.subheadline.weight(.semibold))
-                                        .foregroundStyle(Theme.ink)
-                                    if let addr = item.address {
-                                        Text(addr)
-                                            .font(.caption)
-                                            .foregroundStyle(Theme.secondaryInk)
-                                    }
-                                }
-                                Spacer()
-                            }
-                        }
-                    }
-                }
-
-                Section("Or Enter Place Name") {
-                    TextField("Place of purchase (e.g. City Centre Bahrain)", text: $customPlaceName)
-                    TextField("Area / Address (optional)", text: $customAddress)
-                    Button("Save Place Name") {
-                        let cleanName = customPlaceName.trimmingCharacters(in: .whitespacesAndNewlines)
-                        guard !cleanName.isEmpty else { return }
-                        if let inferred = LocationService.inferLocation(from: "\(cleanName) \(customAddress)", merchant: cleanName) {
-                            onSelect(TransactionLocationData(
-                                name: cleanName,
-                                address: customAddress.isEmpty ? inferred.address : customAddress,
-                                latitude: inferred.latitude,
-                                longitude: inferred.longitude
-                            ))
-                        } else {
-                            onSelect(TransactionLocationData(
-                                name: cleanName,
-                                address: customAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : customAddress.trimmingCharacters(in: .whitespacesAndNewlines),
-                                latitude: 26.2235,
-                                longitude: 50.5876
-                            ))
-                        }
-                        dismiss()
-                    }
-                    .disabled(customPlaceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    .font(.subheadline.weight(.semibold))
-                }
+                // Bottom Selected Location Card & Actions
+                bottomLocationCard
             }
             .navigationTitle("Transaction Location")
             .navigationBarTitleDisplayMode(.inline)
@@ -637,24 +559,321 @@ struct LocationPickerSheet: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
                 }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") {
+                        saveAndDismiss()
+                    }
+                    .fontWeight(.semibold)
+                    .disabled(placeName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !hasDroppedPin)
+                }
             }
-            .onAppear {
-                if !initialName.isEmpty {
-                    customPlaceName = initialName
-                    searchQuery = initialName
-                    runSearch()
+            .onAppear(perform: initializeLocation)
+        }
+    }
+
+    // MARK: - Subviews
+
+    private var searchHeaderView: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 10) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.secondary)
+
+                TextField("Search place, store, cafe, mall...", text: $searchQuery)
+                    .submitLabel(.search)
+                    .autocorrectionDisabled()
+                    .onSubmit {
+                        performSearch()
+                    }
+
+                if isSearching {
+                    ProgressView()
+                        .scaleEffect(0.8)
+                } else if !searchQuery.isEmpty {
+                    Button {
+                        searchQuery = ""
+                        searchResults = []
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                if !searchQuery.isEmpty && searchResults.isEmpty {
+                    Button("Search") {
+                        performSearch()
+                    }
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Theme.brand)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(Theme.track.opacity(0.6), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .padding(.horizontal, 16)
+            .padding(.top, 8)
+            .padding(.bottom, 6)
+        }
+        .background(Theme.surface)
+    }
+
+    private var searchResultsListView: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                ForEach(searchResults, id: \.self) { result in
+                    Button {
+                        selectSearchResult(result)
+                    } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: "mappin.circle.fill")
+                                .font(.title3)
+                                .foregroundStyle(Theme.brand)
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(result.name)
+                                    .font(.subheadline.weight(.semibold))
+                                    .foregroundStyle(Theme.ink)
+                                    .lineLimit(1)
+                                if let addr = result.address, !addr.isEmpty {
+                                    Text(addr)
+                                        .font(.caption)
+                                        .foregroundStyle(Theme.secondaryInk)
+                                        .lineLimit(1)
+                                }
+                            }
+                            Spacer()
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(Theme.surface)
+                    }
+                    .buttonStyle(.plain)
+
+                    Divider().padding(.leading, 44)
+                }
+            }
+        }
+        .frame(maxHeight: 220)
+        .background(Theme.surface)
+        .shadow(color: Color.black.opacity(0.08), radius: 6, y: 4)
+    }
+
+    private var interactiveMapView: some View {
+        ZStack {
+            // Interactive Map Reader supporting user taps anywhere to drop/move the pin
+            MapReader { reader in
+                Map(position: $cameraPosition) {
+                    if hasDroppedPin {
+                        Marker(placeName.isEmpty ? "Selected Location" : placeName, coordinate: pinCoordinate)
+                            .tint(Theme.brand)
+                    }
+                }
+                .mapStyle(.standard(elevation: .realistic))
+                .onTapGesture { screenPoint in
+                    // Manually drop/move pin where user taps on the interactive map
+                    if let tappedCoord = reader.convert(screenPoint, from: .local) {
+                        movePin(to: tappedCoord)
+                    }
+                }
+            }
+
+            // Floating helper pill for instructions
+            VStack {
+                HStack(spacing: 6) {
+                    Image(systemName: "hand.tap.fill")
+                        .font(.caption2)
+                    Text("Tap anywhere on the map to drop or move the pin")
+                        .font(.caption2.weight(.medium))
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(.ultraThinMaterial, in: Capsule())
+                .shadow(color: Color.black.opacity(0.1), radius: 4, y: 2)
+                .padding(.top, 12)
+
+                Spacer()
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var bottomLocationCard: some View {
+        VStack(spacing: 10) {
+            HStack(alignment: .top, spacing: 12) {
+                ZStack {
+                    Circle()
+                        .fill(Theme.brand.gradient)
+                        .frame(width: 40, height: 40)
+                    Image(systemName: "mappin")
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundStyle(.white)
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        TextField("Location Name", text: $placeName)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(Theme.ink)
+                        if isReverseGeocoding {
+                            ProgressView()
+                                .scaleEffect(0.7)
+                        }
+                    }
+
+                    if !placeAddress.isEmpty {
+                        Text(placeAddress)
+                            .font(.caption)
+                            .foregroundStyle(Theme.secondaryInk)
+                            .lineLimit(2)
+                    }
+
+                    HStack(spacing: 8) {
+                        Text(String(format: "Lat: %.5f", pinCoordinate.latitude))
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(Theme.secondaryInk)
+                        Text("•")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        Text(String(format: "Lon: %.5f", pinCoordinate.longitude))
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(Theme.secondaryInk)
+                    }
+                }
+
+                Spacer()
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+
+            // Save Confirmation Button
+            Button {
+                saveAndDismiss()
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.circle.fill")
+                    Text("Set Location")
+                }
+                .font(.headline)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+                .background(Theme.brand, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .foregroundStyle(.white)
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 12)
+        }
+        .background(Theme.surface)
+        .overlay(alignment: .top) {
+            Divider()
+        }
+    }
+
+    // MARK: - Actions & Location Logic
+
+    private func initializeLocation() {
+        if let lat = initialLatitude, let lon = initialLongitude,
+           (-90.0...90.0).contains(lat), (-180.0...180.0).contains(lon),
+           (abs(lat) > 0.0001 || abs(lon) > 0.0001) {
+            let coord = CLLocationCoordinate2D(latitude: lat, longitude: lon)
+            pinCoordinate = coord
+            hasDroppedPin = true
+            placeName = initialName
+            cameraPosition = .region(MKCoordinateRegion(
+                center: coord,
+                span: MKCoordinateSpan(latitudeDelta: 0.012, longitudeDelta: 0.012)
+            ))
+            scheduleReverseGeocode(for: coord, preserveExistingName: !initialName.isEmpty)
+        } else if !initialName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            placeName = initialName
+            searchQuery = initialName
+            hasDroppedPin = true
+            performSearch()
+        } else {
+            hasDroppedPin = true
+            cameraPosition = .region(MKCoordinateRegion(
+                center: pinCoordinate,
+                span: MKCoordinateSpan(latitudeDelta: 0.05, longitudeDelta: 0.05)
+            ))
+            scheduleReverseGeocode(for: pinCoordinate, preserveExistingName: false)
+        }
+    }
+
+    private func performSearch() {
+        let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return }
+
+        isSearching = true
+        Task {
+            let results = await LocationService.shared.searchPlaces(query: q)
+            await MainActor.run {
+                self.searchResults = results
+                self.isSearching = false
+                // Auto-center map to the first result if available
+                if let first = results.first, let lat = first.latitude, let lon = first.longitude {
+                    selectSearchResult(first)
                 }
             }
         }
     }
 
-    private func runSearch() {
-        let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !q.isEmpty else { return }
-        Task {
-            isSearching = true
-            results = await LocationService.shared.searchPlaces(query: q)
-            isSearching = false
+    private func selectSearchResult(_ result: TransactionLocationData) {
+        if let lat = result.latitude, let lon = result.longitude {
+            let coord = CLLocationCoordinate2D(latitude: lat, longitude: lon)
+            pinCoordinate = coord
+            hasDroppedPin = true
+            placeName = result.name
+            placeAddress = result.address ?? ""
+            searchResults = [] // Close dropdown
+            withAnimation(.easeInOut(duration: 0.35)) {
+                cameraPosition = .region(MKCoordinateRegion(
+                    center: coord,
+                    span: MKCoordinateSpan(latitudeDelta: 0.008, longitudeDelta: 0.008)
+                ))
+            }
         }
+    }
+
+    private func movePin(to newCoordinate: CLLocationCoordinate2D) {
+        pinCoordinate = newCoordinate
+        hasDroppedPin = true
+        scheduleReverseGeocode(for: newCoordinate, preserveExistingName: false)
+    }
+
+    private func scheduleReverseGeocode(for coord: CLLocationCoordinate2D, preserveExistingName: Bool) {
+        reverseGeocodeTask?.cancel()
+        isReverseGeocoding = true
+
+        reverseGeocodeTask = Task {
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard !Task.isCancelled else { return }
+
+            let clLoc = CLLocation(latitude: coord.latitude, longitude: coord.longitude)
+            let data = await LocationService.shared.reverseGeocode(location: clLoc, fallbackPlaceName: nil, maxWaitSeconds: 1.0)
+
+            await MainActor.run {
+                self.isReverseGeocoding = false
+                if !preserveExistingName || self.placeName.isEmpty {
+                    self.placeName = data.name
+                }
+                if let addr = data.address, !addr.isEmpty {
+                    self.placeAddress = addr
+                }
+            }
+        }
+    }
+
+    private func saveAndDismiss() {
+        let cleanName = placeName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let finalName = cleanName.isEmpty ? "Selected Location" : cleanName
+        let finalAddress = placeAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : placeAddress
+
+        onSelect(TransactionLocationData(
+            name: finalName,
+            address: finalAddress,
+            latitude: pinCoordinate.latitude,
+            longitude: pinCoordinate.longitude
+        ))
+        dismiss()
     }
 }

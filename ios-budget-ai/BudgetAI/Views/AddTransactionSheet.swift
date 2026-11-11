@@ -111,41 +111,25 @@ struct AddTransactionSheet: View {
                                 address: loc.address,
                                 latitude: loc.latitude,
                                 longitude: loc.longitude,
-                                onCaptureCurrent: { captureCurrentLocation() },
                                 onSearchPlace: { showLocationPicker = true },
                                 onRemove: { locationData = nil }
                             )
                             .listRowInsets(EdgeInsets())
                             .listRowBackground(Color.clear)
                         } else {
-                            HStack(spacing: 10) {
-                                Button {
-                                    captureCurrentLocation()
-                                } label: {
-                                    HStack(spacing: 6) {
-                                        if isCapturingGPS {
-                                            ProgressView().controlSize(.small)
-                                        } else {
-                                            Image(systemName: "location.fill")
-                                        }
-                                        Text("Current Location")
-                                    }
-                                    .font(.caption.weight(.semibold))
-                                    .frame(maxWidth: .infinity)
+                            Button {
+                                showLocationPicker = true
+                            } label: {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "mappin.and.ellipse")
+                                    Text("Add Location / Search on Map")
                                 }
-                                .buttonStyle(.borderedProminent)
-                                .tint(Theme.brand)
-                                .disabled(isCapturingGPS)
-
-                                Button {
-                                    showLocationPicker = true
-                                } label: {
-                                    Label("Search Place", systemImage: "magnifyingglass")
-                                        .font(.caption.weight(.semibold))
-                                        .frame(maxWidth: .infinity)
-                                }
-                                .buttonStyle(.bordered)
+                                .font(.subheadline.weight(.semibold))
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 8)
                             }
+                            .buttonStyle(.borderedProminent)
+                            .tint(Theme.brand)
                             .padding(.vertical, 4)
                         }
                     }
@@ -173,7 +157,11 @@ struct AddTransactionSheet: View {
                 amountFocused = true
             }
             .sheet(isPresented: $showLocationPicker) {
-                LocationPickerSheet(initialName: locationData?.name ?? merchant) { loc in
+                LocationPickerSheet(
+                    initialName: locationData?.name ?? merchant,
+                    initialLatitude: locationData?.latitude,
+                    initialLongitude: locationData?.longitude
+                ) { loc in
                     locationData = loc
                 }
             }
