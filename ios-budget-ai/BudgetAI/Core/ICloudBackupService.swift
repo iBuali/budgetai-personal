@@ -318,6 +318,19 @@ final class ICloudBackupService {
     }
 
     func checkICloudAvailability() {
+        // In unsigned test environments, running CloudKit causes a crash because entitlements are missing.
+        #if targetEnvironment(simulator)
+        let isRunningInSimulator = true
+        #else
+        let isRunningInSimulator = false
+        #endif
+
+        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil || isRunningInSimulator {
+            // Running under unit tests or unsigned simulator: safely skip CloudKit IPC
+            self.isICloudAvailable = false
+            return
+        }
+
         let token = FileManager.default.ubiquityIdentityToken
         if token != nil {
             self.isICloudAvailable = true
@@ -967,6 +980,7 @@ final class ICloudBackupService {
     // MARK: - CloudKit Private Database Sync
 
     private func uploadToCloudKit(metadata: BackupMetadata, fileURL: URL) async {
+        guard isICloudAvailable else { return }
         let recordID = CKRecord.ID(recordName: metadata.id.uuidString)
         let record = CKRecord(recordType: cloudKitRecordType, recordID: recordID)
         record["deviceName"] = metadata.deviceName as CKRecordValue
