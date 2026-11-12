@@ -42,9 +42,10 @@ enum StatementPDFTable {
             }
             if current == nil {
                 current = Word(text: character, rect: flipped)
-            } else {
-                current?.text += character
-                current?.rect = current!.rect.union(flipped)
+            } else if var word = current {
+                word.text += character
+                word.rect = word.rect.union(flipped)
+                current = word
             }
         }
         flush()
