@@ -53,7 +53,8 @@ enum StatementPDFTable {
             }
         }
 
-        if result.contains(where: { $0.text.trimmingCharacters(in: .punctuationCharacters).lowercased().contains("description") }) {
+        let clean: (String) -> String = { $0.trimmingCharacters(in: .punctuationCharacters).lowercased() }
+        if result.contains(where: { clean($0.text) == "description" }) {
             return result
         }
 
@@ -73,9 +74,9 @@ enum StatementPDFTable {
             }
             let flipped = CGRect(x: rect.minX, y: bounds.maxY - rect.maxY, width: rect.width, height: rect.height)
             if let previous = current,
-               (abs(previous.rect.midY - flipped.midY) > max(10, flipped.height * 1.0) ||
-                flipped.minX - previous.rect.maxX > max(8, flipped.height * 0.8) ||
-                flipped.maxX < previous.rect.minX - 4) {
+               (abs(previous.rect.midY - flipped.midY) > max(8, flipped.height * 0.8) ||
+                flipped.minX - previous.rect.maxX > max(6, flipped.height * 0.6) ||
+                flipped.maxX < previous.rect.minX - 2) {
                 flush()
             }
             if current == nil {
@@ -92,11 +93,11 @@ enum StatementPDFTable {
 
     private static func layout(in words: [Word], width: CGFloat) -> Layout? {
         let cleanWord: (String) -> String = { $0.trimmingCharacters(in: .punctuationCharacters).lowercased() }
-        for desc in words where cleanWord(desc.text) == "description" || cleanWord(desc.text).contains("description") {
-            let near = words.filter { abs($0.rect.minY - desc.rect.minY) < max(28, desc.rect.height * 2.5) }
+        for desc in words where cleanWord(desc.text) == "description" {
+            let near = words.filter { abs($0.rect.minY - desc.rect.minY) < max(18, desc.rect.height * 1.7) }
             let dates = near.filter { cleanWord($0.text) == "date" }.sorted { $0.rect.minX < $1.rect.minX }
             let amounts = near.filter { cleanWord($0.text) == "amount" }.sorted { $0.rect.minX < $1.rect.minX }
-            guard let firstDate = dates.first else { continue }
+            guard let firstDate = dates.first, !amounts.isEmpty else { continue }
             func find(_ text: String) -> Word? { near.first { cleanWord($0.text) == text } }
             let headerBottom = (near.map(\.rect.maxY).max() ?? desc.rect.maxY) + 1
             let card = find("vat") != nil && find("currency") != nil && dates.count > 1 && amounts.count > 1
@@ -108,23 +109,15 @@ enum StatementPDFTable {
                 let descriptionStart = (near.filter { $0.rect.minX < firstDate.rect.maxX }.map(\.rect.maxX).max() ?? dateEnd) + 5
                 cuts = [0, descriptionStart, amounts[0].rect.minX - 10, amounts[1].rect.minX - 10, balance.rect.minX - 10, width]
                 headers = ["Date", "Description", "Debit", "Credit", "Balance"]
-            } else if find("debit") != nil, find("credit") != nil, let balance = find("balance"), let debit = find("debit"), let credit = find("credit") {
-                let descriptionStart = (near.filter { $0.rect.minX < firstDate.rect.maxX }.map(\.rect.maxX).max() ?? dateEnd) + 5
-                cuts = [0, descriptionStart, debit.rect.minX - 10, credit.rect.minX - 10, balance.rect.minX - 10, width]
-                headers = ["Date", "Description", "Debit", "Credit", "Balance"]
-            } else if card, let currency = find("currency"), let vat = find("vat"), !amounts.isEmpty {
-                dateEnd = dates.count > 1 ? dates[1].rect.minX - 5 : firstDate.rect.maxX + 8
-                let secondAmtX = amounts.count > 1 ? amounts[1].rect.minX - 8 : vat.rect.minX - 30
+            } else if card, let currency = find("currency"), let vat = find("vat") {
+                dateEnd = dates[1].rect.minX - 5
                 cuts = [0, dateEnd, desc.rect.minX - 8, currency.rect.minX - 8,
-                        amounts[0].rect.minX - 8, secondAmtX, vat.rect.minX - 8, width]
+                        amounts[0].rect.minX - 8, amounts[1].rect.minX - 8, vat.rect.minX - 8, width]
+                // The account-currency amount is deliberately preferred to the foreign amount.
                 headers = ["Date", "Transaction Date", "Description", "Currency", "Foreign Amount", "Amount", "VAT"]
-            } else if let value = find("value"), let balance = find("balance"), !amounts.isEmpty {
+            } else if let value = find("value"), let balance = find("balance") {
                 cuts = [0, desc.rect.minX - 8, value.rect.minX - 8, amounts[0].rect.minX - 8, balance.rect.minX - 8, width]
                 headers = ["Date", "Description", "Value Date", "Amount", "Balance"]
-                dateEnd = cuts[1]
-            } else if let balance = find("balance"), !amounts.isEmpty {
-                cuts = [0, desc.rect.minX - 8, amounts[0].rect.minX - 8, balance.rect.minX - 8, width]
-                headers = ["Date", "Description", "Amount", "Balance"]
                 dateEnd = cuts[1]
             } else {
                 continue
