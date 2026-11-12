@@ -17,13 +17,51 @@ enum StatementPDFTable {
     }
 
     private static func words(on page: PDFPage) -> [Word] {
-        guard let text = page.string else { return [] }
-        let ns = text as NSString
+        guard let text = page.string, !text.isEmpty else { return [] }
         let bounds = page.bounds(for: .mediaBox)
+        let ns = text as NSString
         var result: [Word] = []
+
+        // 1. Primary: Extract word tokens from page.string and retrieve precise PDFKit bounding boxes
+        if let regex = try? NSRegularExpression(pattern: #"\S+"#) {
+            let matches = regex.matches(in: text, range: NSRange(location: 0, length: ns.length))
+            for match in matches {
+                let token = ns.substring(with: match.range)
+                var box: CGRect = .null
+                if let sel = page.selection(for: match.range) {
+                    let b = sel.bounds(for: page)
+                    if !b.isEmpty && !b.isNull && !b.isInfinite && b.width > 0 && b.height > 0 {
+                        box = b
+                    }
+                }
+                if box.isNull || box.isEmpty {
+                    let start = min(match.range.location, page.numberOfCharacters)
+                    let end = min(match.range.location + match.range.length, page.numberOfCharacters)
+                    if start < end {
+                        for ci in start..<end {
+                            let cb = page.characterBounds(at: ci)
+                            if !cb.isEmpty && !cb.isNull {
+                                box = box.isNull ? cb : box.union(cb)
+                            }
+                        }
+                    }
+                }
+                if !box.isNull && !box.isEmpty {
+                    let flipped = CGRect(x: box.minX, y: bounds.maxY - box.maxY, width: box.width, height: box.height)
+                    result.append(Word(text: token, rect: flipped))
+                }
+            }
+        }
+
+        if result.contains(where: { $0.text.trimmingCharacters(in: .punctuationCharacters).lowercased().contains("description") }) {
+            return result
+        }
+
+        // 2. Secondary fallback: character-by-character bounds with generous tolerances
+        var glyphWords: [Word] = []
         var current: Word?
         func flush() {
-            if let word = current { result.append(word) }
+            if let word = current { glyphWords.append(word) }
             current = nil
         }
         for i in 0..<min(ns.length, page.numberOfCharacters) {
@@ -35,9 +73,9 @@ enum StatementPDFTable {
             }
             let flipped = CGRect(x: rect.minX, y: bounds.maxY - rect.maxY, width: rect.width, height: rect.height)
             if let previous = current,
-               (abs(previous.rect.midY - flipped.midY) > max(2, flipped.height * 0.4) ||
-                flipped.minX - previous.rect.maxX > max(2, flipped.height * 0.3) ||
-                flipped.maxX < previous.rect.minX) {
+               (abs(previous.rect.midY - flipped.midY) > max(10, flipped.height * 1.0) ||
+                flipped.minX - previous.rect.maxX > max(8, flipped.height * 0.8) ||
+                flipped.maxX < previous.rect.minX - 4) {
                 flush()
             }
             if current == nil {
@@ -49,36 +87,49 @@ enum StatementPDFTable {
             }
         }
         flush()
-        return result
+        return !result.isEmpty ? result : glyphWords
     }
 
     private static func layout(in words: [Word], width: CGFloat) -> Layout? {
-        for desc in words where desc.text.lowercased() == "description" {
-            let near = words.filter { abs($0.rect.minY - desc.rect.minY) < max(18, desc.rect.height * 1.7) }
-            let dates = near.filter { $0.text.lowercased() == "date" }.sorted { $0.rect.minX < $1.rect.minX }
-            let amounts = near.filter { $0.text.lowercased() == "amount" }.sorted { $0.rect.minX < $1.rect.minX }
-            guard let firstDate = dates.first, !amounts.isEmpty else { continue }
-            func find(_ text: String) -> Word? { near.first { $0.text.lowercased() == text } }
-            let headerBottom = near.map(\.rect.maxY).max()! + 1
+        let cleanWord: (String) -> String = { $0.trimmingCharacters(in: .punctuationCharacters).lowercased() }
+        for desc in words where cleanWord(desc.text) == "description" || cleanWord(desc.text).contains("description") {
+            let near = words.filter { abs($0.rect.minY - desc.rect.minY) < max(28, desc.rect.height * 2.5) }
+            let dates = near.filter { cleanWord($0.text) == "date" }.sorted { $0.rect.minX < $1.rect.minX }
+            let amounts = near.filter { cleanWord($0.text) == "amount" }.sorted { $0.rect.minX < $1.rect.minX }
+            guard let firstDate = dates.first else { continue }
+            func find(_ text: String) -> Word? { near.first { cleanWord($0.text) == text } }
+            let headerBottom = (near.map(\.rect.maxY).max() ?? desc.rect.maxY) + 1
             let card = find("vat") != nil && find("currency") != nil && dates.count > 1 && amounts.count > 1
             var cuts: [CGFloat]
             var headers: [String]
             var dateEnd = firstDate.rect.maxX + 8
-            if find("debit") != nil, find("credit") != nil, let balance = find("balance"), amounts.count == 2 {
+
+            if find("debit") != nil, find("credit") != nil, let balance = find("balance"), amounts.count >= 2 {
                 let descriptionStart = (near.filter { $0.rect.minX < firstDate.rect.maxX }.map(\.rect.maxX).max() ?? dateEnd) + 5
                 cuts = [0, descriptionStart, amounts[0].rect.minX - 10, amounts[1].rect.minX - 10, balance.rect.minX - 10, width]
                 headers = ["Date", "Description", "Debit", "Credit", "Balance"]
-            } else if card, let currency = find("currency"), let vat = find("vat") {
-                dateEnd = dates[1].rect.minX - 5
+            } else if find("debit") != nil, find("credit") != nil, let balance = find("balance"), let debit = find("debit"), let credit = find("credit") {
+                let descriptionStart = (near.filter { $0.rect.minX < firstDate.rect.maxX }.map(\.rect.maxX).max() ?? dateEnd) + 5
+                cuts = [0, descriptionStart, debit.rect.minX - 10, credit.rect.minX - 10, balance.rect.minX - 10, width]
+                headers = ["Date", "Description", "Debit", "Credit", "Balance"]
+            } else if card, let currency = find("currency"), let vat = find("vat"), !amounts.isEmpty {
+                dateEnd = dates.count > 1 ? dates[1].rect.minX - 5 : firstDate.rect.maxX + 8
+                let secondAmtX = amounts.count > 1 ? amounts[1].rect.minX - 8 : vat.rect.minX - 30
                 cuts = [0, dateEnd, desc.rect.minX - 8, currency.rect.minX - 8,
-                        amounts[0].rect.minX - 8, amounts[1].rect.minX - 8, vat.rect.minX - 8, width]
-                // The account-currency amount is deliberately preferred to the foreign amount.
+                        amounts[0].rect.minX - 8, secondAmtX, vat.rect.minX - 8, width]
                 headers = ["Date", "Transaction Date", "Description", "Currency", "Foreign Amount", "Amount", "VAT"]
-            } else if let value = find("value"), let balance = find("balance") {
+            } else if let value = find("value"), let balance = find("balance"), !amounts.isEmpty {
                 cuts = [0, desc.rect.minX - 8, value.rect.minX - 8, amounts[0].rect.minX - 8, balance.rect.minX - 8, width]
                 headers = ["Date", "Description", "Value Date", "Amount", "Balance"]
                 dateEnd = cuts[1]
-            } else { continue }
+            } else if let balance = find("balance"), !amounts.isEmpty {
+                cuts = [0, desc.rect.minX - 8, amounts[0].rect.minX - 8, balance.rect.minX - 8, width]
+                headers = ["Date", "Description", "Amount", "Balance"]
+                dateEnd = cuts[1]
+            } else {
+                continue
+            }
+
             guard zip(cuts, cuts.dropFirst()).allSatisfy({ pair in pair.0 < pair.1 }) else { continue }
             return Layout(cuts: cuts, headers: headers, dateEnd: dateEnd, headerBottom: headerBottom)
         }
@@ -118,8 +169,11 @@ enum StatementPDFTable {
         let pattern = #"(?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*\s+)?(?:\d{1,2}\s+[A-Za-z]{3}\s+\d{2,4}|[A-Za-z]{3}\s+\d{1,2}\s+\d{4}|\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4})"#
         guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else { return nil }
         let matches = regex.matches(in: dateText, range: NSRange(location: 0, length: (dateText as NSString).length))
-        let anchors = matches.map { match in
-            ranges.filter { NSIntersectionRange($0.0, match.range).length > 0 }.map(\.1.rect).reduce(CGRect.null) { $0.union($1) }
+        let anchors = matches.compactMap { match -> CGRect? in
+            let matchingRects = ranges.filter { NSIntersectionRange($0.0, match.range).length > 0 }.map(\.1.rect)
+            guard !matchingRects.isEmpty else { return nil }
+            let unionRect = matchingRects.reduce(CGRect.null) { $0.union($1) }
+            return (unionRect.isNull || unionRect.isEmpty) ? nil : unionRect
         }
         guard !anchors.isEmpty else { return "" }
         // Exclude the opening-balance row before the first dated transaction.
@@ -151,6 +205,7 @@ enum StatementPDFTable {
         boundaries.append(closingRow.map { $0 - 5 } ?? offset)
         var rows = [table.headers.joined(separator: "\t")]
         for (index, vertical) in zip(boundaries, boundaries.dropFirst()).enumerated() {
+            guard index < matches.count else { break }
             var cells = zip(table.cuts, table.cuts.dropFirst()).map { left, right in
                 body.filter { $0.rect.minX >= left && $0.rect.minX < right && $0.rect.midY >= vertical.0 && $0.rect.midY < vertical.1 }
                     .sorted(by: readingOrder).map(\.text).joined(separator: " ")
