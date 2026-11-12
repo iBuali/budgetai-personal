@@ -19,7 +19,7 @@ jobs:
         os: [macos-15-intel]
       fail-fast: false
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       BUNDLE_ID: ${{ inputs.bundle_id }}
       PYTHONUNBUFFERED: '1'
@@ -27,6 +27,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Pre-boot iOS Simulator
+        run: |
+          SIM_ID=$(xcrun simctl list devices available | grep -E "iPhone (17|16|15|14)" | head -n 1 | sed -E 's/.* \(([A-F0-9-]+)\) .*/\1/')
+          if [ -n "$SIM_ID" ]; then
+            echo "Pre-booting simulator: $SIM_ID"
+            xcrun simctl boot "$SIM_ID" 2>/dev/null || true
+          fi
       - name: Check source and build unsigned iPhone archive
         run: python3 scripts/build_ipa.py
       - name: Run BudgetAITests unit test suite
@@ -34,16 +41,22 @@ jobs:
           DEV_DIR=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -n 1)/Contents/Developer
           if [ ! -d "$DEV_DIR" ]; then DEV_DIR="/Applications/Xcode.app/Contents/Developer"; fi
           export DEVELOPER_DIR="$DEV_DIR"
-          SIM_NAME=$(xcrun simctl list devices available | grep -E "iPhone (17|16|15|14)" | head -n 1 | sed -E 's/^[[:space:]]+//' | sed -E 's/ \([A-F0-9-]+\) \(.*//')
-          if [ -z "$SIM_NAME" ]; then SIM_NAME="iPhone 17"; fi
-          echo "Running BudgetAITests on Simulator: $SIM_NAME"
+          SIM_ID=$(xcrun simctl list devices available | grep -E "iPhone (17|16|15|14)" | head -n 1 | sed -E 's/.* \(([A-F0-9-]+)\) .*/\1/')
+          if [ -n "$SIM_ID" ]; then
+            xcrun simctl boot "$SIM_ID" 2>/dev/null || true
+            DEST="platform=iOS Simulator,id=$SIM_ID"
+          else
+            DEST="platform=iOS Simulator,name=iPhone 16 Pro"
+          fi
+          echo "Running BudgetAITests on Simulator: $DEST"
           xcodebuild test \
             -project ios-budget-ai/BudgetAI.xcodeproj \
             -scheme BudgetAI \
             -only-testing:BudgetAITests \
             -parallel-testing-enabled NO \
             -disable-concurrent-destination-testing \
-            -destination "platform=iOS Simulator,name=$SIM_NAME" \
+            -destination "$DEST" \
+            -destination-timeout 180 \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" DEVELOPMENT_TEAM=""
       - name: Upload verified unsigned IPA
         uses: actions/upload-artifact@v4
