@@ -692,6 +692,7 @@ enum StatementService {
         textForAmounts = textForAmounts
             .replacingOccurrences(of: #"\b[A-Z]{2}\d{10,30}\b"#, with: " ", options: .regularExpression)
             .replacingOccurrences(of: #"\b(?:FT|BP|BIB|ALS|NBB|REF|TRX)\d+[A-Z0-9]*\b"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"\b(?:Debit\s*Card|Credit\s*Card|Card)\s*(?:No\.?|#)?\s*[0-9]{4}\b"#, with: " ", options: [.regularExpression, .caseInsensitive])
             .replacingOccurrences(of: #"(?:[-–—]\s*)?MCC:\s*\d{4}"#, with: " ", options: .regularExpression)
             .replacingOccurrences(of: #"[0-9]{4,6}\*+[0-9]{4}"#, with: " ", options: .regularExpression)
 
@@ -854,6 +855,7 @@ enum StatementService {
         textForAmounts = textForAmounts
             .replacingOccurrences(of: #"\b[A-Z]{2}\d{10,30}\b"#, with: " ", options: .regularExpression)
             .replacingOccurrences(of: #"\b(?:FT|BP|BIB|ALS|NBB|REF|TRX)\d+[A-Z0-9]*\b"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"\b(?:Debit\s*Card|Credit\s*Card|Card)\s*(?:No\.?|#)?\s*[0-9]{4}\b"#, with: " ", options: [.regularExpression, .caseInsensitive])
             .replacingOccurrences(of: #"(?:[-–—]\s*)?MCC:\s*\d{4}"#, with: " ", options: .regularExpression)
             .replacingOccurrences(of: #"[0-9]{4,6}\*+[0-9]{4}"#, with: " ", options: .regularExpression)
 
