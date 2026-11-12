@@ -4,13 +4,13 @@ import Foundation
 // STRICT ISOLATION: This engine learns structural layouts, column names, sign conventions,
 // and date formats. It NEVER stores personal financial data, account numbers, or balances.
 
-public enum StatementDocType: String, Codable, CaseIterable {
+enum StatementDocType: String, Codable, CaseIterable {
     case bankAccount = "Bank Account"
     case creditCard = "Credit Card"
     case generic = "General Financial"
 }
 
-public enum AmountSignNotation: String, Codable, CaseIterable {
+enum AmountSignNotation: String, Codable, CaseIterable {
     /// Debit column vs Credit column (e.g. BisB Bank Account, NBB)
     case columnarDebitCredit
     /// Parentheses for sign: (-) 10.000 for Debit, (+) 100.000 for Credit (e.g. Al Salam Bank)
@@ -21,20 +21,20 @@ public enum AmountSignNotation: String, Codable, CaseIterable {
     case standardSigned
 }
 
-public struct BankProfileRule: Codable, Identifiable {
-    public var id: String
-    public var bankName: String
-    public var docType: StatementDocType
-    public var headerKeywords: [String]
-    public var signNotation: AmountSignNotation
-    public var datePatterns: [String]
-    public var primaryCurrency: String
-    public var swiftCode: String?
-    public var ibanPrefix: String?
-    public var notes: String
-    public var confidenceThreshold: Double
+struct BankProfileRule: Codable, Identifiable {
+    var id: String
+    var bankName: String
+    var docType: StatementDocType
+    var headerKeywords: [String]
+    var signNotation: AmountSignNotation
+    var datePatterns: [String]
+    var primaryCurrency: String
+    var swiftCode: String?
+    var ibanPrefix: String?
+    var notes: String
+    var confidenceThreshold: Double
 
-    public init(
+    init(
         id: String,
         bankName: String,
         docType: StatementDocType,
@@ -63,32 +63,32 @@ public struct BankProfileRule: Codable, Identifiable {
 
 // MARK: - Structural Analysis Report
 
-public struct StatementAnalysisReport {
-    public var profile: BankProfileRule
-    public var confidenceScore: Double
-    public var detectedBank: String
-    public var detectedDocType: StatementDocType
-    public var detectedIBAN: String?
-    public var detectedCardLast4: String?
-    public var detectedDatesCount: Int
-    public var detectedTransactionsCount: Int
-    public var totalDebits: Double
-    public var totalCredits: Double
-    public var openingBalance: Double?
-    public var closingBalance: Double?
-    public var balanceReconciled: Bool?
-    public var inconsistencies: [String]
-    public var samplePreview: [ParsedStatementItem]
+struct StatementAnalysisReport {
+    var profile: BankProfileRule
+    var confidenceScore: Double
+    var detectedBank: String
+    var detectedDocType: StatementDocType
+    var detectedIBAN: String?
+    var detectedCardLast4: String?
+    var detectedDatesCount: Int
+    var detectedTransactionsCount: Int
+    var totalDebits: Double
+    var totalCredits: Double
+    var openingBalance: Double?
+    var closingBalance: Double?
+    var balanceReconciled: Bool?
+    var inconsistencies: [String]
+    var samplePreview: [ParsedStatementItem]
 }
 
 // MARK: - Bank Profile Registry & Learning Engine
 
-public enum BankProfileRegistry {
+enum BankProfileRegistry {
 
     private static let userProfilesKey = "budgetai_learned_bank_profiles_v1"
 
     // Built-in Knowledge Base learned from real Bahrain and Regional bank statements
-    public static var builtInProfiles: [BankProfileRule] {
+    static var builtInProfiles: [BankProfileRule] {
         [
             // 1. BisB Bank Account Statement (CSV, Excel, PDF)
             BankProfileRule(
@@ -176,7 +176,7 @@ public enum BankProfileRegistry {
     }
 
     /// Returns active rules combining built-ins and any learned custom patterns
-    public static var allProfiles: [BankProfileRule] {
+    static var allProfiles: [BankProfileRule] {
         var profiles = builtInProfiles
         let custom = loadUserLearnedProfiles()
         for c in custom {
@@ -191,7 +191,7 @@ public enum BankProfileRegistry {
 
     // MARK: - Profile Matching
 
-    public static func matchProfile(for text: String) -> (profile: BankProfileRule, confidence: Double) {
+    static func matchProfile(for text: String) -> (profile: BankProfileRule, confidence: Double) {
         let lower = text.lowercased()
         var bestProfile: BankProfileRule = builtInProfiles[0]
         var highestScore: Double = 0.0
@@ -237,7 +237,7 @@ public enum BankProfileRegistry {
 
     // MARK: - MCC Code Intelligent Category Mapper
 
-    public static func categoryForMCC(_ mcc: String) -> SpendCategory? {
+    static func categoryForMCC(_ mcc: String) -> SpendCategory? {
         switch mcc {
         case "5411", "5422", "5499", "5441":
             return .groceries
@@ -264,7 +264,7 @@ public enum BankProfileRegistry {
 
     // MARK: - Narrative & Description Cleaner
 
-    public static func cleanMerchantDescription(_ raw: String, docType: StatementDocType) -> (merchant: String, category: SpendCategory?, ref: String?) {
+    static func cleanMerchantDescription(_ raw: String, docType: StatementDocType) -> (merchant: String, category: SpendCategory?, ref: String?) {
         var clean = raw
         var extractedRef: String? = nil
         var inferredCategory: SpendCategory? = nil
@@ -309,7 +309,7 @@ public enum BankProfileRegistry {
 
     // MARK: - Learned User Profiles Storage
 
-    public static func loadUserLearnedProfiles() -> [BankProfileRule] {
+    static func loadUserLearnedProfiles() -> [BankProfileRule] {
         guard let data = UserDefaults.standard.data(forKey: userProfilesKey),
               let list = try? JSONDecoder().decode([BankProfileRule].self, from: data) else {
             return []
@@ -317,7 +317,7 @@ public enum BankProfileRegistry {
         return list
     }
 
-    public static func saveLearnedProfile(_ profile: BankProfileRule) {
+    static func saveLearnedProfile(_ profile: BankProfileRule) {
         var existing = loadUserLearnedProfiles()
         if let idx = existing.firstIndex(where: { $0.id == profile.id }) {
             existing[idx] = profile
@@ -333,12 +333,12 @@ public enum BankProfileRegistry {
 // MARK: - Safe Statement Learning & Diagnostic Engine
 // STRICT ISOLATION: Runs detection tests and computes reconciliations without saving to user data or modifying balances.
 
-public enum StatementLearningEngine {
+enum StatementLearningEngine {
 
     /// Analyzes a sample statement file without touching or modifying any user account or database.
     /// Returns a full structural diagnostic report including detected bank, document type,
     /// IBAN/card numbers, profile confidence, transaction count, totals, balance reconciliation, and inconsistencies.
-    public static func analyzeSampleStatement(fileData: Data, filename: String) -> StatementAnalysisReport {
+    static func analyzeSampleStatement(fileData: Data, filename: String) -> StatementAnalysisReport {
         let lower = filename.lowercased()
         let isPdf = lower.hasSuffix(".pdf") || (fileData.count >= 4 && fileData[0] == 0x25 && fileData[1] == 0x50 && fileData[2] == 0x44 && fileData[3] == 0x46)
         let isXlsx = lower.hasSuffix(".xlsx") || (fileData.count >= 4 && fileData[0] == 0x50 && fileData[1] == 0x4B)
