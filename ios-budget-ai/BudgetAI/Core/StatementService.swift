@@ -674,10 +674,20 @@ enum StatementService {
         // 2. Extract Monetary Amounts across block lines
         let combinedBlock = lines.joined(separator: " ")
 
+        // Strip out all dates from textForAmounts so day numbers and years (e.g. 13, 15, 2026, 01) are not detected as amounts
+        var textForAmounts = combinedBlock
+        if let dRegex = try? NSRegularExpression(pattern: transactionDatePattern, options: .caseInsensitive) {
+            textForAmounts = dRegex.stringByReplacingMatches(
+                in: textForAmounts,
+                range: NSRange(textForAmounts.startIndex..., in: textForAmounts),
+                withTemplate: " "
+            )
+        }
+
         // Strip out non-monetary numeric tokens so they don't get detected as amounts:
         // - MCC: 5814
         // - Card numbers e.g. 4545 22** **** 1843
-        var textForAmounts = combinedBlock
+        textForAmounts = textForAmounts
             .replacingOccurrences(of: #"MCC:\s*\d{4}"#, with: " ", options: .regularExpression)
             .replacingOccurrences(of: #"[0-9]{4,6}\*+[0-9]{4}"#, with: " ", options: .regularExpression)
 
@@ -696,8 +706,12 @@ enum StatementService {
 
         // 3. Extract Merchant / Narrative Description
         var desc = combinedBlock
-        if !dateMatchString.isEmpty {
-            desc = desc.replacingOccurrences(of: dateMatchString, with: " ")
+        if let dRegex = try? NSRegularExpression(pattern: transactionDatePattern, options: .caseInsensitive) {
+            desc = dRegex.stringByReplacingMatches(
+                in: desc,
+                range: NSRange(desc.startIndex..., in: desc),
+                withTemplate: " "
+            )
         }
         for m in amtMatches {
             if let r = Range(m.range, in: textForAmounts) {
@@ -820,10 +834,18 @@ enum StatementService {
         let dateStr = String(line[dateRange])
         guard let date = parseDate(dateStr) else { return nil }
 
-        let remaining = line.replacingCharacters(in: dateRange, with: " ")
+        // Strip out all dates so day numbers and years (e.g. 13, 15, 2026, 01) are not detected as amounts
+        var textForAmounts = line
+        if let dRegex = try? NSRegularExpression(pattern: transactionDatePattern, options: .caseInsensitive) {
+            textForAmounts = dRegex.stringByReplacingMatches(
+                in: textForAmounts,
+                range: NSRange(textForAmounts.startIndex..., in: textForAmounts),
+                withTemplate: " "
+            )
+        }
 
         // Amounts: Find numbers like 1,250.00, 15.500, (-) 10.000, (+) 100.000, -98, 2
-        var textForAmounts = remaining
+        textForAmounts = textForAmounts
             .replacingOccurrences(of: #"MCC:\s*\d{4}"#, with: " ", options: .regularExpression)
             .replacingOccurrences(of: #"[0-9]{4,6}\*+[0-9]{4}"#, with: " ", options: .regularExpression)
 
@@ -840,7 +862,14 @@ enum StatementService {
         guard cleanAmount > 0 else { return nil }
 
         // Clean merchant / description text
-        var desc = remaining
+        var desc = line
+        if let dRegex = try? NSRegularExpression(pattern: transactionDatePattern, options: .caseInsensitive) {
+            desc = dRegex.stringByReplacingMatches(
+                in: desc,
+                range: NSRange(desc.startIndex..., in: desc),
+                withTemplate: " "
+            )
+        }
         for m in matches {
             if let r = Range(m.range, in: textForAmounts) {
                 let token = String(textForAmounts[r])
