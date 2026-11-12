@@ -566,7 +566,7 @@ enum StatementService {
     // MARK: - Strategy 1: Multi-Line Transaction Block Aggregator
 
     private static let transactionDatePattern = #"\b(?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*,?\s+)?(?:(?:\d{1,4}[-/\.]\d{1,2}[-/\.]\d{1,4})|(?:\d{1,2}[-/\. ]+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[-/\. ]+\d{2,4})|(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[-/\. ]+\d{1,2}[, ]+\d{2,4}))\b"#
-    private static let transactionAmountPattern = #"(?:\([+-]\)\s*[\d,]+(?:\.\d{1,4})?|\([+-]?\s*[\d,]+(?:\.\d{1,4})?\)|[+-]?\s*(?:BHD|BD|SAR|AED|USD|EUR|GBP|\$|€)?\s*[\d,]+(?:\.\d{1,4})?(?:\s*(?:CR|DR|Cr|Dr))?)"#
+    private static let transactionAmountPattern = #"(?:\([+-]\)\s*[\d,]+(?:\.\d{1,4})?|\([+-]?\s*[\d,]+(?:\.\d{1,4})?\)|(?:BHD|BD|SAR|AED|USD|EUR|GBP|\$|€)\s*[-+]?\s*[\d,]+(?:\.\d{1,4})?(?:\s*(?:CR|DR|Cr|Dr))?|[-+]?\s*(?:BHD|BD|SAR|AED|USD|EUR|GBP|\$|€)\s*[\d,]+(?:\.\d{1,4})?(?:\s*(?:CR|DR|Cr|Dr))?|(?<![A-Za-z0-9])[+-]?\d{1,3}(?:,\d{3})*\.\d{1,4}(?![A-Za-z0-9])(?:\s*(?:CR|DR|Cr|Dr))?|(?<![A-Za-z0-9])[+-]?\d+\.\d{1,4}(?![A-Za-z0-9])(?:\s*(?:CR|DR|Cr|Dr))?|(?<![A-Za-z0-9])[+-]\d{1,6}(?![A-Za-z0-9])|(?<![A-Za-z0-9])\b\d{1,5}\b(?![A-Za-z0-9]))"#
 
     private static func determineIsIncome(
         amountString: String,
@@ -685,10 +685,14 @@ enum StatementService {
         }
 
         // Strip out non-monetary numeric tokens so they don't get detected as amounts:
+        // - IBANs e.g. BH690000000000
+        // - References e.g. FT262747PTDP
         // - MCC: 5814
         // - Card numbers e.g. 4545 22** **** 1843
         textForAmounts = textForAmounts
-            .replacingOccurrences(of: #"MCC:\s*\d{4}"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"\b[A-Z]{2}\d{10,30}\b"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"\b(?:FT|BP|BIB|ALS|NBB|REF|TRX)\d+[A-Z0-9]*\b"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"(?:[-–—]\s*)?MCC:\s*\d{4}"#, with: " ", options: .regularExpression)
             .replacingOccurrences(of: #"[0-9]{4,6}\*+[0-9]{4}"#, with: " ", options: .regularExpression)
 
         let amtRegex = try? NSRegularExpression(pattern: transactionAmountPattern)
@@ -715,8 +719,10 @@ enum StatementService {
         }
         for m in amtMatches {
             if let r = Range(m.range, in: textForAmounts) {
-                let token = String(textForAmounts[r])
-                desc = desc.replacingOccurrences(of: token, with: " ")
+                let token = String(textForAmounts[r]).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !token.isEmpty {
+                    desc = desc.replacingOccurrences(of: #"(?<![A-Za-z0-9])"# + NSRegularExpression.escapedPattern(for: token) + #"(?![A-Za-z0-9])"#, with: " ", options: .regularExpression)
+                }
             }
         }
 
@@ -846,7 +852,9 @@ enum StatementService {
 
         // Amounts: Find numbers like 1,250.00, 15.500, (-) 10.000, (+) 100.000, -98, 2
         textForAmounts = textForAmounts
-            .replacingOccurrences(of: #"MCC:\s*\d{4}"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"\b[A-Z]{2}\d{10,30}\b"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"\b(?:FT|BP|BIB|ALS|NBB|REF|TRX)\d+[A-Z0-9]*\b"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"(?:[-–—]\s*)?MCC:\s*\d{4}"#, with: " ", options: .regularExpression)
             .replacingOccurrences(of: #"[0-9]{4,6}\*+[0-9]{4}"#, with: " ", options: .regularExpression)
 
         let regex = try? NSRegularExpression(pattern: transactionAmountPattern)
@@ -872,8 +880,10 @@ enum StatementService {
         }
         for m in matches {
             if let r = Range(m.range, in: textForAmounts) {
-                let token = String(textForAmounts[r])
-                desc = desc.replacingOccurrences(of: token, with: " ")
+                let token = String(textForAmounts[r]).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !token.isEmpty {
+                    desc = desc.replacingOccurrences(of: #"(?<![A-Za-z0-9])"# + NSRegularExpression.escapedPattern(for: token) + #"(?![A-Za-z0-9])"#, with: " ", options: .regularExpression)
+                }
             }
         }
 
