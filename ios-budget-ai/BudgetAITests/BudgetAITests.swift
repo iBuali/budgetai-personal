@@ -2179,4 +2179,180 @@ struct BudgetAITests {
         #expect(testTx.latitude == 26.2412)
         #expect(testTx.longitude == 50.5794)
     }
+
+    // MARK: - Learned Bank Statement Knowledge Base & Detection Engine Tests
+
+    @Test func testBisBAccountStatementLearnedDetection() throws {
+        let sampleBisBCSV = """
+        BisB - Bahrain
+        BIBBBHBMINV
+        Building 722, Al Salam Tower, Diplomatic Area, Manama, Bahrain
+        Account Statement
+        IBAN: BH85BIBB00200001693876
+        Statement Period: 11 Oct 26 to 10 Nov 26
+        Opening Balance,BHD 431.841
+        Closing Balance,BHD 135.703
+
+        Transaction Date,Description,Debit Amount,Credit Amount,Balance
+        ,Opening Balance,,,BHD 431.841
+        11 Oct 26,FAWRI+ Payment to BH840000000001234-98765432,BHD 200.000,BHD 0.000,"BHD 1,686.277"
+        12 Oct 26,FAWRI+ Payment From IBAN: BH29ILAB00000012-12345678,BHD 0.000,BHD 50.000,"BHD 1,736.277"
+        13 Oct 26,POS PURCHASE CARREFOUR CITY CENTRE,BHD 24.500,BHD 0.000,"BHD 1,711.777"
+        ,Closing Balance,,,BHD 135.703
+        """
+
+        let result = StatementService.parseCSV(data: Data(sampleBisBCSV.utf8), accounts: [])
+
+        #expect(result.detectedBank == "BisB")
+        #expect(result.detectedAccountIBAN == "BH85BIBB00200001693876")
+        #expect(result.items.count == 3) // Opening/Closing rows skipped
+
+        // Verify Opening & Closing Balance extraction
+        #expect(abs((result.openingBalance ?? 0) - 431.841) < 0.001)
+        #expect(abs((result.closingBalance ?? 0) - 135.703) < 0.001)
+
+        // Item 1: Fawri+ Debit
+        let debitTx = result.items[0]
+        #expect(abs(debitTx.amount - 200.000) < 0.001)
+        #expect(debitTx.isIncome == false)
+        #expect(debitTx.merchant.contains("Fawri+"))
+
+        // Item 2: Fawri+ Credit
+        let creditTx = result.items[1]
+        #expect(abs(creditTx.amount - 50.000) < 0.001)
+        #expect(creditTx.isIncome == true)
+
+        // Item 3: Grocery Purchase
+        let grocTx = result.items[2]
+        #expect(abs(grocTx.amount - 24.500) < 0.001)
+        #expect(grocTx.isIncome == false)
+        #expect(grocTx.category == .groceries)
+    }
+
+    @Test func testAlSalamBankStatementLearnedDetection() throws {
+        let sampleAlSalamText = """
+        Al Salam Bank
+        SWIFT Code ALSABHBM
+        IBAN BH69ALSA00219442150020
+        Saving Deposit
+        Statement of Account
+        Opening Balance 2,607.846
+        Closing Balance 2,563.966
+
+        Posting Date Description Value Date Amount Balance
+        01 OCT 2026 FAWRI+ Payment to BH690000000000-FT262747PTDP 01 OCT 2026 (-) 10.000 2,597.846
+        02 OCT 2026 SALARY TRANSFER CREDIT 02 OCT 2026 (+) 100.000 2,697.846
+        03 OCT 2026 TALABAT SEEF DELIVERY 03 OCT 2026 (-) 4.500 2,693.346
+        """
+
+        let (profile, conf) = BankProfileRegistry.matchProfile(for: sampleAlSalamText)
+        #expect(profile.bankName == "Al Salam Bank")
+        #expect(profile.signNotation == .parenthesesSigned)
+        #expect(conf > 0.5)
+
+        let items = StatementService.parseTextLinesToItems(sampleAlSalamText, profile: profile)
+        #expect(items.count == 3)
+
+        // Item 1: (-) 10.000 is Expense
+        let item1 = items[0]
+        #expect(abs(item1.amount - 10.000) < 0.001)
+        #expect(item1.isIncome == false)
+        #expect(item1.reference == "FT262747PTDP")
+
+        // Item 2: (+) 100.000 is Income
+        let item2 = items[1]
+        #expect(abs(item2.amount - 100.000) < 0.001)
+        #expect(item2.isIncome == true)
+
+        // Item 3: (-) 4.500 is Dining Expense
+        let item3 = items[2]
+        #expect(abs(item3.amount - 4.500) < 0.001)
+        #expect(item3.isIncome == false)
+        #expect(item3.category == .dining)
+    }
+
+    @Test func testBisBCreditCardStatementLearnedDetection() throws {
+        let sampleCreditCardText = """
+        Credit Card Statement
+        BisB - Bahrain
+        Credit Card Number 4545 22** **** 1843
+        VISA INFINITE
+        Total Credit Limit BHD 5,000.000
+        Previous Balance 98.000
+        Total Amount Due 115.230
+
+        Posting Date Transaction Date Description Currency Transaction Amount Amount in BHD VAT
+        Wed May 13 2026 Wed May 13 2026 PAYMENT RECEIVED - MCC: 0000 BHD -98 -98 0
+        Fri May 15 2026 Fri May 15 2026 TALABAT GO - MCC: 5814 BHD 11.41 11.41 0
+        Sat May 16 2026 Sat May 16 2026 COSTA COFFEE - MCC: 5814 BHD 2 2 0
+        Sun May 17 2026 Sun May 17 2026 LULU HYPERMARKET - MCC: 5411 BHD 17.500 17.500 0
+        """
+
+        let (profile, conf) = BankProfileRegistry.matchProfile(for: sampleCreditCardText)
+        #expect(profile.bankName == "BisB")
+        #expect(profile.docType == .creditCard)
+        #expect(profile.signNotation == .creditCardNegativePayment)
+        #expect(conf > 0.6)
+
+        let items = StatementService.parseTextLinesToItems(sampleCreditCardText, profile: profile)
+        #expect(items.count == 4)
+
+        // Payment Received: -98 -> Income / Payment
+        let paymentItem = items[0]
+        #expect(abs(paymentItem.amount - 98.0) < 0.001)
+        #expect(paymentItem.isIncome == true)
+        #expect(paymentItem.category == .transfers)
+
+        // Talabat: 11.41 -> Dining
+        let talabatItem = items[1]
+        #expect(abs(talabatItem.amount - 11.41) < 0.001)
+        #expect(talabatItem.isIncome == false)
+        #expect(talabatItem.category == .dining)
+
+        // Costa: integer amount 2 -> Dining
+        let costaItem = items[2]
+        #expect(abs(costaItem.amount - 2.0) < 0.001)
+        #expect(costaItem.isIncome == false)
+        #expect(costaItem.category == .dining)
+
+        // Lulu: MCC 5411 -> Groceries
+        let luluItem = items[3]
+        #expect(abs(luluItem.amount - 17.5) < 0.001)
+        #expect(luluItem.isIncome == false)
+        #expect(luluItem.category == .groceries)
+    }
+
+    @Test func testStatementLearningEngineDiagnosticReportAndIsolation() throws {
+        // Sample bank statement data
+        let sampleData = Data("""
+        Al Salam Bank
+        SWIFT Code ALSABHBM
+        IBAN BH69ALSA00219442150020
+        Saving Deposit
+        Opening Balance 1,000.000
+        Closing Balance 1,090.000
+
+        01 OCT 2026 FAWRI+ Payment to BH... 01 OCT 2026 (-) 10.000 990.000
+        02 OCT 2026 Inward Transfer 02 OCT 2026 (+) 100.000 1,090.000
+        """.utf8)
+
+        // User account to verify strict isolation
+        let existingAccount = Account(name: "Existing User Account", kind: .bank, balance: 500.0)
+        let initialBalance = existingAccount.balance
+
+        let report = StatementLearningEngine.analyzeSampleStatement(fileData: sampleData, filename: "alsalam_sample.csv")
+
+        // Diagnostic assertions
+        #expect(report.detectedBank == "Al Salam Bank")
+        #expect(report.detectedDocType == .bankAccount)
+        #expect(report.detectedIBAN == "BH69ALSA00219442150020")
+        #expect(report.detectedTransactionsCount == 2)
+        #expect(abs(report.totalDebits - 10.000) < 0.001)
+        #expect(abs(report.totalCredits - 100.000) < 0.001)
+        #expect(report.balanceReconciled == true)
+        #expect(report.inconsistencies.isEmpty)
+
+        // STRICT ISOLATION ASSERTION: User account balance was NEVER touched or modified
+        #expect(existingAccount.balance == initialBalance)
+    }
 }

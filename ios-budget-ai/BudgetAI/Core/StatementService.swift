@@ -79,6 +79,11 @@ struct StatementParseResult {
     var statementPeriodStart: Date?
     var statementPeriodEnd: Date?
     var rawTextSnippet: String = ""
+    var profileName: String? = nil
+    var confidenceScore: Double = 1.0
+    var openingBalance: Double? = nil
+    var closingBalance: Double? = nil
+    var inconsistencies: [String] = []
 
     var totalItemsCount: Int { items.count }
     var newItemsCount: Int { items.filter { !$0.isDuplicate }.count }
@@ -244,7 +249,7 @@ enum StatementService {
         let detected = extractHeaderMetadata(from: fullText)
         let matchedAcc = matchAccount(ibanOrAcc: detected.iban, cardLast4: detected.cardLast4, bank: detected.bank, in: accounts)
 
-        let items = parseTextLinesToItems(fullText)
+        let items = parseTextLinesToItems(fullText, profile: detected.profile)
 
         return StatementParseResult(
             items: items,
@@ -255,7 +260,11 @@ enum StatementService {
             format: .pdf,
             statementPeriodStart: detected.startDate,
             statementPeriodEnd: detected.endDate,
-            rawTextSnippet: String(fullText.prefix(400))
+            rawTextSnippet: String(fullText.prefix(400)),
+            profileName: "\(detected.profile.bankName) (\(detected.profile.docType.rawValue))",
+            confidenceScore: detected.confidence,
+            openingBalance: detected.openingBalance,
+            closingBalance: detected.closingBalance
         )
     }
 
@@ -266,9 +275,9 @@ enum StatementService {
         let detected = extractHeaderMetadata(from: text)
         let matchedAcc = matchAccount(ibanOrAcc: detected.iban, cardLast4: detected.cardLast4, bank: detected.bank, in: accounts)
 
-        var items = parseCSVRows(text)
+        var items = parseCSVRows(text, profile: detected.profile)
         if items.isEmpty {
-            items = parseTextLinesToItems(text)
+            items = parseTextLinesToItems(text, profile: detected.profile)
         }
 
         return StatementParseResult(
@@ -280,7 +289,11 @@ enum StatementService {
             format: .csv,
             statementPeriodStart: detected.startDate,
             statementPeriodEnd: detected.endDate,
-            rawTextSnippet: String(text.prefix(400))
+            rawTextSnippet: String(text.prefix(400)),
+            profileName: "\(detected.profile.bankName) (\(detected.profile.docType.rawValue))",
+            confidenceScore: detected.confidence,
+            openingBalance: detected.openingBalance,
+            closingBalance: detected.closingBalance
         )
     }
 
@@ -302,11 +315,11 @@ enum StatementService {
             items = parseXMLSpreadsheet(text)
         } else {
             // CSV / Delimited
-            items = parseCSVRows(text)
+            items = parseCSVRows(text, profile: detected.profile)
         }
 
         if items.isEmpty {
-            items = parseTextLinesToItems(text)
+            items = parseTextLinesToItems(text, profile: detected.profile)
         }
 
         return StatementParseResult(
@@ -318,7 +331,11 @@ enum StatementService {
             format: .excelXLS,
             statementPeriodStart: detected.startDate,
             statementPeriodEnd: detected.endDate,
-            rawTextSnippet: String(text.prefix(400))
+            rawTextSnippet: String(text.prefix(400)),
+            profileName: "\(detected.profile.bankName) (\(detected.profile.docType.rawValue))",
+            confidenceScore: detected.confidence,
+            openingBalance: detected.openingBalance,
+            closingBalance: detected.closingBalance
         )
     }
 
@@ -347,75 +364,107 @@ enum StatementService {
         let sheetEntries = entries.filter { $0.key.lowercased().contains("worksheets/sheet") }
             .sorted(by: { $0.key < $1.key })
 
+        let detectedInZip = extractHeaderMetadata(from: sharedStrings.joined(separator: " "))
+
         for (_, sheetData) in sheetEntries {
             guard let sheetXml = String(data: sheetData, encoding: .utf8) else { continue }
             let rowsText = parseWorksheetXml(sheetXml, sharedStrings: sharedStrings)
             if !rowsText.isEmpty {
                 combinedText += rowsText + "\n"
-                let sheetItems = parseCSVRows(rowsText)
+                let sheetItems = parseCSVRows(rowsText, profile: detectedInZip.profile)
                 items.append(contentsOf: sheetItems)
             }
         }
 
+        let detected = extractHeaderMetadata(from: combinedText.isEmpty ? sharedStrings.joined(separator: " ") : combinedText)
         if items.isEmpty && !combinedText.isEmpty {
-            items = parseTextLinesToItems(combinedText)
+            items = parseTextLinesToItems(combinedText, profile: detected.profile)
         }
 
-        let detected = extractHeaderMetadata(from: combinedText)
-        let matchedAcc = matchAccount(ibanOrAcc: detected.iban, cardLast4: detected.cardLast4, bank: detected.bank, in: accounts)
+        let finalBank = detected.bank ?? detectedInZip.bank
+        let finalIban = detected.iban ?? detectedInZip.iban
+        let finalCard = detected.cardLast4 ?? detectedInZip.cardLast4
+        let matchedAcc = matchAccount(ibanOrAcc: finalIban, cardLast4: finalCard, bank: finalBank, in: accounts)
 
         return StatementParseResult(
             items: items,
-            detectedBank: detected.bank,
-            detectedAccountIBAN: detected.iban,
-            detectedCardLast4: detected.cardLast4,
+            detectedBank: finalBank,
+            detectedAccountIBAN: finalIban,
+            detectedCardLast4: finalCard,
             matchedAccountID: matchedAcc?.id,
             format: .excelXLSX,
-            statementPeriodStart: detected.startDate,
-            statementPeriodEnd: detected.endDate,
-            rawTextSnippet: String(combinedText.prefix(400))
+            statementPeriodStart: detected.startDate ?? detectedInZip.startDate,
+            statementPeriodEnd: detected.endDate ?? detectedInZip.endDate,
+            rawTextSnippet: String(combinedText.prefix(400)),
+            profileName: "\(detected.profile.bankName) (\(detected.profile.docType.rawValue))",
+            confidenceScore: max(detected.confidence, detectedInZip.confidence),
+            openingBalance: detected.openingBalance ?? detectedInZip.openingBalance,
+            closingBalance: detected.closingBalance ?? detectedInZip.closingBalance
         )
     }
 
     // MARK: - Header & Bank Detection
 
-    private static func extractHeaderMetadata(from text: String) -> (bank: String?, iban: String?, cardLast4: String?, startDate: Date?, endDate: Date?) {
+    private static func extractHeaderMetadata(from text: String) -> (
+        bank: String?,
+        iban: String?,
+        cardLast4: String?,
+        startDate: Date?,
+        endDate: Date?,
+        openingBalance: Double?,
+        closingBalance: Double?,
+        profile: BankProfileRule,
+        confidence: Double
+    ) {
         var bank: String? = nil
         var iban: String? = nil
         var cardLast4: String? = nil
+        var openingBalance: Double? = nil
+        var closingBalance: Double? = nil
+        var startDate: Date? = nil
+        var endDate: Date? = nil
 
         let lower = text.lowercased()
 
-        // Bahrain & Regional Banks
-        let banksCatalog = [
-            ("bisb", "BisB"),
-            ("ila bank", "ila Bank"),
-            ("ila", "ila Bank"),
-            ("nbb", "NBB"),
-            ("national bank of bahrain", "NBB"),
-            ("bbk", "BBK"),
-            ("bank of bahrain and kuwait", "BBK"),
-            ("al salam", "Al Salam Bank"),
-            ("alsalam", "Al Salam Bank"),
-            ("khaleeji", "Khaleeji Bank"),
-            ("kfh", "KFH"),
-            ("kuwait finance house", "KFH"),
-            ("ahli united", "AUB"),
-            ("aub", "AUB"),
-            ("standard chartered", "Standard Chartered"),
-            ("hsbc", "HSBC"),
-            ("benefitpay", "BenefitPay"),
-            ("citi", "Citibank")
-        ]
+        // Match against learned bank profile registry
+        let (matchedProfile, confidence) = BankProfileRegistry.matchProfile(for: text)
+        if confidence >= 0.25 {
+            bank = matchedProfile.bankName
+        }
 
-        for (pattern, name) in banksCatalog {
-            if lower.contains(pattern) {
-                bank = name
-                break
+        // Bahrain & Regional Banks catalog fallback
+        if bank == nil {
+            let banksCatalog = [
+                ("bisb", "BisB"),
+                ("bahrain islamic bank", "BisB"),
+                ("ila bank", "ila Bank"),
+                ("ila", "ila Bank"),
+                ("nbb", "NBB"),
+                ("national bank of bahrain", "NBB"),
+                ("bbk", "BBK"),
+                ("bank of bahrain and kuwait", "BBK"),
+                ("al salam", "Al Salam Bank"),
+                ("alsalam", "Al Salam Bank"),
+                ("khaleeji", "Khaleeji Bank"),
+                ("kfh", "KFH"),
+                ("kuwait finance house", "KFH"),
+                ("ahli united", "AUB"),
+                ("aub", "AUB"),
+                ("standard chartered", "Standard Chartered"),
+                ("hsbc", "HSBC"),
+                ("benefitpay", "BenefitPay"),
+                ("citi", "Citibank")
+            ]
+
+            for (pattern, name) in banksCatalog {
+                if lower.contains(pattern) {
+                    bank = name
+                    break
+                }
             }
         }
 
-        // IBAN detection: e.g. BH29 ILAB 0000 0012 3438 76 or BH29ILAB00000012343876
+        // IBAN detection: e.g. BH85BIBB00200001693876 or BH69ALSA00219442150020
         if let ibanRange = text.range(of: #"\b[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]{4}){2,7}(?:[ ]?[A-Z0-9]{1,4})?\b"#, options: .regularExpression) {
             let rawIban = String(text[ibanRange])
             iban = rawIban.replacingOccurrences(of: " ", with: "")
@@ -424,8 +473,8 @@ enum StatementService {
             iban = extractDigits(from: matched)
         }
 
-        // Card Last 4 digits: e.g. **** 1234 or Card: ...1234 or ending in 1234
-        if let cardRange = text.range(of: #"(?:Card|Credit Card|Card No)[\s\S]{0,35}?(?:[*Xx]{4,}|ending in|suffix|\.{3,})?\s*([0-9]{4})\b"#, options: [.regularExpression, .caseInsensitive]) {
+        // Card Last 4 digits: e.g. 4545 22** **** 1843 or Card: ...1843
+        if let cardRange = text.range(of: #"(?:Card|Credit Card|Card No)[\s\S]{0,40}?(?:[*Xx]{2,}|ending in|suffix|\.{3,})?\s*([0-9]{4})\b"#, options: [.regularExpression, .caseInsensitive]) {
             let cardMatch = String(text[cardRange])
             let digits = extractDigits(from: cardMatch)
             if digits.count >= 4 {
@@ -433,7 +482,57 @@ enum StatementService {
             }
         }
 
-        return (bank, iban, cardLast4, nil, nil)
+        // Opening balance extraction
+        let openPatterns = [
+            #"(?:Opening|Previous|Start|Beginning)\s*Balance[^\d\n\r]*([+-]?\s*(?:BHD|BD|SAR|AED|USD|\$)?\s*[\d,]+(?:\.\d{1,4})?)"#,
+            #",Opening Balance[,\s]*([+-]?\s*(?:BHD|BD|SAR|AED|USD|\$)?\s*[\d,]+(?:\.\d{1,4})?)"#
+        ]
+        for pat in openPatterns {
+            if let range = text.range(of: pat, options: [.regularExpression, .caseInsensitive]) {
+                let match = String(text[range])
+                let amt = parseAmount(match)
+                if amt > 0 {
+                    openingBalance = amt
+                    break
+                }
+            }
+        }
+
+        // Closing balance extraction
+        let closePatterns = [
+            #"(?:Closing|Ending|New|Current|Carried Forward)\s*Balance[^\d\n\r]*([+-]?\s*(?:BHD|BD|SAR|AED|USD|\$)?\s*[\d,]+(?:\.\d{1,4})?)"#,
+            #",Closing Balance[,\s]*([+-]?\s*(?:BHD|BD|SAR|AED|USD|\$)?\s*[\d,]+(?:\.\d{1,4})?)"#
+        ]
+        for pat in closePatterns {
+            if let range = text.range(of: pat, options: [.regularExpression, .caseInsensitive]) {
+                let match = String(text[range])
+                let amt = parseAmount(match)
+                if amt > 0 {
+                    closingBalance = amt
+                    break
+                }
+            }
+        }
+
+        // Statement Period Start / End Dates
+        let periodPatterns = [
+            #"(?:Period|From|Statement Period)[\s:]*([0-9A-Za-z\s\-\/\.]{6,16})\s*(?:To|until|-)\s*([0-9A-Za-z\s\-\/\.]{6,16})"#,
+            #"([0-9]{1,2}[-/\. ][A-Za-z]{3}[-/\. ][0-9]{2,4})\s*(?:to|-)\s*([0-9]{1,2}[-/\. ][A-Za-z]{3}[-/\. ][0-9]{2,4})"#
+        ]
+        for pat in periodPatterns {
+            if let regex = try? NSRegularExpression(pattern: pat, options: .caseInsensitive),
+               let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) {
+                if let r1 = Range(match.range(at: 1), in: text), let d1 = parseDate(String(text[r1])) {
+                    startDate = d1
+                }
+                if let r2 = Range(match.range(at: 2), in: text), let d2 = parseDate(String(text[r2])) {
+                    endDate = d2
+                }
+                if startDate != nil { break }
+            }
+        }
+
+        return (bank, iban, cardLast4, startDate, endDate, openingBalance, closingBalance, matchedProfile, confidence)
     }
 
     private static func extractDigits(from s: String) -> String {
@@ -442,15 +541,15 @@ enum StatementService {
 
     // MARK: - Multi-Strategy Text Statement Parser (PDF & Raw Text)
 
-    static func parseTextLinesToItems(_ text: String) -> [ParsedStatementItem] {
+    static func parseTextLinesToItems(_ text: String, profile: BankProfileRule? = nil) -> [ParsedStatementItem] {
         // Strategy 1: Multi-line Block Aggregation (handles statements where dates, descriptions, amounts span 2-6 lines)
-        let blockItems = parseMultiLineBlocks(text)
+        let blockItems = parseMultiLineBlocks(text, profile: profile)
         if !blockItems.isEmpty {
             return blockItems
         }
 
         // Strategy 2: Single-line regex matching
-        let singleLineItems = parseSingleLines(text)
+        let singleLineItems = parseSingleLines(text, profile: profile)
         if !singleLineItems.isEmpty {
             return singleLineItems
         }
@@ -466,7 +565,52 @@ enum StatementService {
 
     // MARK: - Strategy 1: Multi-Line Transaction Block Aggregator
 
-    private static func parseMultiLineBlocks(_ text: String) -> [ParsedStatementItem] {
+    private static let transactionDatePattern = #"\b(?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*,?\s+)?(?:(?:\d{1,4}[-/\.]\d{1,2}[-/\.]\d{1,4})|(?:\d{1,2}[-/\. ]+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[-/\. ]+\d{2,4})|(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[-/\. ]+\d{1,2}[, ]+\d{2,4}))\b"#
+    private static let transactionAmountPattern = #"(?:\([+-]\)\s*[\d,]+(?:\.\d{1,4})?|\([+-]?\s*[\d,]+(?:\.\d{1,4})?\)|[+-]?\s*(?:BHD|BD|SAR|AED|USD|EUR|GBP|\$|€)?\s*[\d,]+(?:\.\d{1,4})?(?:\s*(?:CR|DR|Cr|Dr))?)"#
+
+    private static func determineIsIncome(
+        amountString: String,
+        lineText: String,
+        profile: BankProfileRule?
+    ) -> Bool {
+        let upperText = lineText.uppercased()
+        let upperAmt = amountString.uppercased()
+
+        if let notation = profile?.signNotation {
+            switch notation {
+            case .parenthesesSigned:
+                // Al Salam Bank style: (+) is Credit/Income, (-) is Debit/Expense
+                if upperAmt.contains("(+)") || upperText.contains("(+)") || upperAmt.hasPrefix("+") {
+                    return true
+                }
+                if upperAmt.contains("(-)") || upperText.contains("(-)") || upperAmt.contains("(") || upperAmt.hasPrefix("-") {
+                    return false
+                }
+            case .creditCardNegativePayment:
+                // Credit card style:
+                // "PAYMENT RECEIVED" or negative amount is payment towards card (credit/income)
+                if upperText.contains("PAYMENT RECEIVED") || upperText.contains("PAYMENT - THANK YOU") || upperAmt.contains("-") || upperAmt.contains("(") {
+                    return true
+                }
+                // Purchases/debits are positive
+                return false
+            case .columnarDebitCredit, .standardSigned:
+                break
+            }
+        }
+
+        // Generic fallback heuristics
+        if upperText.contains("PAYMENT RECEIVED") || upperText.contains("SALARY") || upperText.contains("DEPOSIT") || upperText.contains("REFUND") || upperText.contains("CREDIT") || upperAmt.contains("CR") || upperAmt.contains("(+)") || upperAmt.hasPrefix("+") {
+            return true
+        }
+        if upperAmt.contains("(-)") || upperAmt.contains("(") || upperAmt.hasPrefix("-") || upperAmt.contains("DR") || upperText.contains("DEBIT") || upperText.contains("PURCHASE") || upperText.contains("WITHDRAWAL") {
+            return false
+        }
+
+        return false
+    }
+
+    private static func parseMultiLineBlocks(_ text: String, profile: BankProfileRule? = nil) -> [ParsedStatementItem] {
         var items: [ParsedStatementItem] = []
         let rawLines = text.components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -474,9 +618,7 @@ enum StatementService {
 
         guard !rawLines.isEmpty else { return [] }
 
-        // Date pattern matching any date format
-        let datePattern = #"\b(\d{1,4}[-/\.]\d{1,2}[-/\.]\d{1,4}|\d{1,2}[-/\. ]+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[-/\. ]+\d{2,4})\b"#
-        let dateRegex = try? NSRegularExpression(pattern: datePattern, options: .caseInsensitive)
+        let dateRegex = try? NSRegularExpression(pattern: transactionDatePattern, options: .caseInsensitive)
 
         // Find line indices where a date appears
         var dateLineIndices: [Int] = []
@@ -499,7 +641,7 @@ enum StatementService {
             }
 
             let blockLines = Array(rawLines[startIdx..<endIdx])
-            if let item = parseTransactionBlock(blockLines, dateRegex: dateRegex) {
+            if let item = parseTransactionBlock(blockLines, dateRegex: dateRegex, profile: profile) {
                 items.append(item)
             }
         }
@@ -507,8 +649,8 @@ enum StatementService {
         return items
     }
 
-    private static func parseTransactionBlock(_ lines: [String], dateRegex: NSRegularExpression?) -> ParsedStatementItem? {
-        guard let firstLine = lines.first else { return nil }
+    private static func parseTransactionBlock(_ lines: [String], dateRegex: NSRegularExpression?, profile: BankProfileRule? = nil) -> ParsedStatementItem? {
+        guard !lines.isEmpty else { return nil }
 
         // 1. Extract Date
         var detectedDate: Date? = nil
@@ -518,9 +660,10 @@ enum StatementService {
             let nsRange = NSRange(line.startIndex..., in: line)
             if let match = dateRegex?.firstMatch(in: line, range: nsRange),
                let r = Range(match.range, in: line) {
-                dateMatchString = String(line[r])
-                if let d = parseDate(dateMatchString) {
+                let candidateDateStr = String(line[r])
+                if let d = parseDate(candidateDateStr) {
                     detectedDate = d
+                    dateMatchString = candidateDateStr
                     break
                 }
             }
@@ -530,70 +673,57 @@ enum StatementService {
 
         // 2. Extract Monetary Amounts across block lines
         let combinedBlock = lines.joined(separator: " ")
-        let amountPattern = #"([+-]?\s*(?:BHD|BD|SAR|AED|USD|EUR|GBP|\$|€)?\s*[\d,]+\.\d{1,4}(?:\s*(?:CR|DR|Cr|Dr))?|\([\d,]+\.\d{1,4}\))"#
-        let amtRegex = try? NSRegularExpression(pattern: amountPattern)
-        let amtMatches = amtRegex?.matches(in: combinedBlock, range: NSRange(combinedBlock.startIndex..., in: combinedBlock)) ?? []
+
+        // Strip out non-monetary numeric tokens so they don't get detected as amounts:
+        // - MCC: 5814
+        // - Card numbers e.g. 4545 22** **** 1843
+        var textForAmounts = combinedBlock
+            .replacingOccurrences(of: #"MCC:\s*\d{4}"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"[0-9]{4,6}\*+[0-9]{4}"#, with: " ", options: .regularExpression)
+
+        let amtRegex = try? NSRegularExpression(pattern: transactionAmountPattern)
+        let amtMatches = amtRegex?.matches(in: textForAmounts, range: NSRange(textForAmounts.startIndex..., in: textForAmounts)) ?? []
 
         guard !amtMatches.isEmpty else { return nil }
 
-        var candidateAmountStr = ""
-        var isIncome = false
+        // First matched amount is transaction debit or credit
+        let firstMatchRange = Range(amtMatches[0].range, in: textForAmounts)!
+        let candidateAmountStr = String(textForAmounts[firstMatchRange])
 
-        let upperBlock = combinedBlock.uppercased()
-        if upperBlock.contains("CR") || upperBlock.contains("CREDIT") || upperBlock.contains("DEPOSIT") || upperBlock.contains("SALARY") || upperBlock.contains("REFUND") {
-            isIncome = true
-        }
-
-        if amtMatches.count == 1 {
-            candidateAmountStr = String(combinedBlock[Range(amtMatches[0].range, in: combinedBlock)!])
-        } else {
-            // First amount is almost universally the transaction debit or credit; second is balance
-            candidateAmountStr = String(combinedBlock[Range(amtMatches[0].range, in: combinedBlock)!])
-        }
-
-        if candidateAmountStr.contains("-") || candidateAmountStr.contains("(") {
-            isIncome = false
-        } else if candidateAmountStr.contains("+") {
-            isIncome = true
-        }
-
+        let isIncome = determineIsIncome(amountString: candidateAmountStr, lineText: combinedBlock, profile: profile)
         let cleanAmount = parseAmount(candidateAmountStr)
         guard cleanAmount > 0 else { return nil }
 
         // 3. Extract Merchant / Narrative Description
         var desc = combinedBlock
-        // Remove date
         if !dateMatchString.isEmpty {
             desc = desc.replacingOccurrences(of: dateMatchString, with: " ")
         }
-        // Remove amounts
         for m in amtMatches {
-            if let r = Range(m.range, in: desc) {
-                desc = desc.replacingCharacters(in: r, with: " ")
+            if let r = Range(m.range, in: textForAmounts) {
+                let token = String(textForAmounts[r])
+                desc = desc.replacingOccurrences(of: token, with: " ")
             }
         }
 
-        // Clean noise tokens
-        let cleanDesc = desc
-            .replacingOccurrences(of: #"\b(?:CR|DR|BHD|BD|SAR|AED|USD|EUR|GBP|POS|PURCHASE|AUTH|DEBIT|CREDIT|BALANCE)\b"#, with: "", options: [.regularExpression, .caseInsensitive])
-            .replacingOccurrences(of: #"[|;,\t\n\r]"#, with: " ", options: .regularExpression)
-            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
-            .trimmingCharacters(in: CharacterSet(charactersIn: " -/.:,").union(.whitespacesAndNewlines))
+        // Clean merchant narrative and map category/ref via knowledge base
+        let docType = profile?.docType ?? .bankAccount
+        let cleaned = BankProfileRegistry.cleanMerchantDescription(desc, docType: docType)
+        let merchantName = cleaned.merchant
+        guard !merchantName.isEmpty && merchantName.count >= 2 else { return nil }
 
-        guard !cleanDesc.isEmpty && cleanDesc.count >= 2 else { return nil }
-
-        // 4. Extract Reference
-        var ref: String? = nil
-        if let refRange = combinedBlock.range(of: #"\b(?:REF|TRX|FT|BIB|AUTH|DOC)[#: ]*([A-Z0-9]{5,25})\b"#, options: [.regularExpression, .caseInsensitive]) {
+        // 4. Reference
+        var ref = cleaned.ref
+        if ref == nil, let refRange = combinedBlock.range(of: #"\b(?:REF|TRX|FT|BIB|AUTH|DOC)[#: ]*([A-Z0-9]{5,25})\b"#, options: [.regularExpression, .caseInsensitive]) {
             ref = String(combinedBlock[refRange])
         }
 
-        // 5. Category Guessing
-        let cat = Categorizer.guess(cleanDesc) ?? (isIncome ? .income : .other)
+        // 5. Category (MCC or AI Categorizer)
+        let cat = cleaned.category ?? Categorizer.guess(merchantName) ?? (isIncome ? .income : .other)
 
         return ParsedStatementItem(
             date: date,
-            merchant: cleanDesc,
+            merchant: merchantName,
             amount: cleanAmount,
             isIncome: isIncome,
             reference: ref,
@@ -604,7 +734,7 @@ enum StatementService {
 
     // MARK: - Strategy 2: Single-Line Regex Parser
 
-    private static func parseSingleLines(_ text: String) -> [ParsedStatementItem] {
+    private static func parseSingleLines(_ text: String, profile: BankProfileRule? = nil) -> [ParsedStatementItem] {
         var items: [ParsedStatementItem] = []
         let rawLines = text.components(separatedBy: .newlines)
 
@@ -614,7 +744,7 @@ enum StatementService {
                 continue
             }
 
-            if let item = parseStatementLine(trimmed) {
+            if let item = parseStatementLine(trimmed, profile: profile) {
                 items.append(item)
             }
         }
@@ -649,7 +779,6 @@ enum StatementService {
         for i in 0..<dates.count {
             let d = dates[i].date
             let a = amounts[i].amount
-            // Find text lines between dates or adjacent
             let desc = "Transaction \(i + 1)"
             let cat = Categorizer.guess(desc) ?? .other
             items.append(ParsedStatementItem(
@@ -675,10 +804,7 @@ enum StatementService {
         if l.contains("date") && (l.contains("description") || l.contains("amount") || l.contains("particulars") || l.contains("balance")) {
             return true
         }
-        if l.contains("page ") || l.contains("opening balance") || l.contains("closing balance") || l.contains("statement period") {
-            return true
-        }
-        if l.contains("total debit") || l.contains("total credit") || l.contains("generated on") {
+        if l.contains("page ") || l.contains("statement period") || l.contains("total debit") || l.contains("total credit") || l.contains("generated on") {
             return true
         }
         return false
@@ -686,10 +812,8 @@ enum StatementService {
 
     // MARK: - Line Regex & Field Extraction
 
-    static func parseStatementLine(_ line: String) -> ParsedStatementItem? {
-        let datePattern = #"\b(\d{1,4}[-/\.]\d{1,2}[-/\.]\d{1,4}|\d{1,2}[-/\. ]+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[-/\. ]+\d{2,4})\b"#
-
-        guard let dateRange = line.range(of: datePattern, options: [.regularExpression, .caseInsensitive]) else {
+    static func parseStatementLine(_ line: String, profile: BankProfileRule? = nil) -> ParsedStatementItem? {
+        guard let dateRange = line.range(of: transactionDatePattern, options: [.regularExpression, .caseInsensitive]) else {
             return nil
         }
 
@@ -698,62 +822,44 @@ enum StatementService {
 
         let remaining = line.replacingCharacters(in: dateRange, with: " ")
 
-        // Amounts: Find numbers like 1,250.00, 15.500, (4.50), -4.50, 4.500 CR
-        let amountPattern = #"([+-]?\s*(?:BHD|BD|SAR|AED|USD|EUR|GBP|\$)?\s*[\d,]+\.\d{1,4}(?:\s*(?:CR|DR|Cr|Dr))?|\([\d,]+\.\d{1,4}\))"#
-        let regex = try? NSRegularExpression(pattern: amountPattern)
-        let matches = regex?.matches(in: remaining, range: NSRange(remaining.startIndex..., in: remaining)) ?? []
+        // Amounts: Find numbers like 1,250.00, 15.500, (-) 10.000, (+) 100.000, -98, 2
+        var textForAmounts = remaining
+            .replacingOccurrences(of: #"MCC:\s*\d{4}"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"[0-9]{4,6}\*+[0-9]{4}"#, with: " ", options: .regularExpression)
 
-        guard let firstMatch = matches.first, let range1 = Range(firstMatch.range, in: remaining) else {
+        let regex = try? NSRegularExpression(pattern: transactionAmountPattern)
+        let matches = regex?.matches(in: textForAmounts, range: NSRange(textForAmounts.startIndex..., in: textForAmounts)) ?? []
+
+        guard let firstMatch = matches.first, let range1 = Range(firstMatch.range, in: textForAmounts) else {
             return nil
         }
 
-        var candidateAmountStr = String(remaining[range1])
-        var isIncome = false
-
-        let upperRemaining = remaining.uppercased()
-        if upperRemaining.contains("CR") || upperRemaining.contains("CREDIT") || upperRemaining.contains("DEPOSIT") || upperRemaining.contains("SALARY") || upperRemaining.contains("REFUND") {
-            isIncome = true
-        }
-
-        if matches.count >= 2 {
-            let m0Str = String(remaining[Range(matches[0].range, in: remaining)!])
-            if upperRemaining.contains("CR") || upperRemaining.contains("CREDIT") {
-                isIncome = true
-            }
-            candidateAmountStr = m0Str
-        }
-
-        if candidateAmountStr.contains("-") || candidateAmountStr.contains("(") {
-            isIncome = false
-        } else if candidateAmountStr.contains("+") {
-            isIncome = true
-        }
-
+        let candidateAmountStr = String(textForAmounts[range1])
+        let isIncome = determineIsIncome(amountString: candidateAmountStr, lineText: line, profile: profile)
         let cleanAmount = parseAmount(candidateAmountStr)
         guard cleanAmount > 0 else { return nil }
 
         // Clean merchant / description text
         var desc = remaining
         for m in matches {
-            if let r = Range(m.range, in: desc) {
-                desc = desc.replacingCharacters(in: r, with: " ")
+            if let r = Range(m.range, in: textForAmounts) {
+                let token = String(textForAmounts[r])
+                desc = desc.replacingOccurrences(of: token, with: " ")
             }
         }
-        let cleanDesc = desc
-            .replacingOccurrences(of: #"\b(?:CR|DR|BHD|BD|SAR|AED|USD)\b"#, with: "", options: [.regularExpression, .caseInsensitive])
-            .replacingOccurrences(of: #"[|;,]"#, with: " ", options: .regularExpression)
-            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
 
+        let docType = profile?.docType ?? .bankAccount
+        let cleaned = BankProfileRegistry.cleanMerchantDescription(desc, docType: docType)
+        let cleanDesc = cleaned.merchant
         guard !cleanDesc.isEmpty else { return nil }
 
         // Extract reference number
-        var ref: String? = nil
-        if let refRange = line.range(of: #"\b(?:REF|TRX|FT|BIB)[#: ]*([A-Z0-9]{6,25})\b"#, options: [.regularExpression, .caseInsensitive]) {
+        var ref: String? = cleaned.ref
+        if ref == nil, let refRange = line.range(of: #"\b(?:REF|TRX|FT|BIB)[#: ]*([A-Z0-9]{6,25})\b"#, options: [.regularExpression, .caseInsensitive]) {
             ref = String(line[refRange])
         }
 
-        let guessedCategory = Categorizer.guess(cleanDesc) ?? (isIncome ? .income : .other)
+        let guessedCategory = cleaned.category ?? Categorizer.guess(cleanDesc) ?? (isIncome ? .income : .other)
 
         return ParsedStatementItem(
             date: date,
@@ -768,7 +874,7 @@ enum StatementService {
 
     // MARK: - CSV & Delimited Rows Parsing
 
-    static func parseCSVRows(_ csvText: String) -> [ParsedStatementItem] {
+    static func parseCSVRows(_ csvText: String, profile: BankProfileRule? = nil) -> [ParsedStatementItem] {
         var items: [ParsedStatementItem] = []
         let lines = csvText.components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -840,9 +946,18 @@ enum StatementService {
             refCol = nil
         }
 
+        let docType = profile?.docType ?? .bankAccount
+
         for i in startRow..<lines.count {
             let line = lines[i]
+            let lowerLine = line.lowercased()
+
+            // Skip opening/closing balance summary rows e.g. ",Opening Balance,,,BHD 431.841"
+            if lowerLine.contains("opening balance") || lowerLine.contains("closing balance") {
+                continue
+            }
             if isHeaderOrFooterLine(line) { continue }
+
             let cells = splitCSVLine(line, separator: sep)
             guard cells.count > max(dateCol, descCol) else { continue }
 
@@ -868,11 +983,7 @@ enum StatementService {
             } else if let amtIdx = amountCol, cells.count > amtIdx {
                 let cellVal = cells[amtIdx]
                 amount = parseAmount(cellVal)
-                if cellVal.contains("-") || cellVal.contains("(") || cellVal.uppercased().contains("DR") {
-                    isIncome = false
-                } else if cellVal.contains("+") || cellVal.uppercased().contains("CR") {
-                    isIncome = true
-                }
+                isIncome = determineIsIncome(amountString: cellVal, lineText: line, profile: profile)
             } else {
                 continue
             }
@@ -885,11 +996,16 @@ enum StatementService {
                 if !cleanR.isEmpty { refVal = cleanR }
             }
 
-            let cat = Categorizer.guess(descRaw) ?? (isIncome ? .income : .other)
+            let cleaned = BankProfileRegistry.cleanMerchantDescription(descRaw, docType: docType)
+            if refVal == nil {
+                refVal = cleaned.ref
+            }
+            let finalMerchant = cleaned.merchant.isEmpty ? descRaw : cleaned.merchant
+            let cat = cleaned.category ?? Categorizer.guess(finalMerchant) ?? (isIncome ? .income : .other)
 
             items.append(ParsedStatementItem(
                 date: date,
-                merchant: descRaw,
+                merchant: finalMerchant,
                 amount: amount,
                 isIncome: isIncome,
                 reference: refVal,
@@ -1197,6 +1313,16 @@ enum StatementService {
             "dd MMM yy",
             "d-MMM-yy",
             "d MMM yy",
+            "EEE MMM dd yyyy",
+            "EEE MMM d yyyy",
+            "EEE, MMM dd, yyyy",
+            "EEE, MMM d, yyyy",
+            "EEE dd MMM yyyy",
+            "EEE, dd MMM yyyy",
+            "MMM dd yyyy",
+            "MMM d yyyy",
+            "MMM dd, yyyy",
+            "MMM d, yyyy",
             "d/M/yyyy",
             "d-M-yyyy",
             "d.M.yyyy",
@@ -1209,10 +1335,6 @@ enum StatementService {
             "MM-dd-yy",
             "M/d/yyyy",
             "M/d/yy",
-            "MMM dd, yyyy",
-            "MMM d, yyyy",
-            "MMM dd yyyy",
-            "MMM d yyyy",
             "dd MMMM yyyy",
             "MMMM dd, yyyy",
             "yyyyMMdd"
@@ -1226,6 +1348,18 @@ enum StatementService {
             df.dateFormat = fmt
             if let d = df.date(from: clean) {
                 return d
+            }
+        }
+
+        // Strip day of week prefix if present (e.g. "Wed May 13 2026" or "Wed, May 13 2026")
+        let dayPrefixPattern = #"^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*,?\s+"#
+        if let dayRange = clean.range(of: dayPrefixPattern, options: [.regularExpression, .caseInsensitive]) {
+            let withoutDay = String(clean[dayRange.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+            for fmt in formats {
+                df.dateFormat = fmt
+                if let d = df.date(from: withoutDay) {
+                    return d
+                }
             }
         }
 
