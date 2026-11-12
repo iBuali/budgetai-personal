@@ -100,7 +100,7 @@ enum BankProfileRegistry {
                 datePatterns: ["dd MMM yy", "dd MMM yyyy", "dd/MM/yyyy"],
                 primaryCurrency: "BHD",
                 swiftCode: "BIBBBHBMINV",
-                ibanPrefix: "BH85BIBB",
+                ibanPrefix: "BIBB",
                 notes: "Columnar Debit/Credit. Amounts prefixed with 'BHD '. Row dates in 'dd MMM yy' format."
             ),
 
@@ -127,7 +127,7 @@ enum BankProfileRegistry {
                 datePatterns: ["dd MMM yyyy", "dd-MMM-yyyy", "dd/MM/yyyy"],
                 primaryCurrency: "BHD",
                 swiftCode: "ALSABHBM",
-                ibanPrefix: "BH69ALSA",
+                ibanPrefix: "ALSA",
                 notes: "Debits formatted with '(-) 10.000', Credits with '(+) 100.000'. Value date column present."
             ),
 
@@ -141,7 +141,7 @@ enum BankProfileRegistry {
                 datePatterns: ["yyyy-MM-dd", "dd/MM/yyyy"],
                 primaryCurrency: "BHD",
                 swiftCode: "ILABBHBM",
-                ibanPrefix: "BH29ILAB",
+                ibanPrefix: "ILAB",
                 notes: "Standard ISO dates and columnar debit/credit."
             ),
 
@@ -155,7 +155,7 @@ enum BankProfileRegistry {
                 datePatterns: ["dd-MMM-yyyy", "dd/MM/yyyy", "dd MMM yyyy"],
                 primaryCurrency: "BHD",
                 swiftCode: "NBOBBHBM",
-                ibanPrefix: "BH68NBOB",
+                ibanPrefix: "NBOB",
                 notes: "Columnar Debit and Credit amounts with transaction references."
             ),
 
@@ -169,7 +169,7 @@ enum BankProfileRegistry {
                 datePatterns: ["dd/MM/yyyy", "dd-MM-yyyy"],
                 primaryCurrency: "BHD",
                 swiftCode: "BBKUBHBM",
-                ibanPrefix: "BH56BBKU",
+                ibanPrefix: "BBKU",
                 notes: "Standard British/Bahrain date notation with debit/credit columns."
             )
         ]
@@ -193,10 +193,13 @@ enum BankProfileRegistry {
 
     static func matchProfile(for text: String) -> (profile: BankProfileRule, confidence: Double) {
         let lower = text.lowercased()
-        var bestProfile: BankProfileRule = builtInProfiles[0]
+        var bestProfile = BankProfileRule(id: "generic", bankName: "Unknown Bank", docType: .generic,
+            headerKeywords: [], signNotation: .standardSigned, datePatterns: ["yyyy-MM-dd", "dd/MM/yyyy"])
         var highestScore: Double = 0.0
 
         for p in allProfiles {
+            // A card statement includes the same bank/address as an account statement.
+            if lower.contains("credit card statement") && p.docType == .bankAccount { continue }
             var score = 0.0
             var matchedKeywords = 0
 
@@ -291,10 +294,10 @@ enum BankProfileRegistry {
             .replacingOccurrences(of: #"FAWRI\+\s*Payment\s*to\s+[A-Z0-9]+-[0-9]+"#, with: "Fawri+ Transfer", options: .regularExpression)
             .replacingOccurrences(of: #"FAWRI\+\s*Payment\s*From\s+IBAN:\s+[A-Z0-9]+-[0-9]+"#, with: "Fawri+ Received", options: .regularExpression)
             .replacingOccurrences(of: #"FAWATEER\s+([A-Za-z0-9 ]+?)\s+[0-9]+.*"#, with: "$1", options: .regularExpression)
-            .replacingOccurrences(of: #"Purchases\s*&\s*Services-\s*"#, with: "", options: .caseInsensitive)
-            .replacingOccurrences(of: #"POS\s*PURCHASE\s*(?:AFS\s*Acquiring\s*ONUS,?)?\s*"#, with: "", options: .caseInsensitive)
-            .replacingOccurrences(of: #"ATM\s*WITHDRAWAL\s*(?:BENEFIT\s*ATM\s*PAY\s*ACCOUNT,?)?\s*"#, with: "ATM Cash Withdrawal ", options: .caseInsensitive)
-            .replacingOccurrences(of: #"Direct\s*Debit\s*-\s*EFTS\s*ASB\s*EFTS\s*Inward\s*DNS,?"#, with: "Utility Direct Debit", options: .caseInsensitive)
+            .replacingOccurrences(of: #"Purchases\s*&\s*Services-\s*"#, with: "", options: [.regularExpression, .caseInsensitive])
+            .replacingOccurrences(of: #"POS\s*PURCHASE\s*(?:AFS\s*Acquiring\s*ONUS,?)?\s*"#, with: "", options: [.regularExpression, .caseInsensitive])
+            .replacingOccurrences(of: #"ATM\s*WITHDRAWAL\s*(?:BENEFIT\s*ATM\s*PAY\s*ACCOUNT,?)?\s*"#, with: "ATM Cash Withdrawal ", options: [.regularExpression, .caseInsensitive])
+            .replacingOccurrences(of: #"Direct\s*Debit\s*-\s*EFTS\s*ASB\s*EFTS\s*Inward\s*DNS,?"#, with: "Utility Direct Debit", options: [.regularExpression, .caseInsensitive])
             .replacingOccurrences(of: #"[|;,\t\n\r]"#, with: " ", options: .regularExpression)
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
             .trimmingCharacters(in: CharacterSet(charactersIn: " -/.:,").union(.whitespacesAndNewlines))

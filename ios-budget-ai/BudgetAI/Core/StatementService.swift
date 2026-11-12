@@ -40,6 +40,17 @@ struct ParsedStatementItem: Identifiable, Hashable {
     var duplicateReason: String? = nil
     var aiSuggestedCategory: Bool = false
 
+    var transactionType: SMSTransactionType {
+        let text = rawDescription.lowercased()
+        if isIncome && (text.contains("refund") || text.contains("reversal")) { return .refund }
+        if isIncome && (text.contains("salary") || text.contains("payroll")) { return .income }
+        if text.contains(" charges") || text.contains("bank fee") || text.contains("service fee") || text.hasPrefix("vat charges") { return .fee }
+        if category == .transfers || text.contains("fawri") || text.contains("transfer") || text.contains("payment received") || text.contains("credit card payment") {
+            return isIncome ? .transferIn : .transferOut
+        }
+        return isIncome ? .income : .expense
+    }
+
     init(
         id: UUID = UUID(),
         date: Date,
@@ -105,26 +116,8 @@ enum StatementService {
 
         if ext == "pdf" || isPDF {
             result = parsePDF(data: fileData, accounts: existingAccounts)
-            // If PDFKit couldn't find items (e.g. non-standard structure), fallback to text scan
-            if result.items.isEmpty {
-                let text = decodeString(from: fileData)
-                let textItems = parseTextLinesToItems(text)
-                if !textItems.isEmpty {
-                    result.items = textItems
-                }
-            }
         } else if ext == "xlsx" || isZip {
             result = parseXLSX(data: fileData, accounts: existingAccounts)
-            // If XLSX extraction had 0 items, fallback to XLS / CSV
-            if result.items.isEmpty {
-                let xlsResult = parseXLS(data: fileData, accounts: existingAccounts)
-                if !xlsResult.items.isEmpty {
-                    result = xlsResult
-                } else {
-                    let csvResult = parseCSV(data: fileData, accounts: existingAccounts)
-                    if !csvResult.items.isEmpty { result = csvResult }
-                }
-            }
         } else if ext == "xls" || ext == "xml" || ext == "html" || ext == "htm" {
             result = parseXLS(data: fileData, accounts: existingAccounts)
             if result.items.isEmpty && isZip {
@@ -151,6 +144,20 @@ enum StatementService {
             }
         }
 
+        if result.items.isEmpty && result.inconsistencies.isEmpty {
+            result.inconsistencies.append("No transactions could be mapped safely. Manually map Date, Description and Debit/Credit or signed Amount columns in a CSV/Excel export.")
+        }
+        if result.items.contains(where: { !$0.isSelected && !$0.isDuplicate }) && result.inconsistencies.isEmpty {
+            result.inconsistencies.append("The date order or column mapping is ambiguous. Manually map the columns and date format in a CSV/Excel export, or correct each row before selecting it.")
+        }
+        if let opening = result.openingBalance, let closing = result.closingBalance,
+           !(result.profileName?.contains("Credit Card") ?? false) {
+            let movement = result.items.reduce(0.0) { $0 + ($1.isIncome ? $1.amount : -$1.amount) }
+            if abs(opening + movement - closing) > 0.005 {
+                result.inconsistencies.append("Extracted transactions do not reconcile with the opening and closing balances. Check for missing rows or incorrect column mapping before importing.")
+                for index in result.items.indices { result.items[index].isSelected = false }
+            }
+        }
         // Apply duplicate detection against existing transactions
         return flagDuplicates(in: result, against: existingTransactions)
     }
@@ -159,9 +166,23 @@ enum StatementService {
 
     static func flagDuplicates(in result: StatementParseResult, against existing: [MoneyTransaction]) -> StatementParseResult {
         var copy = result
+        var consumed = Set<UUID>()
+        var references = Set<String>()
         for idx in copy.items.indices {
             let item = copy.items[idx]
-            if let dup = findDuplicate(item, in: existing) {
+            copy.items[idx].isDuplicate = false
+            copy.items[idx].duplicateReason = nil
+            let match = existing.first { !consumed.contains($0.id) && (result.matchedAccountID == nil || $0.accountID == result.matchedAccountID) && findDuplicate(item, in: [$0]) != nil }
+            var reason: String?
+            if let match {
+                consumed.insert(match.id)
+                reason = findDuplicate(item, in: [match])
+            }
+            if let reference = item.reference?.trimmingCharacters(in: .whitespacesAndNewlines), !reference.isEmpty {
+                let key = "\(reference.uppercased())|\(Calendar.current.startOfDay(for: item.date))|\(item.amount)|\(item.isIncome)"
+                if !references.insert(key).inserted { reason = "Repeated transaction reference, date and amount in this file" }
+            }
+            if let dup = reason {
                 copy.items[idx].isDuplicate = true
                 copy.items[idx].isSelected = false // Uncheck duplicates by default to prevent re-importing
                 copy.items[idx].duplicateReason = dup
@@ -175,7 +196,7 @@ enum StatementService {
             // 1. Strict Reference match
             if let itemRef = item.reference?.trimmingCharacters(in: .whitespacesAndNewlines), !itemRef.isEmpty,
                let txRef = tx.smsReference?.trimmingCharacters(in: .whitespacesAndNewlines), !txRef.isEmpty {
-                if itemRef.caseInsensitiveCompare(txRef) == .orderedSame {
+                if itemRef.caseInsensitiveCompare(txRef) == .orderedSame && abs(tx.amount - item.amount) < 0.0005 && tx.isIncome == item.isIncome {
                     return "Matched Reference \(itemRef)"
                 }
             }
@@ -186,7 +207,7 @@ enum StatementService {
                 if Calendar.current.isDate(tx.date, inSameDayAs: item.date) {
                     let cleanTx = tx.merchant.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
                     let cleanItem = item.merchant.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-                    if cleanTx == cleanItem || cleanTx.contains(cleanItem) || cleanItem.contains(cleanTx) {
+                    if !cleanTx.isEmpty && !cleanItem.isEmpty && cleanTx == cleanItem {
                         return "Identical amount & merchant on \(DateFormatter.localizedString(from: item.date, dateStyle: .short, timeStyle: .none))"
                     }
                 }
@@ -222,8 +243,8 @@ enum StatementService {
         if let b = bank?.trimmingCharacters(in: .whitespacesAndNewlines), !b.isEmpty {
             let bLower = b.lowercased()
             if let matched = accounts.first(where: {
-                $0.institution.lowercased().contains(bLower) || bLower.contains($0.institution.lowercased()) ||
-                $0.name.lowercased().contains(bLower) || bLower.contains($0.name.lowercased())
+                (!$0.institution.isEmpty && ($0.institution.lowercased().contains(bLower) || bLower.contains($0.institution.lowercased()))) ||
+                (!$0.name.isEmpty && ($0.name.lowercased().contains(bLower) || bLower.contains($0.name.lowercased())))
             }) {
                 return matched
             }
@@ -249,7 +270,22 @@ enum StatementService {
         let detected = extractHeaderMetadata(from: fullText)
         let matchedAcc = matchAccount(ibanOrAcc: detected.iban, cardLast4: detected.cardLast4, bank: detected.bank, in: accounts)
 
-        let items = parseTextLinesToItems(fullText, profile: detected.profile)
+        let table = StatementPDFTable.extract(doc)
+        var items = table.map { parseCSVRows($0, profile: detected.profile) }
+            ?? parseTextLinesToItems(fullText, profile: detected.profile)
+        var issues: [String] = []
+        if items.isEmpty {
+            issues.append(fullText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? "This PDF has no readable text or is locked. Unlock it or use an OCR/text-based PDF or Excel export."
+                : "The statement columns could not be mapped safely. Please manually map Date, Description and Debit/Credit or signed Amount in a CSV/Excel export.")
+        } else if table == nil {
+            for index in items.indices { items[index].isSelected = false }
+            issues.append("This PDF layout is unrecognized. Review each extracted date, amount and direction before selecting transactions.")
+        }
+        if let table, !items.isEmpty, table.components(separatedBy: "\n").count - 1 != items.count {
+            issues.append("Some dated rows could not be mapped safely. Check all rows and manually map the statement columns before importing.")
+            for index in items.indices { items[index].isSelected = false }
+        }
 
         return StatementParseResult(
             items: items,
@@ -264,7 +300,8 @@ enum StatementService {
             profileName: "\(detected.profile.bankName) (\(detected.profile.docType.rawValue))",
             confidenceScore: detected.confidence,
             openingBalance: detected.openingBalance,
-            closingBalance: detected.closingBalance
+            closingBalance: detected.closingBalance,
+            inconsistencies: issues
         )
     }
 
@@ -361,17 +398,21 @@ enum StatementService {
         }
 
         // Extract Worksheets: xl/worksheets/sheet1.xml (or any sheet)
-        let sheetEntries = entries.filter { $0.key.lowercased().contains("worksheets/sheet") }
+        let sheetEntries = entries.filter { $0.key.lowercased().hasPrefix("xl/worksheets/") && $0.key.lowercased().hasSuffix(".xml") && !$0.key.contains("/_rels/") }
             .sorted(by: { $0.key < $1.key })
 
         let detectedInZip = extractHeaderMetadata(from: sharedStrings.joined(separator: " "))
 
+        let stylesXML = entries["xl/styles.xml"].flatMap { String(data: $0, encoding: .utf8) } ?? ""
+        let dateStyles = StatementWorkbookXML.dateStyles(stylesXML)
+        let workbookXML = entries["xl/workbook.xml"].flatMap { String(data: $0, encoding: .utf8) } ?? ""
+        let date1904 = ["1", "true"].contains(StatementWorkbookXML.read(workbookXML)?.descendants("workbookPr").first?.attributes["date1904"] ?? "")
         for (_, sheetData) in sheetEntries {
             guard let sheetXml = String(data: sheetData, encoding: .utf8) else { continue }
-            let rowsText = parseWorksheetXml(sheetXml, sharedStrings: sharedStrings)
+            let rowsText = StatementWorkbookXML.worksheet(sheetXml, strings: sharedStrings, dateStyles: dateStyles, date1904: date1904)
             if !rowsText.isEmpty {
                 combinedText += rowsText + "\n"
-                let sheetItems = parseCSVRows(rowsText, profile: detectedInZip.profile)
+                let sheetItems = parseCSVRows(rowsText, profile: extractHeaderMetadata(from: rowsText).profile)
                 items.append(contentsOf: sheetItems)
             }
         }
@@ -566,7 +607,7 @@ enum StatementService {
     // MARK: - Strategy 1: Multi-Line Transaction Block Aggregator
 
     private static let transactionDatePattern = #"\b(?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*,?\s+)?(?:(?:\d{1,4}[-/\.]\d{1,2}[-/\.]\d{1,4})|(?:\d{1,2}[-/\. ]+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[-/\. ]+\d{2,4})|(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[-/\. ]+\d{1,2}[, ]+\d{2,4}))\b"#
-    private static let transactionAmountPattern = #"(?:\([+-]\)\s*[\d,]+(?:\.\d{1,4})?|\([+-]?\s*[\d,]+(?:\.\d{1,4})?\)|(?:BHD|BD|SAR|AED|USD|EUR|GBP|\$|€)\s*[-+]?\s*[\d,]+(?:\.\d{1,4})?(?:\s*(?:CR|DR|Cr|Dr))?|[-+]?\s*(?:BHD|BD|SAR|AED|USD|EUR|GBP|\$|€)\s*[\d,]+(?:\.\d{1,4})?(?:\s*(?:CR|DR|Cr|Dr))?|(?<![A-Za-z0-9])[+-]?\d{1,3}(?:,\d{3})*\.\d{1,4}(?![A-Za-z0-9])(?:\s*(?:CR|DR|Cr|Dr))?|(?<![A-Za-z0-9])[+-]?\d+\.\d{1,4}(?![A-Za-z0-9])(?:\s*(?:CR|DR|Cr|Dr))?|(?<![A-Za-z0-9])[+-]\d{1,6}(?![A-Za-z0-9])|(?<![A-Za-z0-9])\b\d{1,5}\b(?![A-Za-z0-9]))"#
+    private static let transactionAmountPattern = #"(?:\([+-]\)\s*[\d,]+(?:\.\d{1,4})?|\([+-]?\s*[\d,]+(?:\.\d{1,4})?\)|(?:BHD|BD|SAR|AED|USD|EUR|GBP|\$|â‚¬)\s*[-+]?\s*[\d,]+(?:\.\d{1,4})?(?:\s*(?:CR|DR|Cr|Dr))?|[-+]?\s*(?:BHD|BD|SAR|AED|USD|EUR|GBP|\$|â‚¬)\s*[\d,]+(?:\.\d{1,4})?(?:\s*(?:CR|DR|Cr|Dr))?|(?<![A-Za-z0-9])[+-]?\d{1,3}(?:,\d{3})*\.\d{1,4}(?![A-Za-z0-9])(?:\s*(?:CR|DR|Cr|Dr))?|(?<![A-Za-z0-9])[+-]?\d+\.\d{1,4}(?![A-Za-z0-9])(?:\s*(?:CR|DR|Cr|Dr))?|(?<![A-Za-z0-9])[+-]\d{1,6}(?![A-Za-z0-9])|(?<![A-Za-z0-9])\b\d{1,5}\b(?![A-Za-z0-9]))"#
 
     private static func determineIsIncome(
         amountString: String,
@@ -598,6 +639,10 @@ enum StatementService {
                 break
             }
         }
+
+        if upperAmt.contains("DR") || upperAmt.contains("(-)") || upperAmt.contains("-") || (upperAmt.contains("(") && !upperAmt.contains("(+)")) { return false }
+        if upperAmt.contains("CR") || upperAmt.contains("(+)") || upperAmt.hasPrefix("+") { return true }
+        if profile?.signNotation == .standardSigned { return true }
 
         // Generic fallback heuristics
         if upperText.contains("PAYMENT RECEIVED") || upperText.contains("SALARY") || upperText.contains("DEPOSIT") || upperText.contains("REFUND") || upperText.contains("CREDIT") || upperAmt.contains("CR") || upperAmt.contains("(+)") || upperAmt.hasPrefix("+") {
@@ -693,7 +738,7 @@ enum StatementService {
             .replacingOccurrences(of: #"\b[A-Z]{2}\d{10,30}\b"#, with: " ", options: .regularExpression)
             .replacingOccurrences(of: #"\b(?:FT|BP|BIB|ALS|NBB|REF|TRX)\d+[A-Z0-9]*\b"#, with: " ", options: .regularExpression)
             .replacingOccurrences(of: #"\b(?:Debit\s*Card|Credit\s*Card|Card)\s*(?:No\.?|#)?\s*[0-9]{4}\b"#, with: " ", options: [.regularExpression, .caseInsensitive])
-            .replacingOccurrences(of: #"(?:[-–—]\s*)?MCC:\s*\d{4}"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"(?:[-â€“â€”]\s*)?MCC:\s*\d{4}"#, with: " ", options: .regularExpression)
             .replacingOccurrences(of: #"[0-9]{4,6}\*+[0-9]{4}"#, with: " ", options: .regularExpression)
 
         let amtRegex = try? NSRegularExpression(pattern: transactionAmountPattern)
@@ -856,7 +901,7 @@ enum StatementService {
             .replacingOccurrences(of: #"\b[A-Z]{2}\d{10,30}\b"#, with: " ", options: .regularExpression)
             .replacingOccurrences(of: #"\b(?:FT|BP|BIB|ALS|NBB|REF|TRX)\d+[A-Z0-9]*\b"#, with: " ", options: .regularExpression)
             .replacingOccurrences(of: #"\b(?:Debit\s*Card|Credit\s*Card|Card)\s*(?:No\.?|#)?\s*[0-9]{4}\b"#, with: " ", options: [.regularExpression, .caseInsensitive])
-            .replacingOccurrences(of: #"(?:[-–—]\s*)?MCC:\s*\d{4}"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"(?:[-â€“â€”]\s*)?MCC:\s*\d{4}"#, with: " ", options: .regularExpression)
             .replacingOccurrences(of: #"[0-9]{4,6}\*+[0-9]{4}"#, with: " ", options: .regularExpression)
 
         let regex = try? NSRegularExpression(pattern: transactionAmountPattern)
@@ -917,19 +962,31 @@ enum StatementService {
 
     static func parseCSVRows(_ csvText: String, profile: BankProfileRule? = nil) -> [ParsedStatementItem] {
         var items: [ParsedStatementItem] = []
-        let lines = csvText.components(separatedBy: .newlines)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        // Quoted descriptions may contain line breaks. Keep them within the same record.
+        var normalized = ""
+        var insideQuotes = false
+        for character in csvText {
+            if character == "\"" { insideQuotes.toggle() }
+            normalized.append(insideQuotes && (character == "\n" || character == "\r") ? " " : character)
+        }
+        let lines = normalized.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: " \r")) }
             .filter { !$0.isEmpty }
         guard lines.count >= 1 else { return [] }
 
         // Identify separator: tab, comma, semicolon, pipe
-        let firstLine = lines.first ?? ""
-        let sep: Character = {
-            if firstLine.contains("\t") { return "\t" }
-            if firstLine.contains(";") { return ";" }
-            if firstLine.contains("|") { return "|" }
-            return ","
-        }()
+        let separators: [Character] = ["\t", ";", "|", ","]
+        let sep = separators.max { left, right in
+            func score(_ separator: Character) -> Int {
+                lines.prefix(100).map { line in
+                    let cells = splitCSVLine(line, separator: separator).map { $0.lowercased() }
+                    guard cells.contains(where: { $0.contains("date") }),
+                          cells.contains(where: { $0.contains("description") || $0.contains("amount") || $0.contains("debit") }) else { return 0 }
+                    return cells.count
+                }.max() ?? 0
+            }
+            return score(left) < score(right)
+        } ?? ","
 
         var headers: [String] = []
         var headerIndex = -1
@@ -956,7 +1013,7 @@ enum StatementService {
         if headerIndex != -1 && !headers.isEmpty {
             dateCol = headers.firstIndex(where: { $0.contains("date") || $0.contains("time") }) ?? 0
             descCol = headers.firstIndex(where: { $0.contains("description") || $0.contains("narrative") || $0.contains("particular") || $0.contains("merchant") || $0.contains("details") || $0.contains("payee") || $0.contains("remarks") }) ?? 1
-            amountCol = headers.firstIndex(where: { $0 == "amount" || $0.contains("transaction amount") || $0.contains("net amount") })
+            amountCol = headers.firstIndex(where: { $0.contains("amount in ") }) ?? headers.firstIndex(where: { $0 == "amount" || $0.contains("transaction amount") || $0.contains("net amount") })
             debitCol = headers.firstIndex(where: { $0.contains("debit") || $0.contains("withdrawal") || $0.contains("paid out") || $0 == "dr" })
             creditCol = headers.firstIndex(where: { $0.contains("credit") || $0.contains("deposit") || $0.contains("paid in") || $0 == "cr" })
             refCol = headers.firstIndex(where: { $0.contains("ref") || $0.contains("cheque") || $0.contains("reference") || $0.contains("doc") })
@@ -1014,6 +1071,7 @@ enum StatementService {
             if let debitIdx = debitCol, let creditIdx = creditCol, cells.count > max(debitIdx, creditIdx) {
                 let debitVal = parseAmount(cells[debitIdx])
                 let creditVal = parseAmount(cells[creditIdx])
+                if creditVal > 0 && debitVal > 0 { continue }
                 if creditVal > 0 {
                     amount = creditVal
                     isIncome = true
@@ -1021,6 +1079,11 @@ enum StatementService {
                     amount = debitVal
                     isIncome = false
                 }
+            } else if let debitIdx = debitCol, cells.count > debitIdx {
+                amount = parseAmount(cells[debitIdx])
+            } else if let creditIdx = creditCol, cells.count > creditIdx {
+                amount = parseAmount(cells[creditIdx])
+                isIncome = true
             } else if let amtIdx = amountCol, cells.count > amtIdx {
                 let cellVal = cells[amtIdx]
                 amount = parseAmount(cellVal)
@@ -1051,7 +1114,8 @@ enum StatementService {
                 isIncome: isIncome,
                 reference: refVal,
                 category: cat,
-                rawDescription: line
+                rawDescription: line,
+                isSelected: headerIndex >= 0 && !(profile?.docType == .generic && isAmbiguousNumericDate(dateRaw))
             ))
         }
 
@@ -1059,22 +1123,29 @@ enum StatementService {
     }
 
     private static func splitCSVLine(_ line: String, separator: Character) -> [String] {
-        var fields: [String] = []
-        var field = ""
-        var insideQuotes = false
-
-        for char in line {
+        var fields: [String] = [], field = ""
+        var quoted = false
+        let chars = Array(line)
+        var i = 0
+        while i < chars.count {
+            let char = chars[i]
             if char == "\"" {
-                insideQuotes.toggle()
-            } else if char == separator && !insideQuotes {
-                fields.append(field.trimmingCharacters(in: CharacterSet(charactersIn: "\" \t")))
-                field = ""
-            } else {
-                field.append(char)
-            }
+                if quoted && i + 1 < chars.count && chars[i + 1] == "\"" { field.append("\""); i += 1 }
+                else { quoted.toggle() }
+            } else if char == separator && !quoted {
+                fields.append(field.trimmingCharacters(in: .whitespacesAndNewlines)); field = ""
+            } else { field.append(char) }
+            i += 1
         }
-        fields.append(field.trimmingCharacters(in: CharacterSet(charactersIn: "\" \t")))
+        fields.append(field.trimmingCharacters(in: .whitespacesAndNewlines))
         return fields
+    }
+
+    private static func isAmbiguousNumericDate(_ value: String) -> Bool {
+        let parts = value.components(separatedBy: CharacterSet(charactersIn: "/-."))
+        guard parts.count == 3, parts[0].count <= 2,
+              let first = Int(parts[0]), let second = Int(parts[1]) else { return false }
+        return (1...12).contains(first) && (1...12).contains(second) && first != second
     }
 
     // MARK: - HTML Table Parser (.xls HTML Exports)
@@ -1151,129 +1222,54 @@ enum StatementService {
     // MARK: - OpenXML (XLSX) Helpers & ZIP Extraction
 
     private static func parseSharedStrings(xml: String) -> [String] {
-        var strings: [String] = []
-        let siComponents = xml.components(separatedBy: "<si>")
-        for si in siComponents.dropFirst() {
-            // Find all <t> or <t ...>
-            var text = ""
-            let tComponents = si.components(separatedBy: "<t")
-            for tc in tComponents.dropFirst() {
-                if let close = tc.range(of: ">"), let end = tc.range(of: "</t>") {
-                    text += String(tc[close.upperBound..<end.lowerBound])
-                }
-            }
-            let clean = text
-                .replacingOccurrences(of: "&amp;", with: "&")
-                .replacingOccurrences(of: "&lt;", with: "<")
-                .replacingOccurrences(of: "&gt;", with: ">")
-                .replacingOccurrences(of: "&quot;", with: "\"")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            strings.append(clean)
-        }
-        return strings
-    }
-
-    private static func parseWorksheetXml(_ xml: String, sharedStrings: [String]) -> String {
-        var rowLines: [String] = []
-        let rowComponents = xml.components(separatedBy: "<row")
-
-        for r in rowComponents.dropFirst() {
-            var cells: [String] = []
-            let cComponents = r.components(separatedBy: "<c")
-
-            for c in cComponents.dropFirst() {
-                var cellVal = ""
-                let isSharedString = c.contains("t=\"s\"")
-                let isInlineString = c.contains("t=\"inlineStr\"")
-
-                if isInlineString, let start = c.range(of: "<t>"), let end = c.range(of: "</t>") {
-                    cellVal = String(c[start.upperBound..<end.lowerBound])
-                } else if let vStart = c.range(of: "<v>"), let vEnd = c.range(of: "</v>") {
-                    let rawV = String(c[vStart.upperBound..<vEnd.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
-                    if isSharedString, let sIdx = Int(rawV), sIdx < sharedStrings.count {
-                        cellVal = sharedStrings[sIdx]
-                    } else {
-                        // Check if rawV is an Excel serial date number e.g. 45200..46000
-                        if let num = Double(rawV), num >= 35000 && num <= 65000 {
-                            let timeInt = (num - 25569.0) * 86400.0
-                            let d = Date(timeIntervalSince1970: timeInt)
-                            let df = DateFormatter()
-                            df.dateFormat = "yyyy-MM-dd"
-                            df.locale = Locale(identifier: "en_US_POSIX")
-                            cellVal = df.string(from: d)
-                        } else {
-                            cellVal = rawV
-                        }
-                    }
-                }
-
-                cellVal = cellVal
-                    .replacingOccurrences(of: "&amp;", with: "&")
-                    .replacingOccurrences(of: "&quot;", with: "\"")
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                cells.append(cellVal)
-            }
-
-            if !cells.isEmpty {
-                rowLines.append(cells.joined(separator: "\t"))
-            }
-        }
-
-        return rowLines.joined(separator: "\n")
+        StatementWorkbookXML.sharedStrings(xml)
     }
 
     private static func extractZipEntries(from zipData: Data) -> [String: Data] {
-        var entries: [String: Data] = [:]
-        let count = zipData.count
-        var offset = 0
-        var iterations = 0
-
-        while offset + 30 <= count && iterations < 500 {
-            iterations += 1
-            // Check for local header magic 0x04034b50 (PK\x03\x04)
-            guard zipData[offset] == 0x50,
-                  zipData[offset + 1] == 0x4B,
-                  zipData[offset + 2] == 0x03,
-                  zipData[offset + 3] == 0x04 else {
-                offset += 1
-                continue
-            }
-
-            let method = UInt16(zipData[offset + 8]) | (UInt16(zipData[offset + 9]) << 8)
-            let compSize = Int(UInt32(zipData[offset + 18]) | (UInt32(zipData[offset + 19]) << 8) | (UInt32(zipData[offset + 20]) << 16) | (UInt32(zipData[offset + 21]) << 24))
-            let uncompSize = Int(UInt32(zipData[offset + 22]) | (UInt32(zipData[offset + 23]) << 8) | (UInt32(zipData[offset + 24]) << 16) | (UInt32(zipData[offset + 25]) << 24))
-            let nameLen = Int(UInt16(zipData[offset + 26]) | (UInt16(zipData[offset + 27]) << 8))
-            let extraLen = Int(UInt16(zipData[offset + 28]) | (UInt16(zipData[offset + 29]) << 8))
-
-            let nameStart = offset + 30
-            let nameEnd = nameStart + nameLen
-            guard nameEnd <= count else { break }
-
-            let fileNameData = zipData.subdata(in: nameStart..<nameEnd)
-            let fileName = String(data: fileNameData, encoding: .utf8) ?? String(decoding: fileNameData, as: UTF8.self)
-
-            let dataStart = nameEnd + extraLen
-            let dataEnd = dataStart + compSize
-
-            if compSize > 0 && dataEnd <= count {
-                let slice = zipData.subdata(in: dataStart..<dataEnd)
-                if method == 0 {
-                    // Stored uncompressed
-                    entries[fileName] = slice
-                } else if method == 8 {
-                    // Deflate
-                    #if canImport(zlib)
-                    if let decompressed = decompressRawDeflate(data: slice, expectedSize: uncompSize) {
-                        entries[fileName] = decompressed
-                    }
-                    #endif
-                }
-                offset = dataEnd
-            } else {
-                offset = dataStart
-            }
+        // Read the central directory: data-descriptor ZIPs have zero sizes in local headers.
+        let bytes = [UInt8](zipData)
+        func u16(_ i: Int) -> Int { Int(bytes[i]) | Int(bytes[i + 1]) << 8 }
+        func u32(_ i: Int) -> Int { u16(i) | u16(i + 2) << 16 }
+        guard bytes.count >= 22 else { return [:] }
+        var end: Int?
+        for i in stride(from: bytes.count - 22, through: max(0, bytes.count - 65557), by: -1) {
+            if u32(i) == 0x06054b50 && i + 22 + u16(i + 20) == bytes.count { end = i; break }
         }
-
+        guard let end, u16(end + 4) == 0, u16(end + 6) == 0 else { return [:] }
+        let entryCount = u16(end + 10)
+        var offset = u32(end + 16)
+        guard entryCount <= 10000, offset <= end else { return [:] }
+        var entries: [String: Data] = [:]
+        var expandedBytes = 0
+        for _ in 0..<entryCount {
+            guard offset + 46 <= end, u32(offset) == 0x02014b50 else { return [:] }
+            let flags = u16(offset + 8), method = u16(offset + 10)
+            let compressedSize = u32(offset + 20), size = u32(offset + 24)
+            let nameLength = u16(offset + 28), extraLength = u16(offset + 30), commentLength = u16(offset + 32)
+            let local = u32(offset + 42)
+            let next = offset + 46 + nameLength + extraLength + commentLength
+            guard next <= end, size <= 32 * 1024 * 1024, expandedBytes + size <= 64 * 1024 * 1024,
+                  flags & 1 == 0, local + 30 <= bytes.count, u32(local) == 0x04034b50 else { return [:] }
+            let name = String(decoding: bytes[(offset + 46)..<(offset + 46 + nameLength)], as: UTF8.self)
+            let start = local + 30 + u16(local + 26) + u16(local + 28)
+            guard start + compressedSize <= bytes.count else { return [:] }
+            let compressed = zipData.subdata(in: start..<(start + compressedSize))
+            var decoded: Data?
+            if method == 0 && size == compressedSize { decoded = compressed }
+            #if canImport(zlib)
+            if method == 8 { decoded = decompressRawDeflate(data: compressed, expectedSize: size) }
+            if let decoded {
+                let checksum = decoded.withUnsafeBytes { buffer in
+                    crc32(0, buffer.bindMemory(to: Bytef.self).baseAddress, uInt(decoded.count))
+                }
+                guard UInt32(checksum) == UInt32(u32(offset + 16)) else { return [:] }
+            }
+            #endif
+            guard let decoded, decoded.count == size else { return [:] }
+            entries[name] = decoded
+            expandedBytes += size
+            offset = next
+        }
         return entries
     }
 
@@ -1305,21 +1301,22 @@ enum StatementService {
                 }
 
                 let bytesWritten = bufferSize - Int(stream.avail_out)
+                if output.count + bytesWritten > expectedSize { return nil }
                 if bytesWritten > 0 {
                     output.append(buffer, count: bytesWritten)
                 }
 
                 if ret == Z_STREAM_END {
-                    break
+                    return output.count == expectedSize ? output : nil
                 }
-                if ret != Z_OK && ret != Z_BUF_ERROR {
-                    break
+                if ret != Z_OK || bytesWritten == 0 {
+                    return nil
                 }
                 if stream.avail_in == 0 && bytesWritten == 0 {
                     break
                 }
             }
-            return output.isEmpty ? nil : output
+            return nil
         }
     }
     #endif
@@ -1384,10 +1381,12 @@ enum StatementService {
         let df = DateFormatter()
         df.locale = Locale(identifier: "en_US_POSIX")
         df.timeZone = TimeZone.current
+        df.isLenient = false
+        df.calendar = Calendar(identifier: .gregorian)
 
         for fmt in formats {
             df.dateFormat = fmt
-            if let d = df.date(from: clean) {
+            if let d = df.date(from: clean), Calendar.current.component(.year, from: d) >= 1900 {
                 return d
             }
         }
@@ -1436,7 +1435,7 @@ enum StatementService {
             }
         } else if s.contains(",") {
             let parts = s.components(separatedBy: ",")
-            if parts.count == 2 && (parts[1].count == 2 || parts[1].count == 3) {
+            if parts.count == 2 && (parts[1].count == 1 || parts[1].count == 2) {
                 s = parts[0] + "." + parts[1]
             } else {
                 s = s.replacingOccurrences(of: ",", with: "")
@@ -1489,6 +1488,7 @@ enum StatementService {
             tx.smsBank = sourceBank
             tx.smsReference = item.reference
             tx.smsClassificationReason = "Imported from Bank Statement"
+            tx.smsTransactionType = item.transactionType
             tx.isPending = false
             tx.isPossibleDuplicate = false
             tx.aiCategorized = item.aiSuggestedCategory

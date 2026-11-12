@@ -177,6 +177,13 @@ struct StatementImportSheet: View {
     @ViewBuilder
     private func reviewStatementView(_ result: StatementParseResult) -> some View {
         List {
+            if !result.inconsistencies.isEmpty {
+                Section("Review required") {
+                    ForEach(result.inconsistencies, id: \.self) { issue in
+                        Text(issue).font(.caption).foregroundStyle(Theme.warning)
+                    }
+                }
+            }
             // Header summary
             Section {
                 VStack(alignment: .leading, spacing: 8) {
@@ -472,7 +479,8 @@ struct StatementImportSheet: View {
                     self.selectedBankName = result.detectedBank ?? ""
 
                     if result.items.isEmpty {
-                        self.errorMessage = "No transactions found in this statement. Please check the file format or try an Excel/CSV export from your online banking."
+                        self.parseResult = nil
+                        self.errorMessage = result.inconsistencies.first ?? "No transactions found. Manually map Date, Description and Debit/Credit or signed Amount columns in a CSV/Excel export, then select the file again."
                     }
                 }
             }
