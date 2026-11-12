@@ -2078,7 +2078,7 @@ struct BudgetAITests {
         841.750
         """
 
-        let nbbAccount = Account(name: "NBB Checking", kind: .checking, institution: "NBB", balance: 100.0)
+        let nbbAccount = Account(name: "NBB Checking", kind: .bank, institution: "NBB", balance: 100.0)
         nbbAccount.smsMatch = "5678"
 
         let items = StatementService.parseTextLinesToItems(multilinePDFText)
