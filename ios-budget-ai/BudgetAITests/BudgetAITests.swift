@@ -2507,4 +2507,59 @@ struct BudgetAITests {
         #expect(matched.first?.accountID == accA.id)
         #expect(matched.first?.toAccountID == accB.id)
     }
+
+    // MARK: - 22. Cross-Bank Internal Transfer vs Same-Bank Highest-Amount/Lowest-Balance Merge
+
+    @Test func crossBankInternalTransferAndSameBankMergePreserveBothRules() async throws {
+        // 1. Cross-bank internal transfer (ila -> BisB) with same amount, ref, and date/time
+        do {
+            let context = makeCleanContext()
+            let ila = Account(name: "ila", kind: .bank, institution: "ila Bank", balance: 922.844)
+            ila.smsMatch = "3876"
+            let bisb = Account(name: "BisB", kind: .bank, institution: "BisB", balance: 130.003)
+            bisb.smsMatch = "1101"
+            context.insert(ila)
+            context.insert(bisb)
+            try context.save()
+
+            let smsIla = "Success! Fawri+ transfer of BHD 0.100 from IBAN ****3876 credited to BHD Ac on 13/11/2026 20:53 Ref BIB103KB10036027 Balance BHD 922.744 Enquiry 17123456"
+            let smsBisB = "Fawri+ payment BHD0.100, ref: BIB103KB10036027 was credited to IBAN ending 1101 on 2026/11/13 20:53. Balance BHD130.103. Tel: 17515151"
+
+            _ = await SMSImporter.importText(smsIla, context: context, forceApprove: true)
+            _ = await SMSImporter.importText(smsBisB, context: context, forceApprove: true)
+
+            let txs = try context.fetch(FetchDescriptor<MoneyTransaction>())
+            #expect(txs.count == 1)
+            let merged = try #require(txs.first)
+            #expect(merged.smsTransactionType == .internalTransfer)
+            #expect(merged.category == .internalTransfer)
+            #expect(merged.accountID == ila.id)
+            #expect(merged.toAccountID == bisb.id)
+            #expect(abs(ila.balance - 922.744) < 0.0001)
+            #expect(abs(bisb.balance - 130.103) < 0.0001)
+        }
+
+        // 2. Same-bank same-account merge retains highest amount and lowest balance
+        do {
+            let context = makeCleanContext()
+            let ila = Account(name: "ila", kind: .bank, institution: "ila Bank", balance: 5222.064)
+            ila.smsMatch = "1101"
+            context.insert(ila)
+            try context.save()
+
+            let smsDebit = "An amount of BHD 4,000.110 inc VAT has been debited from your IBAN ending 1101 on 09/11/2026 11:49 for Outgoing Charges on Fawri Ref: 6260644196 Balance BHD 5,221.954"
+            let smsFawri = "Success! Fawri transfer of BHD 4,000.000 to IBAN ****3001 is completed on 09/11/2026 11:49 Ref 6260644196 Balance BHD 1,221.954 Enquiry 17123456"
+
+            _ = await SMSImporter.importText(smsDebit, context: context, forceApprove: true)
+            _ = await SMSImporter.importText(smsFawri, context: context, forceApprove: true)
+
+            let txs = try context.fetch(FetchDescriptor<MoneyTransaction>())
+            #expect(txs.count == 1)
+            let merged = try #require(txs.first)
+            #expect(merged.smsTransactionType != .internalTransfer)
+            #expect(abs(merged.amount - 4000.110) < 0.0001)
+            #expect(abs((merged.smsBalance ?? 0) - 1221.954) < 0.0001)
+            #expect(abs(ila.balance - 1221.954) < 0.0001)
+        }
+    }
 }

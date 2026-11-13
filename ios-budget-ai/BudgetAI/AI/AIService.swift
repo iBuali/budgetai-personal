@@ -928,6 +928,14 @@ enum SMSImporter {
             }()
             guard isSameDateAndTime else { continue }
 
+            // Never merge SMS from two different banks as "same account" — those belong to cross-bank transfer matching.
+            let b1 = SMSParser.primaryBankName(from: existing.smsBank)
+            let b2 = SMSParser.primaryBankName(from: resolvedBank)
+            let isBankABCIlaPair = (b1 == "Bank ABC" && b2 == "ila") || (b1 == "ila" && b2 == "Bank ABC")
+            if let b1, let b2, !isBankABCIlaPair, b1.caseInsensitiveCompare(b2) != .orderedSame {
+                continue
+            }
+
             // Must belong to the same account (if one SMS has an explicit account suffix like "1101" and the other has none,
             // prefer the account matched by the explicit account suffix)
             let s1 = existing.smsAccountSuffix?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -935,8 +943,8 @@ enum SMSImporter {
             if !s1.isEmpty && !s2.isEmpty && !SMSParser.digitsMatch(accountMatch: s1, query: s2) {
                 continue
             }
-            if s1.isEmpty == s2.isEmpty {
-                if let exAcc = existing.accountID, let newAcc = targetAccountID, exAcc != newAcc {
+            if let exAcc = existing.accountID, let newAcc = targetAccountID, exAcc != newAcc {
+                if s1.isEmpty == s2.isEmpty || (b1 != nil && b2 != nil && !isBankABCIlaPair) {
                     continue
                 }
             }
