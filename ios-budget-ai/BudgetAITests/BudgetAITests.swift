@@ -128,7 +128,7 @@ struct BudgetAITests {
         //    - Analyzes debit (BisB) vs credit (ila)
         //    - Includes both banks in smsBank ("BisB · ila")
         //    - Stores both SMS messages in rawText
-        let sms2 = "Credit transaction of BHD 3.000 to account 0846 on 2026/10/27 15:26. Available balance is BHD 103.000. Call 17123456"
+        let sms2 = "Credit transaction of BHD 3.000 to account 0846 Ref: BIB103KAK000KZUM on 2026/10/27 15:26. Available balance is BHD 103.000. Call 17123456"
         _ = await SMSImporter.importText(sms2, context: context, forceApprove: true)
 
         #expect(tx.smsTransactionType == .internalTransfer)

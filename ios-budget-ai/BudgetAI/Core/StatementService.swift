@@ -1012,23 +1012,31 @@ enum StatementService {
 
         // Identify separator: tab, comma, semicolon, pipe
         let separators: [Character] = ["\t", ";", "|", ","]
-        let sep = separators.max { left, right in
-            func score(_ separator: Character) -> Int {
-                lines.prefix(100).map { line in
-                    let cells = splitCSVLine(line, separator: separator).map { $0.lowercased() }
-                    guard cells.contains(where: { $0.contains("date") || $0.contains("time") || $0.contains("التاريخ") }),
-                          cells.contains(where: {
-                              $0.contains("description") || $0.contains("amount") || $0.contains("debit")
-                              || $0.contains("credit") || $0.contains("details") || $0.contains("narrative")
-                              || $0.contains("particular") || $0.contains("withdrawal") || $0.contains("deposit")
-                              || $0.contains("merchant") || $0.contains("payee") || $0.contains("memo")
-                              || $0.contains("remarks") || $0.contains("transaction") || $0.contains("الوصف") || $0.contains("المبلغ")
-                          }) else { return 0 }
-                    return cells.count
-                }.max() ?? 0
+        func headerScore(_ separator: Character) -> Int {
+            lines.prefix(100).map { line in
+                let cells = splitCSVLine(line, separator: separator).map { $0.lowercased() }
+                guard cells.contains(where: { $0.contains("date") || $0.contains("time") || $0.contains("التاريخ") }),
+                      cells.contains(where: {
+                          $0.contains("description") || $0.contains("amount") || $0.contains("debit")
+                          || $0.contains("credit") || $0.contains("details") || $0.contains("narrative")
+                          || $0.contains("particular") || $0.contains("withdrawal") || $0.contains("deposit")
+                          || $0.contains("merchant") || $0.contains("payee") || $0.contains("memo")
+                          || $0.contains("remarks") || $0.contains("transaction") || $0.contains("الوصف") || $0.contains("المبلغ")
+                      }) else { return 0 }
+                return cells.count
+            }.max() ?? 0
+        }
+        let sep: Character = {
+            if let bestHeaderSep = separators.max(by: { headerScore($0) < headerScore($1) }), headerScore(bestHeaderSep) > 0 {
+                return bestHeaderSep
             }
-            return score(left) < score(right)
-        } ?? ","
+            // Headless fallback: pick the separator that splits lines into the most columns (> 1)
+            return separators.max { left, right in
+                let lMax = lines.prefix(30).map { splitCSVLine($0, separator: left).count }.max() ?? 0
+                let rMax = lines.prefix(30).map { splitCSVLine($0, separator: right).count }.max() ?? 0
+                return lMax < rMax
+            } ?? ","
+        }()
 
         var headers: [String] = []
         var headerIndex = -1
@@ -1069,7 +1077,8 @@ enum StatementService {
                 || ($0.contains("transaction") && !$0.contains("date") && !$0.contains("amount") && !$0.contains("ref"))
             }) ?? 1
             amountCol = headers.firstIndex(where: { $0.contains("amount in ") })
-                ?? headers.firstIndex(where: { ($0 == "amount" || $0.contains("amount") || $0 == "amt" || $0.contains("المبلغ")) && !$0.contains("balance") })
+                ?? headers.firstIndex(where: { $0 == "amount" || $0.contains("transaction amount") || $0.contains("net amount") })
+                ?? headers.firstIndex(where: { ($0.contains("amount") || $0 == "amt" || $0.contains("المبلغ")) && !$0.contains("balance") && !$0.contains("foreign") })
             debitCol = headers.firstIndex(where: {
                 ($0.contains("debit") || $0.contains("withdrawal") || $0.contains("paid out") || $0.contains("outflow") || $0.contains("money out") || $0 == "dr" || $0.hasPrefix("dr ") || $0.hasSuffix(" dr") || $0.contains("مدين"))
                 && !$0.contains("card")
