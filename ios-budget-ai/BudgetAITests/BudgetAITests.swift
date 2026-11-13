@@ -2366,7 +2366,7 @@ struct BudgetAITests {
 
         let sms = "Your card was charged BHD 12.500 at CARREFOUR on 2026/11/01 10:30."
         let parsed = try #require(SMSParser.parse(sms, sender: testBank))
-        #expect(parsed.bank == testBank)
+        #expect(parsed.detectedBank == testBank)
     }
 
     // MARK: - 18. iCloud Entitlement Parsing Guard
