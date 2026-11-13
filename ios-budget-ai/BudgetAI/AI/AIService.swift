@@ -127,7 +127,7 @@ enum AIService {
         let confidence = SMSConfidence(rawValue: obj["confidence"] as? String ?? "") ?? (txType == .unknown ? .low : .medium)
         let isIncome = txType.isIncomeDirection
 
-        var category = SpendCategory(rawValue: obj["category"] as? String ?? "") ?? .other
+        var category = SpendCategory.resolve(obj["category"] as? String)
         if category == .visaTransfer {
             // Keep the credit card payment category; it's handled as a transfer to the card.
         } else if txType.isTransferType {
@@ -634,6 +634,7 @@ enum SMSImporter {
            (rawParsedType.isTransferType
             || p.category == .internalTransfer
             || p.category == .transfers
+            || (p.referenceNumber?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
             || (p.isIncome && (trimmed.lowercased().contains("credit") || trimmed.lowercased().contains("fawri") || trimmed.contains("إيداع") || trimmed.contains("ايداع") || trimmed.contains("وارد")))
             || (!p.isIncome && (trimmed.lowercased().contains("debit") || trimmed.lowercased().contains("transfer") || trimmed.contains("خصم") || trimmed.contains("صادر")))),
            let mergedOutcome = mergeSameTimeTransferIfNeeded(
@@ -1120,55 +1121,53 @@ enum SMSImporter {
             return parsed.isIncome ? .transferIn : .transferOut
         }()
 
-        for existing in candidates {
-            guard abs(existing.amount - parsed.amount) < 0.0005 else { continue }
-            guard let existingRole = originalTransferRole(for: existing, context: context) else { continue }
+        let incomingRef = parsed.referenceNumber?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !incomingRef.isEmpty else { return nil }
 
-            // Check if date & time are the same:
-            // 1. Exact/near-exact timestamp match (within 3 minutes / 180 seconds, e.g. both at 2026/10/27 15:26)
-            // 2. Or same calendar day when one of the two SMS messages did not include an explicit HH:mm time
-            let timeDiff = abs(existing.date.timeIntervalSince(incomingDate))
+        for existing in candidates {
+            // 1. Exact same transaction amount
+            guard abs(existing.amount - parsed.amount) < 0.0005 else { continue }
+
+            // 2. Both messages contain the same transaction reference number
+            let existingRef = existing.smsReference?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !existingRef.isEmpty, existingRef.caseInsensitiveCompare(incomingRef) == .orderedSame else { continue }
+
+            // 3. Both messages have the exact same transaction date and time
             let existingTime = existing.rawText.flatMap { SMSParser.extractDateAndTime(in: $0).time }
+            let isSameCalendarDay = Calendar.current.isDate(existing.date, inSameDayAs: incomingDate)
             let isSameDateAndTime: Bool = {
+                guard isSameCalendarDay else { return false }
                 if let t1 = existingTime, let t2 = incomingTime {
-                    return t1 == t2 || timeDiff <= 180
+                    return t1 == t2
                 }
-                if timeDiff <= 180 {
-                    return true
-                }
-                // One SMS had a date without HH:mm time on the same calendar day
-                return Calendar.current.isDate(existing.date, inSameDayAs: incomingDate) && (existingTime == nil || incomingTime == nil)
+                // Require both to have an explicit time and match to the minute
+                guard existingTime != nil, incomingTime != nil else { return false }
+                let cal = Calendar.current
+                return cal.dateComponents([.year, .month, .day, .hour, .minute], from: existing.date)
+                    == cal.dateComponents([.year, .month, .day, .hour, .minute], from: incomingDate)
             }()
             guard isSameDateAndTime else { continue }
 
-            // Check if the pair represents the same transfer between accounts:
-            // Case 1: One is .internalTransfer (transfer between accounts) and the other is .transferOut, .transferIn, or .internalTransfer
-            let oneIsInternal = (existingRole == .internalTransfer || newRole == .internalTransfer)
-            // Case 2: One is .transferOut and the other is .transferIn between two accounts at the same date & time
-            let isOppositeTransferLegs = (existingRole == .transferOut && newRole == .transferIn)
-                || (existingRole == .transferIn && newRole == .transferOut)
-            // Case 3: Both are .transferOut at the same date & time where one has a recipient matching a user account or they are from two different accounts
-            let isDualTransferOut: Bool = {
-                guard existingRole == .transferOut && newRole == .transferOut else { return false }
-                if let exAcc = existing.accountID, let newAcc = targetAccountID, exAcc != newAcc {
-                    return true
+            let existingRole = originalTransferRole(for: existing, context: context) ?? (existing.isIncome ? .transferIn : .transferOut)
+
+            // 4. Each message is associated with a different account already configured in the app
+            let existingOriginAccIDCheck: UUID? = {
+                if let bankAcc = SMSParser.findMatchingAccount(forBank: existing.smsBank, senderOrPhone: existing.smsSender, digits: existing.smsAccountSuffix, in: context) {
+                    return bankAcc.id
                 }
-                if let recip = parsed.recipientSuffix ?? existing.smsRecipientSuffix,
-                   SMSParser.findMatchingAccount(suffix: recip, in: context) != nil {
-                    return true
-                }
-                return false
+                return existing.accountID
             }()
-
-            guard oneIsInternal || isOppositeTransferLegs || isDualTransferOut else { continue }
-
-            // If both are from the same bank with two different non-empty reference numbers AND neither is an internal transfer
-            // nor from a different bank/account, do not merge distinct transfers.
-            if !oneIsInternal,
-               let r1 = existing.smsReference?.trimmingCharacters(in: .whitespacesAndNewlines), !r1.isEmpty,
-               let r2 = parsed.referenceNumber?.trimmingCharacters(in: .whitespacesAndNewlines), !r2.isEmpty,
-               r1.caseInsensitiveCompare(r2) != .orderedSame,
-               existing.accountID == targetAccountID {
+            let incomingOriginAccIDCheck: UUID? = {
+                if let bankAcc = SMSParser.findMatchingAccount(forBank: resolvedBank, senderOrPhone: resolvedSender, digits: parsed.accountSuffix, in: context) {
+                    return bankAcc.id
+                }
+                return targetAccountID
+            }()
+            guard let exAccCheck = existingOriginAccIDCheck,
+                  let inAccCheck = incomingOriginAccIDCheck,
+                  exAccCheck != inAccCheck,
+                  Ledger.account(exAccCheck, context: context) != nil,
+                  Ledger.account(inAccCheck, context: context) != nil else {
                 continue
             }
 

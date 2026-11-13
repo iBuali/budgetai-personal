@@ -233,12 +233,84 @@ final class ICloudBackupService {
     private(set) var isICloudAvailable: Bool = false
     private(set) var lastErrorMessage: String?
 
+    struct ICloudEntitlementStatus: Equatable {
+        let hasCloudKitEntitlement: Bool
+        let hasUbiquityContainerEntitlement: Bool
+        let hasKVStoreEntitlement: Bool
+
+        static let none = ICloudEntitlementStatus(
+            hasCloudKitEntitlement: false,
+            hasUbiquityContainerEntitlement: false,
+            hasKVStoreEntitlement: false
+        )
+
+        static func parse(mobileProvisionData: Data) -> ICloudEntitlementStatus {
+            guard let startTag = "<plist".data(using: .utf8),
+                  let endTag = "</plist>".data(using: .utf8),
+                  let startRange = mobileProvisionData.range(of: startTag),
+                  let endRange = mobileProvisionData.range(of: endTag, in: startRange.lowerBound..<mobileProvisionData.endIndex) else {
+                return .none
+            }
+            let plistData = mobileProvisionData[startRange.lowerBound..<endRange.upperBound]
+            guard let root = try? PropertyListSerialization.propertyList(from: Data(plistData), format: nil) as? [String: Any],
+                  let entitlements = root["Entitlements"] as? [String: Any] else {
+                return .none
+            }
+
+            let services = entitlements["com.apple.developer.icloud-services"] as? [String] ?? []
+            let icloudContainers = entitlements["com.apple.developer.icloud-container-identifiers"] as? [String] ?? []
+            let ubiquityContainers = entitlements["com.apple.developer.ubiquity-container-identifiers"] as? [String] ?? []
+            let kvStoreID = entitlements["com.apple.developer.ubiquity-kvstore-identifier"] as? String ?? ""
+
+            let hasCloudKit = services.contains { $0.caseInsensitiveCompare("CloudKit") == .orderedSame }
+                && !icloudContainers.isEmpty
+            let hasCloudDocs = services.contains { $0.caseInsensitiveCompare("CloudDocuments") == .orderedSame }
+                && !icloudContainers.isEmpty
+            let hasUbiquity = !ubiquityContainers.isEmpty || hasCloudDocs
+            let hasKVStore = !kvStoreID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+
+            return ICloudEntitlementStatus(
+                hasCloudKitEntitlement: hasCloudKit,
+                hasUbiquityContainerEntitlement: hasUbiquity,
+                hasKVStoreEntitlement: hasKVStore
+            )
+        }
+
+        static func current(bundle: Bundle = .main) -> ICloudEntitlementStatus {
+            #if targetEnvironment(simulator)
+            return .none
+            #else
+            if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil {
+                return .none
+            }
+            if let url = bundle.url(forResource: "embedded", withExtension: "mobileprovision"),
+               let data = try? Data(contentsOf: url) {
+                return parse(mobileProvisionData: data)
+            }
+            // App Store builds may omit embedded.mobileprovision; rely on ubiquityIdentityToken only
+            // and never call CKContainer.default() blindly without confirmed entitlements.
+            let hasToken = FileManager.default.ubiquityIdentityToken != nil
+            return ICloudEntitlementStatus(
+                hasCloudKitEntitlement: false,
+                hasUbiquityContainerEntitlement: hasToken,
+                hasKVStoreEntitlement: false
+            )
+            #endif
+        }
+    }
+
+    private let entitlementStatus: ICloudEntitlementStatus
+
+    private var kvStore: NSUbiquitousKeyValueStore? {
+        entitlementStatus.hasKVStoreEntitlement ? .default : nil
+    }
+
     var isAutoBackupEnabled: Bool {
         get { UserDefaults.standard.object(forKey: Keys.iCloudAutoBackupEnabled) as? Bool ?? true }
         set {
             UserDefaults.standard.set(newValue, forKey: Keys.iCloudAutoBackupEnabled)
-            NSUbiquitousKeyValueStore.default.set(newValue, forKey: Keys.iCloudAutoBackupEnabled)
-            NSUbiquitousKeyValueStore.default.synchronize()
+            kvStore?.set(newValue, forKey: Keys.iCloudAutoBackupEnabled)
+            kvStore?.synchronize()
         }
     }
 
@@ -250,8 +322,8 @@ final class ICloudBackupService {
         }
         set {
             UserDefaults.standard.set(newValue.rawValue, forKey: Keys.iCloudBackupSchedule)
-            NSUbiquitousKeyValueStore.default.set(newValue.rawValue, forKey: Keys.iCloudBackupSchedule)
-            NSUbiquitousKeyValueStore.default.synchronize()
+            kvStore?.set(newValue.rawValue, forKey: Keys.iCloudBackupSchedule)
+            kvStore?.synchronize()
         }
     }
 
@@ -260,7 +332,7 @@ final class ICloudBackupService {
             if let date = UserDefaults.standard.object(forKey: Keys.iCloudLastBackupDate) as? Date {
                 return date
             }
-            if let timeInterval = NSUbiquitousKeyValueStore.default.object(forKey: Keys.iCloudLastBackupDate) as? Double {
+            if let timeInterval = kvStore?.object(forKey: Keys.iCloudLastBackupDate) as? Double {
                 return Date(timeIntervalSince1970: timeInterval)
             }
             return nil
@@ -268,12 +340,12 @@ final class ICloudBackupService {
         set {
             if let newValue {
                 UserDefaults.standard.set(newValue, forKey: Keys.iCloudLastBackupDate)
-                NSUbiquitousKeyValueStore.default.set(newValue.timeIntervalSince1970, forKey: Keys.iCloudLastBackupDate)
+                kvStore?.set(newValue.timeIntervalSince1970, forKey: Keys.iCloudLastBackupDate)
             } else {
                 UserDefaults.standard.removeObject(forKey: Keys.iCloudLastBackupDate)
-                NSUbiquitousKeyValueStore.default.removeObject(forKey: Keys.iCloudLastBackupDate)
+                kvStore?.removeObject(forKey: Keys.iCloudLastBackupDate)
             }
-            NSUbiquitousKeyValueStore.default.synchronize()
+            kvStore?.synchronize()
         }
     }
 
@@ -281,17 +353,20 @@ final class ICloudBackupService {
     private let backupsIndexKey = "budgetai_backup_manifests_index"
 
     private init() {
+        self.entitlementStatus = ICloudEntitlementStatus.current()
         checkICloudAvailability()
         loadPersistedState()
         refreshAvailableBackups()
 
-        NotificationCenter.default.addObserver(
-            forName: NSUbiquitousKeyValueStore.didChangeExternallyNotification,
-            object: NSUbiquitousKeyValueStore.default,
-            queue: .main
-        ) { [weak self] _ in
-            self?.loadPersistedState()
-            self?.refreshAvailableBackups()
+        if let store = kvStore {
+            NotificationCenter.default.addObserver(
+                forName: NSUbiquitousKeyValueStore.didChangeExternallyNotification,
+                object: store,
+                queue: .main
+            ) { [weak self] _ in
+                self?.loadPersistedState()
+                self?.refreshAvailableBackups()
+            }
         }
     }
 
@@ -307,6 +382,9 @@ final class ICloudBackupService {
     }
 
     private var ubiquityBackupDirectory: URL? {
+        guard entitlementStatus.hasUbiquityContainerEntitlement else {
+            return nil
+        }
         guard let container = FileManager.default.url(forUbiquityContainerIdentifier: nil) else {
             return nil
         }
@@ -331,16 +409,24 @@ final class ICloudBackupService {
             return
         }
 
+        // Only query CloudKit/iCloud APIs when the app binary's provisioning profile grants iCloud entitlements.
+        guard entitlementStatus.hasCloudKitEntitlement || entitlementStatus.hasUbiquityContainerEntitlement else {
+            self.isICloudAvailable = false
+            return
+        }
+
         let token = FileManager.default.ubiquityIdentityToken
         if token != nil {
             self.isICloudAvailable = true
-        } else {
-            // Check CloudKit account status
+        } else if entitlementStatus.hasCloudKitEntitlement {
+            // Check CloudKit account status only when CloudKit entitlement is confirmed
             CKContainer.default().accountStatus { [weak self] status, _ in
                 DispatchQueue.main.async {
                     self?.isICloudAvailable = (status == .available)
                 }
             }
+        } else {
+            self.isICloudAvailable = false
         }
     }
 
@@ -963,7 +1049,7 @@ final class ICloudBackupService {
            let list = try? JSONDecoder().decode([BackupMetadata].self, from: data) {
             return list
         }
-        if let data = NSUbiquitousKeyValueStore.default.data(forKey: backupsIndexKey),
+        if let data = kvStore?.data(forKey: backupsIndexKey),
            let list = try? JSONDecoder().decode([BackupMetadata].self, from: data) {
             return list
         }
@@ -973,14 +1059,14 @@ final class ICloudBackupService {
     private func saveMetadataIndex(_ list: [BackupMetadata]) {
         guard let data = try? JSONEncoder().encode(list) else { return }
         UserDefaults.standard.set(data, forKey: backupsIndexKey)
-        NSUbiquitousKeyValueStore.default.set(data, forKey: backupsIndexKey)
-        NSUbiquitousKeyValueStore.default.synchronize()
+        kvStore?.set(data, forKey: backupsIndexKey)
+        kvStore?.synchronize()
     }
 
     // MARK: - CloudKit Private Database Sync
 
     private func uploadToCloudKit(metadata: BackupMetadata, fileURL: URL) async {
-        guard isICloudAvailable else { return }
+        guard isICloudAvailable, entitlementStatus.hasCloudKitEntitlement else { return }
         let recordID = CKRecord.ID(recordName: metadata.id.uuidString)
         let record = CKRecord(recordType: cloudKitRecordType, recordID: recordID)
         record["deviceName"] = metadata.deviceName as CKRecordValue

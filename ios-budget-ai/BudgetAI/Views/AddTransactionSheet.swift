@@ -287,6 +287,8 @@ struct PasteSMSSheet: View {
     @State private var working = false
     @State private var outcome: SMSImportOutcome?
     @State private var accountID: UUID?
+    @State private var showAddSenderBankAlert = false
+    @State private var newSenderBankName = ""
     @Query(sort: \Account.createdAt) private var accounts: [Account]
 
     private var trimmedText: String {
@@ -353,9 +355,26 @@ struct PasteSMSSheet: View {
                         .autocorrectionDisabled()
                     Picker("SMS sender bank", selection: $manualBank) {
                         Text("Detect automatically").tag("")
-                        ForEach(BahrainBankCatalog.bahrainBanks, id: \.self) { bank in
+                        ForEach(BahrainBankCatalog.allBanks, id: \.self) { bank in
                             Text(bank).tag(bank)
                         }
+                    }
+                    Button {
+                        newSenderBankName = ""
+                        showAddSenderBankAlert = true
+                    } label: {
+                        Label("Create Sender Bank...", systemImage: "plus.circle")
+                    }
+                    .alert("Create Sender Bank", isPresented: $showAddSenderBankAlert) {
+                        TextField("Bank or sender name (e.g. HSBC)", text: $newSenderBankName)
+                        Button("Add") {
+                            if let created = BahrainBankCatalog.addCustomBank(newSenderBankName) {
+                                manualBank = created
+                            }
+                        }
+                        Button("Cancel", role: .cancel) {}
+                    } message: {
+                        Text("Enter a bank or SMS sender name to add it to your sender bank list.")
                     }
                     Picker("Account", selection: $accountID) {
                         Text("Detect automatically").tag(UUID?.none)

@@ -271,8 +271,10 @@ enum StatementService {
         let matchedAcc = matchAccount(ibanOrAcc: detected.iban, cardLast4: detected.cardLast4, bank: detected.bank, in: accounts)
 
         let table = StatementPDFTable.extract(doc)
-        var items = table.map { parseCSVRows($0, profile: detected.profile) }
-            ?? parseTextLinesToItems(fullText, profile: detected.profile)
+        var items = table.map { parseCSVRows($0, profile: detected.profile) } ?? []
+        if items.isEmpty {
+            items = parseTextLinesToItems(fullText, profile: detected.profile)
+        }
         var issues: [String] = []
         if items.isEmpty {
             issues.append(fullText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -514,14 +516,8 @@ enum StatementService {
             iban = extractDigits(from: matched)
         }
 
-        // Card Last 4 digits: e.g. 4545 22** **** 1843 or Card: ...1843
-        if let cardRange = text.range(of: #"(?:Card|Credit Card|Card No)[\s\S]{0,40}?(?:[*Xx]{2,}|ending in|suffix|\.{3,})?\s*([0-9]{4})\b"#, options: [.regularExpression, .caseInsensitive]) {
-            let cardMatch = String(text[cardRange])
-            let digits = extractDigits(from: cardMatch)
-            if digits.count >= 4 {
-                cardLast4 = String(digits.suffix(4))
-            }
-        }
+        // Card Last 4 digits detection for PDF and Excel statements
+        cardLast4 = extractCardLast4(from: text)
 
         // Opening balance extraction
         let openPatterns = [
@@ -578,6 +574,46 @@ enum StatementService {
 
     private static func extractDigits(from s: String) -> String {
         s.filter { $0.isNumber }
+    }
+
+    /// Detects and extracts the last 4 digits of a card number from PDF or Excel statement text.
+    static func extractCardLast4(from text: String) -> String? {
+        // 1. Explicit masked card numbers (e.g. "4545 22** **** 1843", "**** **** **** 1843", "XXXX-1843", "•••• 1843", "512345******6789")
+        let maskedPatterns = [
+            #"(?:\b\d{4,6}[\s\-*]*)?(?:[*Xx•]{2,4}[\s\-]?){1,3}(\d{4})\b"#,
+            #"\*{2,}(\d{4})\b"#,
+            #"•{2,}\s*(\d{4})\b"#
+        ]
+        for pattern in maskedPatterns {
+            if let regex = try? NSRegularExpression(pattern: pattern, options: []),
+               let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+               match.numberOfRanges > 1,
+               let range = Range(match.range(at: 1), in: text) {
+                return String(text[range])
+            }
+        }
+
+        // 2. Labeled card references (e.g. "Card No: 1843", "Credit Card ending in 1843", "Card Number,**** 1843", "Visa ...1843")
+        let labeledPattern = #"(?:Credit\s*Card|Debit\s*Card|Card\s*(?:No\.?|Number|#)?|Visa|Mastercard|Amex|رقم\s*البطاقة)[^\n\r]{0,45}?(?:(?:[*Xx•\.]{2,}|ending(?:\s+in)?|suffix)\s*[:#\-]?\s*|[,:\t]\s*[*Xx•\s\-]*)(\d{4})\b"#
+        if let regex = try? NSRegularExpression(pattern: labeledPattern, options: [.caseInsensitive]) {
+            let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
+            for match in matches where match.numberOfRanges > 1 {
+                guard let fullRange = Range(match.range(at: 0), in: text),
+                      let digitRange = Range(match.range(at: 1), in: text) else { continue }
+                let fullSnippet = String(text[fullRange]).lowercased()
+                let candidate = String(text[digitRange])
+                // Avoid mistaking a statement year (e.g. "Credit Card Statement 2026") for a card last 4
+                let hasMaskOrHint = fullSnippet.contains("*") || fullSnippet.contains("x") || fullSnippet.contains("•")
+                    || fullSnippet.contains("ending") || fullSnippet.contains("suffix")
+                    || fullSnippet.contains("no") || fullSnippet.contains("number") || fullSnippet.contains("#")
+                if !hasMaskOrHint, let yr = Int(candidate), (2015...2039).contains(yr) {
+                    continue
+                }
+                return candidate
+            }
+        }
+
+        return nil
     }
 
     // MARK: - Multi-Strategy Text Statement Parser (PDF & Raw Text)
@@ -980,8 +1016,14 @@ enum StatementService {
             func score(_ separator: Character) -> Int {
                 lines.prefix(100).map { line in
                     let cells = splitCSVLine(line, separator: separator).map { $0.lowercased() }
-                    guard cells.contains(where: { $0.contains("date") }),
-                          cells.contains(where: { $0.contains("description") || $0.contains("amount") || $0.contains("debit") }) else { return 0 }
+                    guard cells.contains(where: { $0.contains("date") || $0.contains("time") || $0.contains("التاريخ") }),
+                          cells.contains(where: {
+                              $0.contains("description") || $0.contains("amount") || $0.contains("debit")
+                              || $0.contains("credit") || $0.contains("details") || $0.contains("narrative")
+                              || $0.contains("particular") || $0.contains("withdrawal") || $0.contains("deposit")
+                              || $0.contains("merchant") || $0.contains("payee") || $0.contains("memo")
+                              || $0.contains("remarks") || $0.contains("transaction") || $0.contains("الوصف") || $0.contains("المبلغ")
+                          }) else { return 0 }
                     return cells.count
                 }.max() ?? 0
             }
@@ -994,8 +1036,14 @@ enum StatementService {
         for (idx, line) in lines.enumerated() {
             let cells = splitCSVLine(line, separator: sep)
             let lowerCells = cells.map { $0.lowercased().trimmingCharacters(in: .whitespacesAndNewlines) }
-            if lowerCells.contains(where: { $0.contains("date") || $0.contains("time") }) &&
-               lowerCells.contains(where: { $0.contains("amount") || $0.contains("debit") || $0.contains("credit") || $0.contains("description") || $0.contains("particular") || $0.contains("narrative") }) {
+            if lowerCells.contains(where: { $0.contains("date") || $0.contains("time") || $0.contains("التاريخ") }) &&
+               lowerCells.contains(where: {
+                   $0.contains("amount") || $0.contains("amt") || $0.contains("debit") || $0.contains("credit")
+                   || $0.contains("description") || $0.contains("particular") || $0.contains("narrative")
+                   || $0.contains("details") || $0.contains("withdrawal") || $0.contains("deposit")
+                   || $0.contains("merchant") || $0.contains("payee") || $0.contains("memo")
+                   || $0.contains("remarks") || $0.contains("transaction") || $0.contains("الوصف") || $0.contains("المبلغ")
+               }) {
                 headers = lowerCells
                 headerIndex = idx
                 break
@@ -1011,28 +1059,58 @@ enum StatementService {
         let startRow: Int
 
         if headerIndex != -1 && !headers.isEmpty {
-            dateCol = headers.firstIndex(where: { $0.contains("date") || $0.contains("time") }) ?? 0
-            descCol = headers.firstIndex(where: { $0.contains("description") || $0.contains("narrative") || $0.contains("particular") || $0.contains("merchant") || $0.contains("details") || $0.contains("payee") || $0.contains("remarks") }) ?? 1
-            amountCol = headers.firstIndex(where: { $0.contains("amount in ") }) ?? headers.firstIndex(where: { $0 == "amount" || $0.contains("transaction amount") || $0.contains("net amount") })
-            debitCol = headers.firstIndex(where: { $0.contains("debit") || $0.contains("withdrawal") || $0.contains("paid out") || $0 == "dr" })
-            creditCol = headers.firstIndex(where: { $0.contains("credit") || $0.contains("deposit") || $0.contains("paid in") || $0 == "cr" })
+            dateCol = headers.firstIndex(where: { $0.contains("date") || $0.contains("time") || $0.contains("التاريخ") }) ?? 0
+            descCol = headers.firstIndex(where: {
+                $0.contains("description") || $0.contains("narrative") || $0.contains("narration")
+                || $0.contains("particular") || $0.contains("merchant") || $0.contains("details")
+                || $0.contains("payee") || $0.contains("remarks") || $0.contains("memo")
+                || $0.contains("activity") || $0.contains("summary") || $0.contains("title")
+                || $0.contains("الوصف") || $0.contains("البيان") || $0.contains("التفاصيل")
+                || ($0.contains("transaction") && !$0.contains("date") && !$0.contains("amount") && !$0.contains("ref"))
+            }) ?? 1
+            amountCol = headers.firstIndex(where: { $0.contains("amount in ") })
+                ?? headers.firstIndex(where: { ($0 == "amount" || $0.contains("amount") || $0 == "amt" || $0.contains("المبلغ")) && !$0.contains("balance") })
+            debitCol = headers.firstIndex(where: {
+                ($0.contains("debit") || $0.contains("withdrawal") || $0.contains("paid out") || $0.contains("outflow") || $0.contains("money out") || $0 == "dr" || $0.hasPrefix("dr ") || $0.hasSuffix(" dr") || $0.contains("مدين"))
+                && !$0.contains("card")
+            })
+            creditCol = headers.firstIndex(where: {
+                ($0.contains("credit") || $0.contains("deposit") || $0.contains("paid in") || $0.contains("inflow") || $0.contains("money in") || $0 == "cr" || $0.hasPrefix("cr ") || $0.hasSuffix(" cr") || $0.contains("دائن"))
+                && !$0.contains("card")
+            })
             refCol = headers.firstIndex(where: { $0.contains("ref") || $0.contains("cheque") || $0.contains("reference") || $0.contains("doc") })
             startRow = headerIndex + 1
         } else {
-            // Headless table: heuristics
+            // Headless table: scan lines to find the first actual transaction-like row instead of assuming lines[0]
             startRow = 0
-            let sampleCells = splitCSVLine(lines[0], separator: sep)
             var inferredDate = 0
             var inferredDesc = 1
             var inferredAmt: Int? = 2
 
-            for (cIdx, cell) in sampleCells.enumerated() {
-                if parseDate(cell) != nil {
-                    inferredDate = cIdx
-                } else if parseAmount(cell) > 0 {
-                    inferredAmt = cIdx
-                } else if cell.count > 3 {
-                    inferredDesc = cIdx
+            for line in lines {
+                let sampleCells = splitCSVLine(line, separator: sep)
+                guard sampleCells.count >= 2 else { continue }
+                var foundDate: Int? = nil
+                var foundAmt: Int? = nil
+                var foundDesc: Int? = nil
+                for (cIdx, cell) in sampleCells.enumerated() {
+                    let trimmed = cell.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !trimmed.isEmpty else { continue }
+                    if foundDate == nil, parseDate(trimmed) != nil {
+                        foundDate = cIdx
+                    } else if parseAmount(trimmed) > 0, foundAmt == nil {
+                        foundAmt = cIdx
+                    } else if trimmed.count > 2, parseDate(trimmed) == nil {
+                        if foundDesc == nil || trimmed.count > sampleCells[foundDesc!].count {
+                            foundDesc = cIdx
+                        }
+                    }
+                }
+                if let d = foundDate, let a = foundAmt {
+                    inferredDate = d
+                    inferredAmt = a
+                    if let desc = foundDesc { inferredDesc = desc }
+                    break
                 }
             }
 
@@ -1057,20 +1135,28 @@ enum StatementService {
             if isHeaderOrFooterLine(line) { continue }
 
             let cells = splitCSVLine(line, separator: sep)
-            guard cells.count > max(dateCol, descCol) else { continue }
+            guard cells.indices.contains(dateCol) else { continue }
 
             let dateRaw = cells[dateCol].trimmingCharacters(in: .whitespacesAndNewlines)
             guard let date = parseDate(dateRaw) else { continue }
 
-            let descRaw = cells[descCol].trimmingCharacters(in: .whitespacesAndNewlines)
+            var descRaw = cells.indices.contains(descCol) ? cells[descCol].trimmingCharacters(in: .whitespacesAndNewlines) : ""
+            if descRaw.isEmpty {
+                let excluded: Set<Int> = Set([dateCol, amountCol, debitCol, creditCol, refCol].compactMap { $0 })
+                descRaw = cells.enumerated()
+                    .filter { !excluded.contains($0.offset) }
+                    .map { $0.element.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty && parseDate($0) == nil && parseAmount($0) == 0 }
+                    .max(by: { $0.count < $1.count }) ?? ""
+            }
             guard !descRaw.isEmpty else { continue }
 
             var amount: Double = 0
             var isIncome = false
 
-            if let debitIdx = debitCol, let creditIdx = creditCol, cells.count > max(debitIdx, creditIdx) {
-                let debitVal = parseAmount(cells[debitIdx])
-                let creditVal = parseAmount(cells[creditIdx])
+            if let debitIdx = debitCol, let creditIdx = creditCol, (cells.indices.contains(debitIdx) || cells.indices.contains(creditIdx)) {
+                let debitVal = cells.indices.contains(debitIdx) ? parseAmount(cells[debitIdx]) : 0
+                let creditVal = cells.indices.contains(creditIdx) ? parseAmount(cells[creditIdx]) : 0
                 if creditVal > 0 && debitVal > 0 { continue }
                 if creditVal > 0 {
                     amount = creditVal
@@ -1079,12 +1165,12 @@ enum StatementService {
                     amount = debitVal
                     isIncome = false
                 }
-            } else if let debitIdx = debitCol, cells.count > debitIdx {
+            } else if let debitIdx = debitCol, cells.indices.contains(debitIdx) {
                 amount = parseAmount(cells[debitIdx])
-            } else if let creditIdx = creditCol, cells.count > creditIdx {
+            } else if let creditIdx = creditCol, cells.indices.contains(creditIdx) {
                 amount = parseAmount(cells[creditIdx])
                 isIncome = true
-            } else if let amtIdx = amountCol, cells.count > amtIdx {
+            } else if let amtIdx = amountCol, cells.indices.contains(amtIdx) {
                 let cellVal = cells[amtIdx]
                 amount = parseAmount(cellVal)
                 isIncome = determineIsIncome(amountString: cellVal, lineText: line, profile: profile)

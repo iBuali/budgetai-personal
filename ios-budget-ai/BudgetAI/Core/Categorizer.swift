@@ -20,6 +20,46 @@ enum BahrainBankCatalog {
         "Beyon Money",
         "BFC Pay"
     ]
+
+    private static let customBanksKey = "budgetai_custom_sender_banks"
+
+    static var customBanks: [String] {
+        UserDefaults.standard.stringArray(forKey: customBanksKey) ?? []
+    }
+
+    static var allBanks: [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        for bank in bahrainBanks + customBanks {
+            let trimmed = bank.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let key = trimmed.lowercased()
+            if seen.insert(key).inserted {
+                result.append(trimmed)
+            }
+        }
+        return result
+    }
+
+    @discardableResult
+    static func addCustomBank(_ name: String) -> String? {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if let existing = allBanks.first(where: { $0.caseInsensitiveCompare(trimmed) == .orderedSame }) {
+            return existing
+        }
+        var current = customBanks
+        current.append(trimmed)
+        UserDefaults.standard.set(current, forKey: customBanksKey)
+        return trimmed
+    }
+
+    static func removeCustomBank(_ name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        var current = customBanks
+        current.removeAll { $0.caseInsensitiveCompare(trimmed) == .orderedSame }
+        UserDefaults.standard.set(current, forKey: customBanksKey)
+    }
 }
 
 // MARK: - Categorizer
@@ -232,7 +272,7 @@ struct ParsedSMS {
     var knowledgeRuleID: String? = nil
 
     var requiresReview: Bool {
-        confidence == .low || transactionType == .unknown
+        transactionType == .unknown
     }
 
     var isOrdinaryExpense: Bool {
@@ -622,6 +662,17 @@ enum SMSParser {
                 } else if lower.contains(pattern) {
                     return bank
                 }
+            }
+        }
+        for custom in BahrainBankCatalog.customBanks {
+            let clean = custom.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !clean.isEmpty else { continue }
+            let target = clean.lowercased()
+            if target.count <= 4, target.range(of: "^[a-z0-9]+$", options: .regularExpression) != nil {
+                let escaped = NSRegularExpression.escapedPattern(for: target)
+                if lower.range(of: "\\b\(escaped)\\b", options: .regularExpression) != nil { return clean }
+            } else if lower.contains(target) {
+                return clean
             }
         }
         if allowBenefitPay {

@@ -421,8 +421,8 @@ struct BudgetAITests {
         context.insert(tripGoal)
         try context.save()
 
-        let transferDebitSMS = "Your account ending 9901 has been debited BHD 25.000 for outward transfer on 2026/10/28 12:00. Balance BHD 475.000. Tel: 17515151"
-        let transferCreditSMS = "Your account ending 0846 has been credited with BHD 25.000 via Fawri+ on 2026/10/28 12:00. Available balance BHD 125.000. Call 17123456"
+        let transferDebitSMS = "Your account ending 9901 has been debited BHD 25.000 for outward transfer Ref: TRF20261028A on 2026/10/28 12:00. Balance BHD 475.000. Tel: 17515151"
+        let transferCreditSMS = "Your account ending 0846 has been credited with BHD 25.000 via Fawri+ Ref: TRF20261028A on 2026/10/28 12:00. Available balance BHD 125.000. Call 17123456"
 
         _ = await SMSImporter.importText(transferDebitSMS, context: context, forceApprove: true)
         let mergedOutcome = await SMSImporter.importText(transferCreditSMS, context: context, forceApprove: true)
@@ -787,10 +787,10 @@ struct BudgetAITests {
         context.insert(ila)
         try context.save()
 
-        // Case A: First SMS is Transfer Out from BisB, Second SMS at same date & time is Transfer In to ila Bank.
+        // Case A: First SMS is Transfer Out from BisB, Second SMS at same date & time with same Ref is Transfer In to ila Bank.
         // Both SMS have independent balances: BisB has 450.000, ila has 250.000.
-        let smsTransferOut = "Your account ending 9001 has been debited BHD 50.000 for outward transfer on 2026/10/27 15:26. Balance BHD 450.000. Tel: 17515151"
-        let smsInternal = "Your account ending 0846 has been credited with BHD 50.000 via Fawri+ on 2026/10/27 15:26. Available balance BHD 250.000. Call 17123456"
+        let smsTransferOut = "Your account ending 9001 has been debited BHD 50.000 for outward transfer Ref: REF1027A on 2026/10/27 15:26. Balance BHD 450.000. Tel: 17515151"
+        let smsInternal = "Your account ending 0846 has been credited with BHD 50.000 via Fawri+ Ref: REF1027A on 2026/10/27 15:26. Available balance BHD 250.000. Call 17123456"
 
         _ = await SMSImporter.importText(smsTransferOut, context: context, forceApprove: true)
         let mergedOutcome = await SMSImporter.importText(smsInternal, context: context, forceApprove: true)
@@ -814,8 +814,8 @@ struct BudgetAITests {
         #expect(ila.balance != 450.000)
 
         // Case B: Reverse order (Inward Transfer arrives first with destination balance, Outward Transfer arrives second with source balance)
-        let smsInternal2 = "Your account ending 0846 has been credited with BHD 30.000 via Fawri+ on 2026/10/28 18:10. Available balance BHD 280.000. Call 17123456"
-        let smsTransferOut2 = "Your account ending 9001 has been debited BHD 30.000 for outward transfer on 2026/10/28 18:10. Balance BHD 420.000. Tel: 17515151"
+        let smsInternal2 = "Your account ending 0846 has been credited with BHD 30.000 via Fawri+ Ref: REF1028B on 2026/10/28 18:10. Available balance BHD 280.000. Call 17123456"
+        let smsTransferOut2 = "Your account ending 9001 has been debited BHD 30.000 for outward transfer Ref: REF1028B on 2026/10/28 18:10. Balance BHD 420.000. Tel: 17515151"
 
         _ = await SMSImporter.importText(smsInternal2, context: context, forceApprove: true)
         _ = await SMSImporter.importText(smsTransferOut2, context: context, forceApprove: true)
@@ -840,8 +840,8 @@ struct BudgetAITests {
         context.insert(nbb)
         try context.save()
 
-        let bbkSMS = "Your account ending 1111 was debited BHD 50.000 on 2026/10/29 12:00 for transfer. Avl Bal BHD 450.000. Tel: 17205555"
-        let nbbSMS = "Your account ending 2222 was credited BHD 50.000 on 2026/10/29 12:00. Avl Bal BHD 250.000. Tel: 17228800"
+        let bbkSMS = "Your account ending 1111 was debited BHD 50.000 on 2026/10/29 12:00 for transfer Ref: REF1029C. Avl Bal BHD 450.000. Tel: 17205555"
+        let nbbSMS = "Your account ending 2222 was credited BHD 50.000 on 2026/10/29 12:00 Ref: REF1029C. Avl Bal BHD 250.000. Tel: 17228800"
 
         _ = await SMSImporter.importText(bbkSMS, context: context, forceApprove: true)
         _ = await SMSImporter.importText(nbbSMS, context: context, forceApprove: true)
@@ -857,9 +857,9 @@ struct BudgetAITests {
         #expect(thirdTx.toBalanceAdjustment == 10.000)
         #expect(thirdTx.balanceAdjustment == 0.0)
 
-        // Case D: Same bank sends two messages (Debit alert + Fawri+ payment credited to destination IBAN)
-        let smsOutwardBisB = "Your account ending 9001 has been debited BHD 20.000 for outward transfer on 2026/10/30 08:00. Balance BHD 400.000. Tel: 17515151"
-        let smsFawriBisB = "Fawri+ payment BHD20.000, ref: BIB999KZUM was credited to IBAN ending 0846 on 2026/10/30 08:00. Balance BHD400.000. Tel: 17515151"
+        // Case D: Different configured account (ila) receives credit with same ref, amount, date & time
+        let smsOutwardBisB = "Your account ending 9001 has been debited BHD 20.000 for outward transfer Ref: BIB999KZUM on 2026/10/30 08:00. Balance BHD 400.000. Tel: 17515151"
+        let smsFawriBisB = "Your account ending 0846 has been credited with BHD 20.000 via Fawri+ Ref: BIB999KZUM on 2026/10/30 08:00. Available balance BHD 300.000. Call 17123456"
 
         _ = await SMSImporter.importText(smsOutwardBisB, context: context, forceApprove: true)
         _ = await SMSImporter.importText(smsFawriBisB, context: context, forceApprove: true)
@@ -894,7 +894,7 @@ struct BudgetAITests {
 
         // 1. Single outgoing transfer SMS where recipient IBAN/account matches user's ila account (0846):
         // Must NEVER be marked as internalTransfer on its own until matched with another SMS at the same date & time!
-        let sms1 = "Fawri+ Transfer of BHD 75.000 from account 9001 to IBAN BH29ILAB00000000000846 on 2026/10/25 14:15. Available Balance BHD 925.000. Tel: 17515151"
+        let sms1 = "Fawri+ Transfer of BHD 75.000 from account 9001 to IBAN BH29ILAB00000000000846 Ref: REF1025X on 2026/10/25 14:15. Available Balance BHD 925.000. Tel: 17515151"
         let res1 = await SMSImporter.importText(sms1, context: context, forceApprove: true)
         let tx1 = try #require(res1.transaction)
         #expect(tx1.smsTransactionType == .expense)
@@ -903,11 +903,8 @@ struct BudgetAITests {
         #expect(tx1.toAccountID == nil)
         #expect(tx1.smsBank == "BisB")
 
-        // 2. Simultaneous second SMS from ila Bank (17123456) at 2026/10/25 14:15 with ila's own SMS balance (175.000):
-        // Rule 6 now applies: merges into tx1, analyzes Debit (bisb.id) vs Credit (ila.id),
-        // includes both banks in smsBank ("BisB · ila"), stores both SMS in rawText,
-        // and updates BisB balance to 925.000 and ila balance to 175.000 separately!
-        let sms2 = "Credit transaction of BHD 75.000 to account 0846 on 2026/10/25 14:15. Available balance is BHD 175.000. Call 17123456"
+        // 2. Simultaneous second SMS from ila Bank (17123456) at 2026/10/25 14:15 with same Ref and ila's own SMS balance (175.000):
+        let sms2 = "Credit transaction of BHD 75.000 to account 0846 Ref: REF1025X on 2026/10/25 14:15. Available balance is BHD 175.000. Call 17123456"
         _ = await SMSImporter.importText(sms2, context: context, forceApprove: true)
 
         let allSMS = try context.fetch(FetchDescriptor<MoneyTransaction>()).filter { $0.source == .sms }
@@ -929,7 +926,7 @@ struct BudgetAITests {
         // 3. Reverse arrival order when Credit SMS from ila Bank arrives first and Debit SMS from BisB arrives second:
         // Analyzes both SMS to put Debit (bisb.id) as accountID and Credit (ila.id) as toAccountID,
         // includes both banks ("BisB · ila"), and updates each balance separately.
-        let smsIlaFirst = "Your account 0846 credited BHD 25.000 on 2026/10/26 09:30. Available balance BHD 210.000. Call 17123456"
+        let smsIlaFirst = "Your account 0846 credited BHD 25.000 Ref: BIB555KZUM on 2026/10/26 09:30. Available balance BHD 210.000. Call 17123456"
         let smsBisBSecond = "Fawri+ payment BHD 25.000, ref: BIB555KZUM was credited to IBAN ending 0846 on 2026/10/26 09:30. Balance BHD 890.000. Tel: 17515151"
 
         let resIlaFirst = await SMSImporter.importText(smsIlaFirst, context: context, forceApprove: true)
@@ -2354,5 +2351,160 @@ struct BudgetAITests {
 
         // STRICT ISOLATION ASSERTION: User account balance was NEVER touched or modified
         #expect(existingAccount.balance == initialBalance)
+    }
+
+    // MARK: - 17. Custom Sender Bank Creation & Detection
+
+    @Test func customSenderBankCreationAndSMSDetection() throws {
+        let testBank = "MeemTestBank"
+        BahrainBankCatalog.removeCustomBank(testBank)
+        defer { BahrainBankCatalog.removeCustomBank(testBank) }
+
+        let added = BahrainBankCatalog.addCustomBank("  \(testBank)  ")
+        #expect(added == testBank)
+        #expect(BahrainBankCatalog.allBanks.contains(testBank))
+
+        let sms = "Your card was charged BHD 12.500 at CARREFOUR on 2026/11/01 10:30."
+        let parsed = try #require(SMSParser.parse(sms, sender: testBank))
+        #expect(parsed.bank == testBank)
+    }
+
+    // MARK: - 18. iCloud Entitlement Parsing Guard
+
+    @Test func icloudEntitlementParserGuardsMissingCloudKitEntitlements() throws {
+        let unsignedProvision = Data("""
+        CMS_HEADER<plist version="1.0"><dict>
+        <key>Entitlements</key><dict>
+            <key>application-identifier</key><string>TEAM.com.example.budgetai</string>
+        </dict>
+        </dict></plist>CMS_FOOTER
+        """.utf8)
+        let unsignedStatus = ICloudBackupService.ICloudEntitlementStatus.parse(mobileProvisionData: unsignedProvision)
+        #expect(unsignedStatus.hasCloudKitEntitlement == false)
+        #expect(unsignedStatus.hasUbiquityContainerEntitlement == false)
+        #expect(unsignedStatus.hasKVStoreEntitlement == false)
+
+        let signedProvision = Data("""
+        CMS_HEADER<plist version="1.0"><dict>
+        <key>Entitlements</key><dict>
+            <key>com.apple.developer.icloud-services</key><array><string>CloudKit</string><string>CloudDocuments</string></array>
+            <key>com.apple.developer.icloud-container-identifiers</key><array><string>iCloud.com.example.budgetai</string></array>
+            <key>com.apple.developer.ubiquity-kvstore-identifier</key><string>TEAM.com.example.budgetai</string>
+        </dict>
+        </dict></plist>CMS_FOOTER
+        """.utf8)
+        let signedStatus = ICloudBackupService.ICloudEntitlementStatus.parse(mobileProvisionData: signedProvision)
+        #expect(signedStatus.hasCloudKitEntitlement == true)
+        #expect(signedStatus.hasUbiquityContainerEntitlement == true)
+        #expect(signedStatus.hasKVStoreEntitlement == true)
+    }
+
+    // MARK: - 19. Card Last-4 Detection & Statement Formats
+
+    @Test func statementCardLast4DetectionAndVariedFormats() throws {
+        #expect(StatementService.extractCardLast4(from: "Credit Card Statement 2026\nCard No: 4545 22** **** 1843") == "1843")
+        #expect(StatementService.extractCardLast4(from: "Card Number,**** **** **** 9010") == "9010")
+        #expect(StatementService.extractCardLast4(from: "Visa Platinum ending in 4321") == "4321")
+        #expect(StatementService.extractCardLast4(from: "Credit Card Statement 2026") == nil)
+
+        // Excel/CSV with varied headers ("Txn Date", "Details", "Withdrawal", "Deposit") and omitted trailing empty cell
+        let csv = Data("""
+        Account Summary
+        Card Number,XXXX-XXXX-XXXX-7788
+        Txn Date,Details,Withdrawal,Deposit
+        05/11/2026,LULU HYPERMARKET,14.250
+        06/11/2026,SALARY TRANSFER,,450.000
+        """.utf8)
+        let parsed = StatementService.parseCSV(data: csv, accounts: [])
+        #expect(parsed.detectedCardLast4 == "7788")
+        #expect(parsed.items.count == 2)
+        #expect(parsed.items[0].amount == 14.250)
+        #expect(parsed.items[0].isIncome == false)
+        #expect(parsed.items[1].amount == 450.000)
+        #expect(parsed.items[1].isIncome == true)
+
+        // Headless CSV with title lines at top before actual rows
+        let headless = Data("""
+        My Bank Export
+        Generated 2026-11-10
+        07/11/2026,COSTA COFFEE,2.400
+        08/11/2026,TALABAT,5.800
+        """.utf8)
+        let headlessItems = StatementService.parseCSVRows(String(decoding: headless, as: UTF8.self))
+        #expect(headlessItems.count == 2)
+    }
+
+    // MARK: - 20. Unknown Category Treated as Other Without Review Flag
+
+    @Test func unknownCategoryKeptAsOtherWithoutRequiringReview() throws {
+        #expect(SpendCategory.resolve("Unknown") == .other)
+        #expect(SpendCategory.resolve("unknown") == .other)
+        #expect(SpendCategory.resolve(nil) == .other)
+
+        let tx = MoneyTransaction(amount: 9.500, isIncome: false, merchant: "Corner Shop", category: .other, source: .sms)
+        tx.smsBank = "NBB"
+        tx.accountID = UUID()
+        tx.smsTransactionType = .expense
+        tx.smsConfidence = .low
+        tx.isPending = false
+
+        #expect(tx.category == .other)
+        #expect(tx.isUnmatchedOrUncertain == false)
+        #expect(tx.reviewReasons(accounts: []).isEmpty)
+
+        let parsed = ParsedSMS(
+            amount: 9.500,
+            isIncome: false,
+            merchant: "Corner Shop",
+            category: .other,
+            transactionType: .expense,
+            confidence: .low
+        )
+        #expect(parsed.requiresReview == false)
+    }
+
+    // MARK: - 21. Strict SMS Internal Transfer Matching (All 4 Conditions Required)
+
+    @Test func strictSMSInternalTransferMatchingConditions() async throws {
+        let context = makeCleanContext()
+
+        let accA = Account(name: "BisB", kind: .bank, institution: "BisB", balance: 500.000)
+        accA.smsMatch = "9001"
+        let accB = Account(name: "ila", kind: .bank, institution: "ila Bank", balance: 200.000)
+        accB.smsMatch = "0846"
+        context.insert(accA)
+        context.insert(accB)
+        try context.save()
+
+        // 1. Missing reference -> must NOT link as internal transfer
+        _ = await SMSImporter.importText("Your account ending 9001 has been debited BHD 15.000 for outward transfer on 2026/11/01 10:00. Balance BHD 485.000. Tel: 17515151", context: context, forceApprove: true)
+        _ = await SMSImporter.importText("Your account ending 0846 has been credited with BHD 15.000 via Fawri+ on 2026/11/01 10:00. Available balance BHD 215.000. Call 17123456", context: context, forceApprove: true)
+        let afterNoRef = try context.fetch(FetchDescriptor<MoneyTransaction>())
+        #expect(afterNoRef.count == 2)
+        #expect(afterNoRef.allSatisfy { $0.smsTransactionType != .internalTransfer })
+
+        // 2. Different time (11:00 vs 11:01) with same ref & amount -> must NOT link as internal transfer
+        _ = await SMSImporter.importText("Your account ending 9001 has been debited BHD 22.000 for outward transfer Ref: REFDIFFTIME on 2026/11/02 11:00. Balance BHD 463.000. Tel: 17515151", context: context, forceApprove: true)
+        _ = await SMSImporter.importText("Your account ending 0846 has been credited with BHD 22.000 via Fawri+ Ref: REFDIFFTIME on 2026/11/02 11:01. Available balance BHD 237.000. Call 17123456", context: context, forceApprove: true)
+        let afterDiffTime = try context.fetch(FetchDescriptor<MoneyTransaction>()).filter { abs($0.amount - 22.000) < 0.001 }
+        #expect(afterDiffTime.count == 2)
+        #expect(afterDiffTime.allSatisfy { $0.smsTransactionType != .internalTransfer })
+
+        // 3. Different ref -> must NOT link as internal transfer
+        _ = await SMSImporter.importText("Your account ending 9001 has been debited BHD 33.000 for outward transfer Ref: REFAAA on 2026/11/03 12:00. Balance BHD 430.000. Tel: 17515151", context: context, forceApprove: true)
+        _ = await SMSImporter.importText("Your account ending 0846 has been credited with BHD 33.000 via Fawri+ Ref: REFBBB on 2026/11/03 12:00. Available balance BHD 270.000. Call 17123456", context: context, forceApprove: true)
+        let afterDiffRef = try context.fetch(FetchDescriptor<MoneyTransaction>()).filter { abs($0.amount - 33.000) < 0.001 }
+        #expect(afterDiffRef.count == 2)
+        #expect(afterDiffRef.allSatisfy { $0.smsTransactionType != .internalTransfer })
+
+        // 4. All 4 conditions met (exact amount, same ref, exact same date & time, two different configured accounts) -> MUST link as internalTransfer
+        _ = await SMSImporter.importText("Your account ending 9001 has been debited BHD 44.000 for outward transfer Ref: REFMATCH44 on 2026/11/04 14:30. Balance BHD 386.000. Tel: 17515151", context: context, forceApprove: true)
+        _ = await SMSImporter.importText("Your account ending 0846 has been credited with BHD 44.000 via Fawri+ Ref: REFMATCH44 on 2026/11/04 14:30. Available balance BHD 314.000. Call 17123456", context: context, forceApprove: true)
+        let matched = try context.fetch(FetchDescriptor<MoneyTransaction>()).filter { abs($0.amount - 44.000) < 0.001 }
+        #expect(matched.count == 1)
+        #expect(matched.first?.smsTransactionType == .internalTransfer)
+        #expect(matched.first?.category == .internalTransfer)
+        #expect(matched.first?.accountID == accA.id)
+        #expect(matched.first?.toAccountID == accB.id)
     }
 }

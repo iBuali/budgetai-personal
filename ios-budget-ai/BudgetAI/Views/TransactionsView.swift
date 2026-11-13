@@ -881,6 +881,8 @@ struct TransactionDetailView: View {
     @State private var amountText = ""
     @State private var showLocationPicker = false
     @State private var isCapturingGPS = false
+    @State private var showAddSenderBankAlert = false
+    @State private var newSenderBankName = ""
     @FocusState private var focusedField: DetailField?
 
     private enum DetailField: Hashable {
@@ -1462,12 +1464,36 @@ struct TransactionDetailView: View {
                 }
             )) {
                 Text("Unknown / Not set").tag("")
-                if let currentBank = tx.smsBank, !currentBank.isEmpty, !BahrainBankCatalog.bahrainBanks.contains(currentBank) {
+                if let currentBank = tx.smsBank, !currentBank.isEmpty,
+                   !BahrainBankCatalog.allBanks.contains(where: { $0.caseInsensitiveCompare(currentBank) == .orderedSame }) {
                     Text(currentBank).tag(currentBank)
                 }
-                ForEach(BahrainBankCatalog.bahrainBanks, id: \.self) { bank in
+                ForEach(BahrainBankCatalog.allBanks, id: \.self) { bank in
                     Text(bank).tag(bank)
                 }
+            }
+
+            Button {
+                newSenderBankName = ""
+                showAddSenderBankAlert = true
+            } label: {
+                Label("Create Sender Bank...", systemImage: "plus.circle")
+            }
+            .alert("Create Sender Bank", isPresented: $showAddSenderBankAlert) {
+                TextField("Bank or sender name (e.g. HSBC)", text: $newSenderBankName)
+                Button("Add") {
+                    if let created = BahrainBankCatalog.addCustomBank(newSenderBankName) {
+                        commitPendingEdits(silent: true)
+                        Ledger.edit(tx, context: context) { target in
+                            target.smsBank = created
+                        }
+                        try? context.save()
+                        appState.show("Created & set bank to \(created)")
+                    }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Enter a bank or SMS sender name to add it to your sender bank list.")
             }
 
             LabeledContent("Reference") {

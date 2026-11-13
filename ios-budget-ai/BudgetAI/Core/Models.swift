@@ -18,6 +18,26 @@ struct SpendCategory: Hashable, Identifiable {
         self.rawValue = rawValue
     }
 
+    /// Resolves any category key or label (including "unknown" / empty) to a valid `SpendCategory`,
+    /// defaulting to `.other` without requiring user review.
+    static func resolve(_ raw: String?) -> SpendCategory {
+        let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if trimmed.isEmpty || trimmed.caseInsensitiveCompare("unknown") == .orderedSame {
+            return .other
+        }
+        if let direct = SpendCategory(rawValue: trimmed) {
+            return direct
+        }
+        let lower = trimmed.lowercased()
+        if let lowerDirect = SpendCategory(rawValue: lower) {
+            return lowerDirect
+        }
+        if let byTitle = allCases.first(where: { $0.title.caseInsensitiveCompare(trimmed) == .orderedSame || $0.shortTitle.caseInsensitiveCompare(trimmed) == .orderedSame }) {
+            return byTitle
+        }
+        return .other
+    }
+
     static func unchecked(_ key: String) -> SpendCategory { SpendCategory(key: key) }
 
     static let groceries = SpendCategory(key: "groceries")
@@ -593,7 +613,7 @@ final class MoneyTransaction {
         let bankClean = smsBank?.trimmingCharacters(in: .whitespacesAndNewlines)
         let bankUnknown = accountID == nil && (bankClean == nil || bankClean?.isEmpty == true || bankClean?.lowercased().contains("unknown") == true)
         let accountUnmatched = accountID == nil
-        let uncertain = smsConfidence == .low || smsTransactionType == .unknown
+        let uncertain = smsTransactionType == .unknown
         return bankUnknown || accountUnmatched || uncertain || isPending
     }
 }
