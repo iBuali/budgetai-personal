@@ -2511,13 +2511,13 @@ struct BudgetAITests {
     // MARK: - 22. Cross-Bank Internal Transfer vs Same-Bank Highest-Amount/Lowest-Balance Merge
 
     @Test func crossBankInternalTransferAndSameBankMergePreserveBothRules() async throws {
-        // 1. Cross-bank internal transfer (ila -> BisB) with same amount, ref, and date/time
+        // 1. Cross-bank internal transfer (BisB 3876 -> ila 1101) with same amount, ref, and date/time
         do {
             let context = makeCleanContext()
-            let ila = Account(name: "ila", kind: .bank, institution: "ila Bank", balance: 922.844)
-            ila.smsMatch = "3876"
-            let bisb = Account(name: "BisB", kind: .bank, institution: "BisB", balance: 130.003)
-            bisb.smsMatch = "1101"
+            let ila = Account(name: "ila", kind: .bank, institution: "ila Bank", balance: 922.644)
+            ila.smsMatch = "1101"
+            let bisb = Account(name: "BisB", kind: .bank, institution: "BisB", balance: 130.203)
+            bisb.smsMatch = "3876"
             context.insert(ila)
             context.insert(bisb)
             try context.save()
@@ -2533,10 +2533,38 @@ struct BudgetAITests {
             let merged = try #require(txs.first)
             #expect(merged.smsTransactionType == .internalTransfer)
             #expect(merged.category == .internalTransfer)
-            #expect(merged.accountID == ila.id)
-            #expect(merged.toAccountID == bisb.id)
-            #expect(abs(ila.balance - 922.744) < 0.0001)
+            #expect(merged.accountID == bisb.id)
+            #expect(merged.toAccountID == ila.id)
             #expect(abs(bisb.balance - 130.103) < 0.0001)
+            #expect(abs(ila.balance - 922.744) < 0.0001)
+        }
+
+        // 1b. Cross-bank internal transfer when accounts only have smsMatch digits ("1101" and "3876") without institution names
+        do {
+            let context = makeCleanContext()
+            let acc1101 = Account(name: "Main Account", kind: .bank, institution: "", balance: 900.000)
+            acc1101.smsMatch = "1101"
+            let acc3876 = Account(name: "Savings Account", kind: .bank, institution: "", balance: 200.000)
+            acc3876.smsMatch = "3876"
+            context.insert(acc1101)
+            context.insert(acc3876)
+            try context.save()
+
+            let smsIla = "Success! Fawri+ transfer of BHD 0.100 from IBAN ****3876 credited to BHD Ac on 13/11/2026 20:53 Ref BIB103KB10036027 Balance BHD 922.744 Enquiry 17123456"
+            let smsBisB = "Fawri+ payment BHD0.100, ref: BIB103KB10036027 was credited to IBAN ending 1101 on 2026/11/13 20:53. Balance BHD130.103. Tel: 17515151"
+
+            _ = await SMSImporter.importText(smsIla, context: context, forceApprove: true)
+            _ = await SMSImporter.importText(smsBisB, context: context, forceApprove: true)
+
+            let txs = try context.fetch(FetchDescriptor<MoneyTransaction>())
+            #expect(txs.count == 1)
+            let merged = try #require(txs.first)
+            #expect(merged.smsTransactionType == .internalTransfer)
+            #expect(merged.category == .internalTransfer)
+            #expect(merged.accountID == acc3876.id)
+            #expect(merged.toAccountID == acc1101.id)
+            #expect(abs(acc3876.balance - 130.103) < 0.0001)
+            #expect(abs(acc1101.balance - 922.744) < 0.0001)
         }
 
         // 2. Same-bank same-account merge retains highest amount and lowest balance
@@ -2560,6 +2588,42 @@ struct BudgetAITests {
             #expect(abs(merged.amount - 4000.110) < 0.0001)
             #expect(abs((merged.smsBalance ?? 0) - 1221.954) < 0.0001)
             #expect(abs(ila.balance - 1221.954) < 0.0001)
+        }
+
+        // 3. Uncertain SMS format / ambiguous direction with known bank & account stays categorized as Other without needing user review
+        do {
+            let context = makeCleanContext()
+            let bisb = Account(name: "BisB", kind: .bank, institution: "BisB", balance: 500.000)
+            bisb.smsMatch = "3876"
+            context.insert(bisb)
+            try context.save()
+
+            let uncertainFormatSMS = "BisB notification: BHD 5.000 on account 3876 on 13/11/2026 18:00. Balance BHD 495.000. Tel: 17515151"
+            let outcome = await SMSImporter.importText(uncertainFormatSMS, context: context, forceApprove: true)
+            let tx = try #require(outcome.transaction)
+            #expect(tx.category == .other)
+            #expect(tx.isPending == false)
+            #expect(!tx.smsClassificationReason.localizedCaseInsensitiveContains("marked for user review"))
+            #expect(tx.reviewReasons(accounts: [bisb]).isEmpty)
+        }
+
+        // 4. Credit Card new transaction updates and matches SMS balance (both with creditLimit > 0 and creditLimit == 0)
+        do {
+            let context = makeCleanContext()
+            let visa = Account(name: "BisB Visa", kind: .creditCard, institution: "BisB", balance: 200.000)
+            visa.creditLimit = 1000.000
+            visa.smsMatch = "4821"
+            context.insert(visa)
+            try context.save()
+
+            // Initial remaining = 800.000. Purchase of 15.000 with SMS Avl Bal 780.000 (5.000 adjustment)
+            let cardSMS = "Purchase of BHD 15.000 with Card ending 4821 at Starbucks on 2026/11/13 19:00. Avl Bal BHD 780.000. Tel: 17515151"
+            let out = await SMSImporter.importText(cardSMS, context: context, forceApprove: true)
+            let cardTx = try #require(out.transaction)
+            #expect(cardTx.accountID == visa.id)
+            #expect(abs(visa.cardRemainingBalance - 780.000) < 0.0001)
+            #expect(abs(visa.cardUsedBalance - 220.000) < 0.0001)
+            #expect(abs(cardTx.balanceAdjustment - (-5.000)) < 0.0001)
         }
     }
 
@@ -2620,5 +2684,168 @@ struct BudgetAITests {
         #expect(abs(loan.loanPaidAmount - 1250.000) < 0.0001)
         #expect(abs(loan.loanPaidProgress - 0.25) < 0.0001)
         #expect(loan.paymentDueDate > dueSoon)
+    }
+
+    // MARK: - 24. Improved Statement Detection, Select All, AI Fallback & Knowledge Base Reuse
+
+    @Test func statementRegionalFormatsArabicNumeralsAndDirectionIndicator() throws {
+        // 1. Eastern Arabic numerals & regional separators
+        let arabicDate = StatementService.parseDate("٢٠٢٦/١١/٠٥")
+        #expect(arabicDate != nil)
+        #expect(abs(StatementService.parseAmount("١٬٢٥٠٫٥٠٠") - 1250.500) < 0.0001)
+        #expect(abs(StatementService.parseAmount("1.250,500") - 1250.500) < 0.0001)
+
+        // 2. Statement with Amount + separate Dr/Cr Type column and generic bank profile
+        let drCrCSV = Data("""
+        Date,Description,Amount,Dr/Cr,Balance
+        05/11/2026,STARBUCKS BAHRAIN,3.450,DR,120.550
+        06/11/2026,COMPANY PAYROLL,850.000,CR,970.550
+        07/11/2026,LULU HYPERMARKET,22.100,Debit,948.450
+        """.utf8)
+
+        let result = StatementService.parse(
+            fileData: drCrCSV,
+            filename: "generic_drcr_statement.csv",
+            existingAccounts: [],
+            existingTransactions: []
+        )
+
+        #expect(result.items.count == 3)
+        // Verify all non-duplicate items are selected by default (even when day <= 12 on generic profile)
+        #expect(result.selectedItemsCount == 3)
+        #expect(result.items[0].isIncome == false)
+        #expect(abs(result.items[0].amount - 3.450) < 0.0001)
+        #expect(result.items[1].isIncome == true)
+        #expect(abs(result.items[1].amount - 850.000) < 0.0001)
+        #expect(result.items[2].isIncome == false)
+        #expect(abs(result.items[2].amount - 22.100) < 0.0001)
+    }
+
+    @Test func statementSelectAllAndDeselectAllReliability() throws {
+        let existingTx = MoneyTransaction(
+            amount: 10.000,
+            isIncome: false,
+            merchant: "Costa Coffee",
+            category: .dining,
+            date: StatementService.parseDate("2026-11-01") ?? .now,
+            source: .sms
+        )
+        existingTx.smsReference = "REF001"
+
+        let csvData = Data("""
+        Date,Description,Debit,Credit,Reference
+        2026-11-01,Costa Coffee,10.000,,REF001
+        2026-11-02,Alosra Supermarket,25.500,,REF002
+        2026-11-03,Salary Deposit,,600.000,REF003
+        """.utf8)
+
+        var parsed = StatementService.parse(
+            fileData: csvData,
+            filename: "statement.csv",
+            existingAccounts: [],
+            existingTransactions: [existingTx]
+        )
+
+        #expect(parsed.items.count == 3)
+        #expect(parsed.duplicatesCount == 1)
+        #expect(parsed.newItemsCount == 2)
+        #expect(parsed.selectedItemsCount == 2)
+
+        // Deselect All must uncheck all items
+        parsed.deselectAll()
+        #expect(parsed.selectedItemsCount == 0)
+
+        // Select All New must select all non-duplicate items reliably
+        parsed.selectAllNew()
+        #expect(parsed.selectedItemsCount == 2)
+
+        // Select All (Include Duplicates) must select all 3 items
+        parsed.selectAll()
+        #expect(parsed.selectedItemsCount == 3)
+    }
+
+    @Test func aiAssistedStatementFallbackAndKnowledgeBaseLearning() throws {
+        // 1. Test AI fallback response decoding (Option 2)
+        let sampleAIJSON = """
+        {
+          "bankName": "Gulf International Bank",
+          "docType": "Bank Account Statement",
+          "currency": "BHD",
+          "accountIBAN": "BH11GULB00001234567890",
+          "cardLast4": null,
+          "signNotation": "columnar_debit_credit",
+          "dateFormat": "dd/MM/yyyy",
+          "confidence": 0.94,
+          "isMappingUncertain": false,
+          "uncertaintyNotes": [],
+          "openingBalance": 500.000,
+          "closingBalance": 472.250,
+          "columnMapping": {
+            "dateColumnHeader": "Booking Date",
+            "descriptionColumnHeader": "Counterparty Narrative",
+            "debitColumnHeader": "Outflow BHD",
+            "creditColumnHeader": "Inflow BHD",
+            "amountColumnHeader": null,
+            "balanceColumnHeader": "Running Total",
+            "referenceColumnHeader": "Deal Ref",
+            "currencyColumnHeader": null
+          },
+          "transactions": [
+            {
+              "date": "2026-11-10",
+              "merchant": "Batelco Telecom",
+              "rawDescription": "Batelco Telecom Bill Payment",
+              "debit": 27.750,
+              "credit": null,
+              "amount": 27.750,
+              "isIncome": false,
+              "balance": 472.250,
+              "reference": "GIB998811",
+              "category": "bills"
+            }
+          ]
+        }
+        """
+
+        let recognition = try AIService.decodeBankStatementAIResponse(sampleAIJSON)
+        #expect(recognition.detectedBank == "Gulf International Bank")
+        #expect(recognition.docType == .bankAccount)
+        #expect(recognition.currency == "BHD")
+        #expect(recognition.accountIBAN == "BH11GULB00001234567890")
+        #expect(recognition.columnMapping.dateColumnHeader == "Booking Date")
+        #expect(recognition.columnMapping.descriptionColumnHeader == "Counterparty Narrative")
+        #expect(recognition.columnMapping.debitColumnHeader == "Outflow BHD")
+        #expect(recognition.columnMapping.creditColumnHeader == "Inflow BHD")
+        #expect(recognition.items.count == 1)
+        #expect(abs(recognition.items[0].amount - 27.750) < 0.0001)
+        #expect(recognition.items[0].isIncome == false)
+
+        // 2. Save confirmed mapping to BankProfileRegistry and verify future automatic recognition without AI
+        let learnedRule = BankProfileRegistry.learnFromConfirmedStatement(
+            bankName: "Gulf International Bank",
+            docType: .bankAccount,
+            signNotation: .columnarDebitCredit,
+            primaryCurrency: "BHD",
+            dateFormat: "dd/MM/yyyy",
+            columnMapping: recognition.columnMapping
+        )
+        defer { BankProfileRegistry.deleteLearnedProfile(id: learnedRule.id) }
+
+        // Future file with these custom non-standard headers ("Booking Date", "Counterparty Narrative", "Outflow BHD", "Inflow BHD")
+        let futureCustomCSV = """
+        Gulf International Bank
+        Booking Date,Counterparty Narrative,Outflow BHD,Inflow BHD,Running Total,Deal Ref
+        11/11/2026,Carrefour Hypermarket,18.400,,453.850,GIB998812
+        12/11/2026,Dividend Credit,,120.000,573.850,GIB998813
+        """
+
+        let futureItems = StatementService.parseCSVRows(futureCustomCSV)
+        #expect(futureItems.count == 2)
+        #expect(abs(futureItems[0].amount - 18.400) < 0.0001)
+        #expect(futureItems[0].isIncome == false)
+        #expect(futureItems[0].reference == "GIB998812")
+        #expect(abs(futureItems[1].amount - 120.000) < 0.0001)
+        #expect(futureItems[1].isIncome == true)
+        #expect(futureItems[1].reference == "GIB998813")
     }
 }
