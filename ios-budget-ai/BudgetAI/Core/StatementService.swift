@@ -208,6 +208,9 @@ enum StatementService {
         if result.items.isEmpty && result.inconsistencies.isEmpty {
             result.inconsistencies.append("No transactions could be mapped safely. Use Option 2 (AI-Assisted Statement Recognition) or manually map columns.")
         }
+        if result.items.contains(where: { !$0.isSelected && !$0.isDuplicate }) && result.inconsistencies.isEmpty {
+            result.inconsistencies.append("The date order or column mapping is ambiguous. Use Option 2 (AI-Assisted Statement Recognition) or manually map columns, or click Select All after reviewing.")
+        }
         if let opening = result.openingBalance, let closing = result.closingBalance, !result.items.isEmpty {
             let isCreditCard = (result.profileName?.localizedCaseInsensitiveContains("Credit Card") ?? false) || result.detectedCardLast4 != nil
             let bankMovement = result.items.reduce(0.0) { $0 + ($1.isIncome ? $1.amount : -$1.amount) }
@@ -1483,7 +1486,7 @@ enum StatementService {
                 reference: refVal,
                 category: cat,
                 rawDescription: line,
-                isSelected: true
+                isSelected: headerIndex >= 0 && !(effectiveProfile?.docType == .generic && isAmbiguousNumericDate(dateRaw))
             ))
         }
 
