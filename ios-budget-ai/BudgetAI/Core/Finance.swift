@@ -55,7 +55,7 @@ struct Finance {
     let cal = Calendar.current
     let thisMonth: DateInterval
 
-    init(transactions: [MoneyTransaction], accounts: [Account], budgets: [Budget] = [],
+    init(transactions: [MoneyTransaction], accounts: [Account] = [], budgets: [Budget] = [],
          goals: [SavingsGoal] = [], bills: [Bill] = [], now: Date = .now) {
         let approved = transactions.filter { !$0.isPending }
         self.transactions = approved

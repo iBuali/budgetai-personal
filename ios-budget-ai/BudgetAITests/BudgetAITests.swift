@@ -2890,7 +2890,7 @@ struct BudgetAITests {
         let salary = MoneyTransaction(amount: 1500.0, isIncome: true, merchant: "Salary", category: .income, date: now)
         let transfer = MoneyTransaction(amount: 200.0, isIncome: false, merchant: "Move", category: .internalTransfer, date: now)
 
-        let f = Finance(transactions: [groceries1, groceries2, dining, pending, salary, transfer])
+        let f = Finance(transactions: [groceries1, groceries2, dining, pending, salary, transfer], accounts: [])
         let breakdown = f.categoryBreakdown(.week)
         #expect(breakdown.count == 2)
         #expect(breakdown[0].category == .groceries)
@@ -2911,9 +2911,9 @@ struct BudgetAITests {
 
         let f = Finance(transactions: [expense, income], accounts: [bank])
         let series = f.balanceSeries()
-        #expect(!series.isEmpty)
-        #expect(abs((series.last?.value ?? 0) - 1000.0) < 0.0001)
-        let prev = series.dropLast().last?.value ?? 0
+        #expect(!series.actual.isEmpty)
+        #expect(abs((series.actual.last?.value ?? 0) - 1000.0) < 0.0001)
+        let prev = series.actual.dropLast().last?.value ?? 0
         // Before today's net change (+500 - 120 = +380), balance was 620
         #expect(abs(prev - 620.0) < 0.0001)
     }
