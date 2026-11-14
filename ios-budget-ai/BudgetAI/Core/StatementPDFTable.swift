@@ -93,12 +93,17 @@ enum StatementPDFTable {
 
     private static func layout(in words: [Word], width: CGFloat) -> Layout? {
         let cleanWord: (String) -> String = { $0.trimmingCharacters(in: .punctuationCharacters).lowercased() }
-        for desc in words where cleanWord(desc.text) == "description" {
+        let descSet: Set<String> = ["description", "particulars", "narrative", "details", "merchant", "remarks"]
+        let debitSet: Set<String> = ["debit", "debits", "withdrawal", "withdrawals"]
+        let creditSet: Set<String> = ["credit", "credits", "deposit", "deposits"]
+
+        for desc in words where descSet.contains(cleanWord(desc.text)) {
             let near = words.filter { abs($0.rect.minY - desc.rect.minY) < max(18, desc.rect.height * 1.7) }
             let dates = near.filter { cleanWord($0.text) == "date" }.sorted { $0.rect.minX < $1.rect.minX }
             let amounts = near.filter { cleanWord($0.text) == "amount" }.sorted { $0.rect.minX < $1.rect.minX }
-            guard let firstDate = dates.first, !amounts.isEmpty else { continue }
+            guard let firstDate = dates.first else { continue }
             func find(_ text: String) -> Word? { near.first { cleanWord($0.text) == text } }
+            func findAny(_ set: Set<String>) -> Word? { near.first { set.contains(cleanWord($0.text)) && $0.rect.minX > desc.rect.minX } }
             let headerBottom = (near.map(\.rect.maxY).max() ?? desc.rect.maxY) + 1
             let card = find("vat") != nil && find("currency") != nil && dates.count > 1 && amounts.count > 1
             var cuts: [CGFloat]
@@ -115,9 +120,25 @@ enum StatementPDFTable {
                         amounts[0].rect.minX - 8, amounts[1].rect.minX - 8, vat.rect.minX - 8, width]
                 // The account-currency amount is deliberately preferred to the foreign amount.
                 headers = ["Date", "Transaction Date", "Description", "Currency", "Foreign Amount", "Amount", "VAT"]
-            } else if let value = find("value"), let balance = find("balance") {
-                cuts = [0, desc.rect.minX - 8, value.rect.minX - 8, amounts[0].rect.minX - 8, balance.rect.minX - 8, width]
+            } else if let value = find("value"), let balance = find("balance"), let firstAmount = amounts.first {
+                cuts = [0, desc.rect.minX - 8, value.rect.minX - 8, firstAmount.rect.minX - 8, balance.rect.minX - 8, width]
                 headers = ["Date", "Description", "Value Date", "Amount", "Balance"]
+                dateEnd = cuts[1]
+            } else if let debitWord = findAny(debitSet), let creditWord = findAny(creditSet), let balance = find("balance") {
+                let dMin = min(debitWord.rect.minX, creditWord.rect.minX)
+                let cMin = max(debitWord.rect.minX, creditWord.rect.minX)
+                let firstHeader = debitWord.rect.minX <= creditWord.rect.minX ? "Debit" : "Credit"
+                let secondHeader = debitWord.rect.minX <= creditWord.rect.minX ? "Credit" : "Debit"
+                cuts = [0, desc.rect.minX - 8, dMin - 10, cMin - 10, balance.rect.minX - 10, width]
+                headers = ["Date", "Description", firstHeader, secondHeader, "Balance"]
+                dateEnd = cuts[1]
+            } else if let firstAmount = amounts.first, let balance = find("balance") {
+                cuts = [0, desc.rect.minX - 8, firstAmount.rect.minX - 8, balance.rect.minX - 8, width]
+                headers = ["Date", "Description", "Amount", "Balance"]
+                dateEnd = cuts[1]
+            } else if let firstAmount = amounts.first {
+                cuts = [0, desc.rect.minX - 8, firstAmount.rect.minX - 8, width]
+                headers = ["Date", "Description", "Amount"]
                 dateEnd = cuts[1]
             } else {
                 continue
