@@ -272,7 +272,7 @@ struct ParsedSMS {
     var knowledgeRuleID: String? = nil
 
     var requiresReview: Bool {
-        false
+        detectedBank == nil && transactionType == .unknown
     }
 
     var isOrdinaryExpense: Bool {
