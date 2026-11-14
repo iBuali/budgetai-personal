@@ -125,19 +125,26 @@ struct TransactionsView: View {
         }
     }
 
+    private func computeReviewBuckets() -> (pending: [MoneyTransaction], needsReview: [MoneyTransaction]) {
+        var pending: [MoneyTransaction] = []
+        var needsReview: [MoneyTransaction] = []
+        for tx in transactions {
+            if tx.isPending {
+                pending.append(tx)
+                needsReview.append(tx)
+            } else if tx.isPossibleDuplicate {
+                needsReview.append(tx)
+            }
+        }
+        return (pending, needsReview)
+    }
+
     var body: some View {
         let _ = cycleStartDay
         let currentFiltered = computeFiltered()
-        var currentPending: [MoneyTransaction] = []
-        var currentNeedsReview: [MoneyTransaction] = []
-        for tx in transactions {
-            if tx.isPending {
-                currentPending.append(tx)
-                currentNeedsReview.append(tx)
-            } else if tx.isPossibleDuplicate {
-                currentNeedsReview.append(tx)
-            }
-        }
+        let reviewBuckets = computeReviewBuckets()
+        let currentPending = reviewBuckets.pending
+        let currentNeedsReview = reviewBuckets.needsReview
         let currentGrouped = mode == .list ? computeGrouped(from: currentFiltered) : []
         let showSummary = mode == .list && (filters.activeCount > 0 || filters.kind != .all) && !currentFiltered.isEmpty
         let currentTotals = showSummary ? computeTotals(from: currentFiltered) : (0.0, 0.0)
