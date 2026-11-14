@@ -71,10 +71,12 @@ enum StatementWorkbookXML {
                 case "s":
                     value = Int(raw).flatMap { strings.indices.contains($0) ? strings[$0] : nil } ?? ""
                 case "inlineStr": value = cell.descendants("t").map(\.text).joined()
+                case "str": value = raw
                 case "e", "b": value = ""
                 default:
-                    if dateStyles.contains(Int(cell.attributes["s"] ?? "0") ?? 0), let serial = Double(raw) {
-                        value = formatter.string(from: Date(timeIntervalSince1970: (serial - (date1904 ? 24107 : 25569)) * 86400))
+                    if dateStyles.contains(Int(cell.attributes["s"] ?? "0") ?? 0),
+                       let serial = Double(raw), serial > 1000 && serial < 100000 {
+                        value = formatter.string(from: Date(timeIntervalSince1970: (floor(serial) - (date1904 ? 24107 : 25569)) * 86400))
                     }
                 }
                 cells[index] = "\"" + value.replacingOccurrences(of: "\r", with: " ").replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\"", with: "\"\"") + "\""
