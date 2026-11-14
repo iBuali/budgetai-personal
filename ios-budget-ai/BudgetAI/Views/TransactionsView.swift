@@ -944,15 +944,25 @@ struct TransactionDetailView: View {
         return LocationService.inferLocation(from: tx.rawText, merchant: tx.merchant)
     }
 
+    private func effectiveAccountBalance(_ acc: Account) -> Double {
+        if acc.kind == .creditCard && acc.creditLimit > 0 {
+            return acc.cardRemainingBalance
+        }
+        return acc.balance
+    }
+
     /// Computes the previous balance before this transaction occurred.
     private var previousBalanceAmount: Double? {
-        if let smsBal = tx.smsBalance {
-            if tx.isCardLimitBalance { return smsBal }
+        if let smsBal = tx.smsBalance, !tx.isCardLimitBalance {
             return tx.isIncome ? max(0, smsBal - tx.amount) : (smsBal + tx.amount)
         }
         if let account {
-            if tx.isPending { return account.balance }
-            return tx.isIncome ? (account.balance - tx.amount) : (account.balance + tx.amount)
+            let currentBal = effectiveAccountBalance(account)
+            if tx.isPending { return currentBal }
+            if account.kind == .creditCard && account.creditLimit <= 0 && tx.smsBalance == nil {
+                return tx.isIncome ? (currentBal + tx.amount) : max(0, currentBal - tx.amount)
+            }
+            return tx.isIncome ? (currentBal - tx.amount) : (currentBal + tx.amount)
         }
         return nil
     }
@@ -1515,19 +1525,20 @@ struct TransactionDetailView: View {
 
             LabeledContent("New balance") {
                 if let account {
-                    if let smsBal = tx.smsBalance, !tx.isCardLimitBalance, abs(account.balance - smsBal) >= 0.0005 {
+                    let effectiveBal = effectiveAccountBalance(account)
+                    if let smsBal = tx.smsBalance, !tx.isCardLimitBalance, abs(effectiveBal - smsBal) >= 0.0005 {
                         VStack(alignment: .trailing, spacing: 2) {
-                            Text("\(account.name) (\(Money.format(account.balance, currency)))")
+                            Text("\(account.name) (\(Money.format(effectiveBal, currency)))")
                                 .monospacedDigit()
-                                .animatedNumber(account.balance)
+                                .animatedNumber(effectiveBal)
                             Text("SMS: \(Money.format(smsBal, currency))")
                                 .font(.caption2.monospacedDigit())
                                 .foregroundStyle(Theme.secondaryInk)
                         }
                     } else {
-                        Text("\(account.name) (\(Money.format(account.balance, currency)))")
+                        Text("\(account.name) (\(Money.format(effectiveBal, currency)))")
                             .monospacedDigit()
-                            .animatedNumber(account.balance)
+                            .animatedNumber(effectiveBal)
                     }
                 } else if let smsBal = tx.smsBalance {
                     Text(Money.format(smsBal, currency))
@@ -1537,8 +1548,9 @@ struct TransactionDetailView: View {
                 }
             }
 
-            if let bank = tx.smsBalance, let account, !account.kind.isLiability, !tx.isCardLimitBalance {
-                if abs(account.balance - bank) >= 0.0005 && !tx.isPending {
+            if let bank = tx.smsBalance, let account, (!account.kind.isLiability || account.kind == .creditCard), !tx.isCardLimitBalance {
+                let effectiveBal = effectiveAccountBalance(account)
+                if abs(effectiveBal - bank) >= 0.0005 && !tx.isPending {
                     Button {
                         if let synced = Ledger.syncBalanceFromSMS(tx, context: context, force: true) {
                             appState.show("\(account.name) set to \(Money.format(synced, currency))")
@@ -1553,6 +1565,7 @@ struct TransactionDetailView: View {
             }
 
             if let toBal = tx.smsToBalance, let toID = tx.toAccountID, let toAccount = Ledger.account(toID, context: context) {
+                let toEffectiveBal = effectiveAccountBalance(toAccount)
                 Divider()
 
                 LabeledContent("Destination previous balance") {
@@ -1562,13 +1575,13 @@ struct TransactionDetailView: View {
                 }
 
                 LabeledContent("Destination new balance") {
-                    Text("\(toAccount.name) (\(Money.format(toAccount.balance, currency)))")
+                    Text("\(toAccount.name) (\(Money.format(toEffectiveBal, currency)))")
                         .monospacedDigit()
-                        .animatedNumber(toAccount.balance)
+                        .animatedNumber(toEffectiveBal)
                 }
 
-                if !toAccount.kind.isLiability {
-                    if abs(toAccount.balance - toBal) >= 0.0005 && !tx.isPending {
+                if !toAccount.kind.isLiability || toAccount.kind == .creditCard {
+                    if abs(toEffectiveBal - toBal) >= 0.0005 && !tx.isPending {
                         Button {
                             if let synced = Ledger.syncBalanceForAccount(id: toID, balance: toBal, on: tx, isToAccount: true, context: context, force: true) {
                                 appState.show("\(toAccount.name) set to \(Money.format(synced, currency))")
