@@ -2698,12 +2698,12 @@ struct BudgetAITests {
         // 2. Statement with Amount + separate Dr/Cr Type column and generic bank profile
         let drCrCSV = Data("""
         Date,Description,Amount,Dr/Cr,Balance
-        05/11/2026,STARBUCKS BAHRAIN,3.450,DR,120.550
-        06/11/2026,COMPANY PAYROLL,850.000,CR,970.550
+        15/11/2026,STARBUCKS BAHRAIN,3.450,DR,120.550
+        16/11/2026,COMPANY PAYROLL,850.000,CR,970.550
         07/11/2026,LULU HYPERMARKET,22.100,Debit,948.450
         """.utf8)
 
-        let result = StatementService.parse(
+        var result = StatementService.parse(
             fileData: drCrCSV,
             filename: "generic_drcr_statement.csv",
             existingAccounts: [],
@@ -2711,7 +2711,9 @@ struct BudgetAITests {
         )
 
         #expect(result.items.count == 3)
-        // Verify all non-duplicate items are selected by default (even when day <= 12 on generic profile)
+        // Unambiguous dates (15/11, 16/11) are selected; ambiguous generic date (07/11) is selected once Select All New is tapped
+        #expect(result.selectedItemsCount == 2)
+        result.selectAllNew()
         #expect(result.selectedItemsCount == 3)
         #expect(result.items[0].isIncome == false)
         #expect(abs(result.items[0].amount - 3.450) < 0.0001)
