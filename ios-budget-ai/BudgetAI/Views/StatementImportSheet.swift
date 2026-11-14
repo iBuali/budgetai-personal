@@ -14,26 +14,34 @@ struct StatementImportSheet: View {
 
     @State private var showFilePicker = false
     @State private var isParsing = false
+    @State private var isAnalyzingWithAI = false
     @State private var isCategorizingWithAI = false
     @State private var parseResult: StatementParseResult?
+    @State private var rawFileData: Data?
+    @State private var rawFilename: String = ""
     @State private var selectedAccountID: UUID?
     @State private var selectedBankName: String = ""
     @State private var customBankName: String = ""
     @State private var errorMessage: String?
     @State private var showSuccessAlert = false
+    @State private var showAIFallbackPermissionAlert = false
+    @State private var showFieldMappingSheet = false
+    @State private var saveLearnedFormatToKB = true
     @State private var importSummary: (imported: Int, skipped: Int) = (0, 0)
     @State private var editingItem: ParsedStatementItem?
 
     var body: some View {
         NavigationStack {
             Group {
-                if isParsing {
+                if isParsing || isAnalyzingWithAI {
                     VStack(spacing: 16) {
                         ProgressView()
                             .scaleEffect(1.4)
-                        Text("Reading & Parsing Bank Statement...")
+                        Text(isAnalyzingWithAI ? "Analyzing Statement with AI (Option 2)..." : "Reading & Parsing Bank Statement...")
                             .font(.headline)
-                        Text("Extracting transactions, references, and amounts using built-in offline parser.")
+                        Text(isAnalyzingWithAI
+                             ? "Identifying statement layout, column mappings, dates, amounts, and balances."
+                             : "Extracting transactions, references, and amounts using built-in offline parser.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
@@ -81,6 +89,17 @@ struct StatementImportSheet: View {
             } message: {
                 Text("Successfully imported \(importSummary.imported) transactions into transaction history. Your account balances remain unchanged.")
             }
+            .alert("Use AI-Assisted Statement Recognition? (Option 2)", isPresented: $showAIFallbackPermissionAlert) {
+                Button("Analyze with AI") {
+                    runAIFallbackRecognition()
+                }
+                Button("Map Columns Manually") {
+                    showFieldMappingSheet = true
+                }
+                Button("Not Now", role: .cancel) {}
+            } message: {
+                Text("The standard offline parser had low confidence or could not extract all fields from this statement format. Would you like to allow AI (Option 2) to analyze the file, identify the fields, and learn this layout for future imports?")
+            }
             .sheet(item: $editingItem) { item in
                 EditStatementItemSheet(item: item) { updated in
                     if let idx = parseResult?.items.firstIndex(where: { $0.id == updated.id }) {
@@ -88,11 +107,29 @@ struct StatementImportSheet: View {
                     }
                 }
             }
+            .sheet(isPresented: $showFieldMappingSheet) {
+                if let current = parseResult {
+                    StatementFieldMappingSheet(
+                        result: current,
+                        accounts: accounts,
+                        allTransactions: allTransactions
+                    ) { updatedResult in
+                        self.parseResult = updatedResult
+                        if let bank = updatedResult.detectedBank, !bank.isEmpty {
+                            self.selectedBankName = bank
+                        }
+                        if self.selectedAccountID == nil {
+                            self.selectedAccountID = updatedResult.matchedAccountID
+                        }
+                        appState.show("Saved statement mapping to Knowledge Base")
+                    }
+                }
+            }
         }
     }
 
     private var selectedItemsCount: Int {
-        parseResult?.items.filter { $0.isSelected && !$0.isDuplicate }.count ?? 0
+        parseResult?.selectedItemsCount ?? 0
     }
 
     // MARK: - Empty Upload Prompt View
@@ -265,7 +302,102 @@ struct StatementImportSheet: View {
                 Text("Review and edit any transaction before finalizing. Existing account balances will NOT be changed.")
             }
 
-            // AI Suggestion Banner
+            // Option 2: AI-Assisted Statement Recognition & Field Mapping Confirmation
+            Section {
+                Button {
+                    if GeminiAccount.isConfigured {
+                        showAIFallbackPermissionAlert = true
+                    } else {
+                        appState.show("Configure your Gemini API key in Settings to use AI-Assisted Recognition", warning: true)
+                    }
+                } label: {
+                    HStack(spacing: 12) {
+                        ZStack {
+                            Circle()
+                                .fill(result.shouldOfferAIFallback ? Theme.warning.opacity(0.16) : Theme.cobaltSoft)
+                                .frame(width: 36, height: 36)
+                            Image(systemName: "wand.and.stars")
+                                .foregroundStyle(result.shouldOfferAIFallback ? Theme.warning : Theme.cobalt)
+                        }
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack(spacing: 6) {
+                                Text("AI-Assisted Statement Recognition")
+                                    .font(.subheadline.weight(.semibold))
+                                    .foregroundStyle(Theme.ink)
+                                Text("OPTION 2")
+                                    .font(.system(size: 9, weight: .bold))
+                                    .padding(.horizontal, 5)
+                                    .padding(.vertical, 2)
+                                    .background(Theme.cobaltSoft, in: Capsule())
+                                    .foregroundStyle(Theme.cobalt)
+                            }
+                            Text(result.shouldOfferAIFallback
+                                 ? "Extraction looks incomplete or low-confidence (\(Int(result.confidenceScore * 100))%). Tap to analyze structure & map fields with AI."
+                                 : "Use AI fallback to re-analyze statement layout, columns, dates, and amounts.")
+                                .font(.caption2)
+                                .foregroundStyle(Theme.secondaryInk)
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .buttonStyle(.borderless)
+
+                Button {
+                    showFieldMappingSheet = true
+                } label: {
+                    HStack(spacing: 12) {
+                        ZStack {
+                            Circle()
+                                .fill(Theme.cobaltSoft)
+                                .frame(width: 36, height: 36)
+                            Image(systemName: "slider.horizontal.3")
+                                .foregroundStyle(Theme.cobalt)
+                        }
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack(spacing: 6) {
+                                Text("Confirm / Correct Field Mapping")
+                                    .font(.subheadline.weight(.semibold))
+                                    .foregroundStyle(Theme.ink)
+                                if result.aiFieldMappingNeedsConfirmation {
+                                    Text("VERIFY")
+                                        .font(.system(size: 9, weight: .bold))
+                                        .padding(.horizontal, 5)
+                                        .padding(.vertical, 2)
+                                        .background(Theme.warning.opacity(0.18), in: Capsule())
+                                        .foregroundStyle(Theme.warning)
+                                }
+                            }
+                            Text("Review detected Date, Description, Debit, Credit, Amount, Currency, and save rules to Knowledge Base.")
+                                .font(.caption2)
+                                .foregroundStyle(Theme.secondaryInk)
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .buttonStyle(.borderless)
+
+                if result.isAIFallbackResult {
+                    Toggle(isOn: $saveLearnedFormatToKB) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Save Learned Format to Knowledge Base")
+                                .font(.caption.weight(.semibold))
+                            Text("Automatically recognize future statements from this bank without needing AI.")
+                                .font(.caption2)
+                                .foregroundStyle(Theme.secondaryInk)
+                        }
+                    }
+                }
+            } header: {
+                Text("Recognition & Field Mapping")
+            }
+
+            // AI Category Suggestion Banner
             if GeminiAccount.isConfigured && result.items.contains(where: { $0.category == .other }) {
                 Section {
                     Button {
@@ -297,44 +429,72 @@ struct StatementImportSheet: View {
                                 .foregroundStyle(.secondary)
                         }
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.borderless)
                     .disabled(isCategorizingWithAI)
                 }
             }
 
             // Selection Controls
             Section {
-                HStack {
-                    Button("Select All New") {
+                HStack(spacing: 14) {
+                    Button {
                         if var r = parseResult {
-                            for i in r.items.indices where !r.items[i].isDuplicate {
-                                r.items[i].isSelected = true
-                            }
+                            r.selectAllNew()
                             parseResult = r
                         }
+                    } label: {
+                        Label("Select All", systemImage: "checkmark.circle.fill")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Theme.cobalt)
                     }
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(Theme.cobalt)
+                    .buttonStyle(.borderless)
+
+                    if result.duplicatesCount > 0 {
+                        Button {
+                            if var r = parseResult {
+                                r.selectAll()
+                                parseResult = r
+                            }
+                        } label: {
+                            Text("Include Duplicates")
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(Theme.cobalt)
+                        }
+                        .buttonStyle(.borderless)
+                    }
 
                     Spacer()
 
-                    Button("Deselect All") {
+                    Button {
                         if var r = parseResult {
-                            for i in r.items.indices {
-                                r.items[i].isSelected = false
-                            }
+                            r.deselectAll()
                             parseResult = r
                         }
+                    } label: {
+                        Label("Deselect All", systemImage: "circle")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Theme.secondaryInk)
                     }
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(Theme.secondaryInk)
+                    .buttonStyle(.borderless)
                 }
             }
 
             // Transactions list
             Section("Transactions (\(result.items.count))") {
-                ForEach(result.items) { item in
-                    statementItemRow(item)
+                if result.items.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("No transactions were extracted by the offline parser.")
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(Theme.ink)
+                        Text("Tap \"AI-Assisted Statement Recognition (Option 2)\" above to analyze this statement with AI, or tap \"Confirm / Correct Field Mapping\" to map columns manually.")
+                            .font(.caption)
+                            .foregroundStyle(Theme.secondaryInk)
+                    }
+                    .padding(.vertical, 6)
+                } else {
+                    ForEach(result.items) { item in
+                        statementItemRow(item)
+                    }
                 }
             }
         }
@@ -351,9 +511,8 @@ struct StatementImportSheet: View {
                     .font(.title3)
                     .foregroundStyle(item.isSelected ? Theme.cobalt : Color.secondary)
             }
-            .buttonStyle(.plain)
-            .disabled(item.isDuplicate)
-            .opacity(item.isDuplicate ? 0.35 : 1.0)
+            .buttonStyle(.borderless)
+            .opacity(item.isDuplicate && !item.isSelected ? 0.5 : 1.0)
 
             // Category Icon Badge
             IconBadge(symbol: item.category.symbol, color: item.category.color, size: 36)
@@ -433,7 +592,7 @@ struct StatementImportSheet: View {
                         .font(.caption2.weight(.medium))
                         .foregroundStyle(Theme.cobalt)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.borderless)
             }
         }
         .padding(.vertical, 2)
@@ -461,6 +620,8 @@ struct StatementImportSheet: View {
             let data = try Data(contentsOf: url)
             let filename = url.lastPathComponent
 
+            self.rawFileData = data
+            self.rawFilename = filename
             isParsing = true
             errorMessage = nil
 
@@ -478,15 +639,66 @@ struct StatementImportSheet: View {
                     self.selectedAccountID = result.matchedAccountID
                     self.selectedBankName = result.detectedBank ?? ""
 
-                    if result.items.isEmpty {
-                        self.parseResult = nil
-                        self.errorMessage = result.inconsistencies.first ?? "No transactions found. Manually map Date, Description and Debit/Credit or signed Amount columns in a CSV/Excel export, then select the file again."
+                    // If the existing parser cannot recognize/extract transactions or confidence is low,
+                    // prompt the user to allow Option 2 (AI-Assisted Statement Recognition) or manual column mapping.
+                    if result.items.isEmpty || result.confidenceScore < 0.75 || !result.inconsistencies.isEmpty {
+                        if GeminiAccount.isConfigured {
+                            self.showAIFallbackPermissionAlert = true
+                        }
                     }
                 }
             }
         } catch {
             isParsing = false
             errorMessage = "Failed to read statement: \(error.localizedDescription)"
+        }
+    }
+
+    // MARK: - Option 2: AI-Assisted Statement Recognition Handler
+
+    private func runAIFallbackRecognition() {
+        guard let data = rawFileData else {
+            appState.show("Please select a statement file first.", warning: true)
+            return
+        }
+        guard GeminiAccount.isConfigured else {
+            appState.show("Configure your Gemini API key in Settings to use AI-Assisted Recognition.", warning: true)
+            return
+        }
+
+        isAnalyzingWithAI = true
+        let current = parseResult
+        let fname = rawFilename
+
+        Task {
+            do {
+                let (aiResult, recognition) = try await StatementService.analyzeWithAIFallback(
+                    fileData: data,
+                    filename: fname,
+                    existingResult: current,
+                    existingAccounts: accounts,
+                    existingTransactions: allTransactions
+                )
+                await MainActor.run {
+                    self.isAnalyzingWithAI = false
+                    self.parseResult = aiResult
+                    if let bank = aiResult.detectedBank, !bank.isEmpty {
+                        self.selectedBankName = bank
+                    }
+                    if self.selectedAccountID == nil {
+                        self.selectedAccountID = aiResult.matchedAccountID
+                    }
+                    if recognition.isMappingUncertain {
+                        self.showFieldMappingSheet = true
+                    }
+                    appState.show("AI recognized \(aiResult.items.count) transactions. Review before importing.")
+                }
+            } catch {
+                await MainActor.run {
+                    self.isAnalyzingWithAI = false
+                    appState.show("AI analysis failed: \(error.localizedDescription)", warning: true)
+                }
+            }
         }
     }
 
@@ -528,6 +740,24 @@ struct StatementImportSheet: View {
 
         let bankToRecord = !selectedBankName.isEmpty ? selectedBankName : (result.detectedBank ?? "Bank Statement")
 
+        // If this format was recognized via AI fallback or verified by the user, persist its structural rule
+        // in the Statement Knowledge Base for future automatic recognition without AI.
+        if result.isAIFallbackResult && saveLearnedFormatToKB {
+            let inferredDocType: StatementDocType = (result.detectedCardLast4 != nil || (result.profileName?.localizedCaseInsensitiveContains("Credit Card") ?? false))
+                ? .creditCard
+                : .bankAccount
+            let inferredSign: AmountSignNotation = inferredDocType == .creditCard ? .creditCardNegativePayment : .columnarDebitCredit
+            BankProfileRegistry.learnFromConfirmedStatement(
+                bankName: bankToRecord,
+                docType: inferredDocType,
+                signNotation: inferredSign,
+                primaryCurrency: result.detectedCurrency ?? AppSettings.currency,
+                dateFormat: nil,
+                columnMapping: result.detectedColumnMapping,
+                headerKeywords: result.detectedHeaders
+            )
+        }
+
         let outcome = StatementService.importConfirmedTransactions(
             result.items,
             into: selectedAccountID,
@@ -537,6 +767,184 @@ struct StatementImportSheet: View {
 
         importSummary = (imported: outcome.importedCount, skipped: outcome.skippedCount)
         showSuccessAlert = true
+    }
+}
+
+// MARK: - Confirm / Edit Statement Field & Column Mapping Sheet
+
+struct StatementFieldMappingSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    let result: StatementParseResult
+    let accounts: [Account]
+    let allTransactions: [MoneyTransaction]
+    var onApplied: (StatementParseResult) -> Void
+
+    @State private var bankName: String = ""
+    @State private var docType: StatementDocType = .bankAccount
+    @State private var signNotation: AmountSignNotation = .columnarDebitCredit
+    @State private var currency: String = "BHD"
+    @State private var dateFormat: String = "dd/MM/yyyy"
+    @State private var dateColumn: String = ""
+    @State private var descriptionColumn: String = ""
+    @State private var debitColumn: String = ""
+    @State private var creditColumn: String = ""
+    @State private var amountColumn: String = ""
+    @State private var balanceColumn: String = ""
+    @State private var referenceColumn: String = ""
+    @State private var saveToKnowledgeBase: Bool = true
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                if !result.detectedHeaders.isEmpty {
+                    Section("Detected Table Columns") {
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 8) {
+                                ForEach(result.detectedHeaders, id: \.self) { header in
+                                    Text(header)
+                                        .font(.caption.weight(.semibold))
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 5)
+                                        .background(Theme.cobaltSoft, in: Capsule())
+                                        .foregroundStyle(Theme.cobalt)
+                                }
+                            }
+                            .padding(.vertical, 2)
+                        }
+                    }
+                }
+
+                Section("Institution & Statement Format") {
+                    TextField("Bank / Institution Name", text: $bankName)
+                    Picker("Statement Type", selection: $docType) {
+                        Text("Bank Account Statement").tag(StatementDocType.bankAccount)
+                        Text("Credit Card Statement").tag(StatementDocType.creditCard)
+                        Text("General Financial Statement").tag(StatementDocType.generic)
+                    }
+                    Picker("Amount Sign Format", selection: $signNotation) {
+                        Text("Separate Debit & Credit Columns").tag(AmountSignNotation.columnarDebitCredit)
+                        Text("Signed Amount (+ / - or CR / DR)").tag(AmountSignNotation.standardSigned)
+                        Text("Parentheses Signed ((+) / (-))").tag(AmountSignNotation.parenthesesSigned)
+                        Text("Credit Card (- Payment / + Purchase)").tag(AmountSignNotation.creditCardNegativePayment)
+                    }
+                    TextField("Currency (e.g. BHD, USD, SAR, EUR)", text: $currency)
+                    TextField("Date Format (e.g. dd/MM/yyyy, yyyy-MM-dd)", text: $dateFormat)
+                }
+
+                Section {
+                    columnFieldRow(label: "Date Column", text: $dateColumn, placeholder: "e.g. Transaction Date")
+                    columnFieldRow(label: "Description Column", text: $descriptionColumn, placeholder: "e.g. Description / Details")
+                    columnFieldRow(label: "Debit Column (Optional)", text: $debitColumn, placeholder: "e.g. Debit / Withdrawal")
+                    columnFieldRow(label: "Credit Column (Optional)", text: $creditColumn, placeholder: "e.g. Credit / Deposit")
+                    columnFieldRow(label: "Signed Amount Column (Optional)", text: $amountColumn, placeholder: "e.g. Amount")
+                    columnFieldRow(label: "Balance Column (Optional)", text: $balanceColumn, placeholder: "e.g. Balance")
+                    columnFieldRow(label: "Reference Column (Optional)", text: $referenceColumn, placeholder: "e.g. Reference")
+                } header: {
+                    Text("Column / Field Mapping")
+                } footer: {
+                    Text("Confirm or adjust column headers before importing. Never guesses uncertain financial values.")
+                }
+
+                Section {
+                    Toggle("Save Mapping to Statement Knowledge Base", isOn: $saveToKnowledgeBase)
+                } footer: {
+                    Text("Once saved, future statements matching this bank and column structure will be recognized automatically on-device.")
+                }
+            }
+            .navigationTitle("Field & Column Mapping")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Apply & Verify") {
+                        applyMapping()
+                    }
+                    .fontWeight(.semibold)
+                }
+            }
+            .onAppear {
+                bankName = result.detectedBank ?? ""
+                if result.detectedCardLast4 != nil || (result.profileName?.localizedCaseInsensitiveContains("Credit Card") ?? false) {
+                    docType = .creditCard
+                    signNotation = .creditCardNegativePayment
+                }
+                currency = result.detectedCurrency ?? AppSettings.currency
+                if let map = result.detectedColumnMapping {
+                    dateColumn = map.dateColumnHeader ?? ""
+                    descriptionColumn = map.descriptionColumnHeader ?? ""
+                    debitColumn = map.debitColumnHeader ?? ""
+                    creditColumn = map.creditColumnHeader ?? ""
+                    amountColumn = map.amountColumnHeader ?? ""
+                    balanceColumn = map.balanceColumnHeader ?? ""
+                    referenceColumn = map.referenceColumnHeader ?? ""
+                } else {
+                    // Pre-fill from detected headers if available
+                    for h in result.detectedHeaders {
+                        let low = h.lowercased()
+                        if dateColumn.isEmpty && (low.contains("date") || low.contains("التاريخ")) { dateColumn = h }
+                        else if descriptionColumn.isEmpty && (low.contains("desc") || low.contains("detail") || low.contains("particular") || low.contains("narrative") || low.contains("البيان") || low.contains("الوصف")) { descriptionColumn = h }
+                        else if debitColumn.isEmpty && (low.contains("debit") || low.contains("withdrawal") || low.contains("مدين")) { debitColumn = h }
+                        else if creditColumn.isEmpty && (low.contains("credit") || low.contains("deposit") || low.contains("دائن")) { creditColumn = h }
+                        else if amountColumn.isEmpty && (low.contains("amount") || low.contains("المبلغ")) && !low.contains("balance") { amountColumn = h }
+                        else if balanceColumn.isEmpty && (low.contains("balance") || low.contains("الرصيد")) { balanceColumn = h }
+                        else if referenceColumn.isEmpty && (low.contains("ref") || low.contains("المرجع")) { referenceColumn = h }
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func columnFieldRow(label: String, text: Binding<String>, placeholder: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(label)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Theme.secondaryInk)
+                Spacer()
+                if !result.detectedHeaders.isEmpty {
+                    Menu("Pick Header") {
+                        Button("Clear") { text.wrappedValue = "" }
+                        ForEach(result.detectedHeaders, id: \.self) { h in
+                            Button(h) { text.wrappedValue = h }
+                        }
+                    }
+                    .font(.caption2.weight(.semibold))
+                }
+            }
+            TextField(placeholder, text: text)
+                .font(.subheadline)
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func applyMapping() {
+        let mapping = StatementColumnMapping(
+            dateColumnHeader: dateColumn.isEmpty ? nil : dateColumn,
+            descriptionColumnHeader: descriptionColumn.isEmpty ? nil : descriptionColumn,
+            debitColumnHeader: debitColumn.isEmpty ? nil : debitColumn,
+            creditColumnHeader: creditColumn.isEmpty ? nil : creditColumn,
+            amountColumnHeader: amountColumn.isEmpty ? nil : amountColumn,
+            balanceColumnHeader: balanceColumn.isEmpty ? nil : balanceColumn,
+            referenceColumnHeader: referenceColumn.isEmpty ? nil : referenceColumn
+        )
+        let updated = StatementService.applyConfirmedFieldMapping(
+            to: result,
+            bankName: bankName,
+            docType: docType,
+            signNotation: signNotation,
+            currency: currency,
+            dateFormat: dateFormat,
+            columnMapping: mapping,
+            saveToKnowledgeBase: saveToKnowledgeBase,
+            existingAccounts: accounts,
+            existingTransactions: allTransactions
+        )
+        onApplied(updated)
+        dismiss()
     }
 }
 
