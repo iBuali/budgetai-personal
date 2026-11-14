@@ -272,7 +272,7 @@ struct ParsedSMS {
     var knowledgeRuleID: String? = nil
 
     var requiresReview: Bool {
-        transactionType == .unknown
+        detectedBank == nil || bankConfidence == .low
     }
 
     var isOrdinaryExpense: Bool {
@@ -1291,11 +1291,11 @@ enum SMSParser {
             )
         }
 
-        // 8. Uncertain / Ambiguous message — do not silently guess income or expense!
+        // 8. Uncertain / Ambiguous message — keep categorized as Other without forcing user review
         return ClassificationOutcome(
             type: .unknown,
             confidence: .low,
-            reason: "Uncertain SMS format or ambiguous transaction direction; marked for user review"
+            reason: "Uncertain SMS format or ambiguous transaction direction; categorized as Other"
         )
     }
 
@@ -1316,9 +1316,9 @@ enum SMSParser {
         // - "Outward transfer / Outgoing Fawri+ / sent via Fawri+"
         // - Arabic: "حوالة صادرة" / "تحويل صادر" / "تم خصم ... تحويل إلى" / "تم تحويل مبلغ ... من حسابك إلى"
         let outgoingPatterns = [
-            "\\bfawri\\+?\\s+transfer\\s+of\\b.*\\bto\\b",
+            "\\bfawri\\+?\\s+transfer\\s+of\\b(?!.*\\bfrom\\s+(?:iban|a/c|acct|acc|ac|account)\\b.*\\bcredited\\s+to\\b).*\\b(?<!credited\\s)to\\b",
             "\\btransfer\\s+of\\b.*\\bto\\b.*\\bfrom\\b",
-            "\\btransfer\\s+of\\b.*\\bfrom\\s+(?:your\\s+)?(?:a/c|acct|account|iban)\\b.*\\bto\\b",
+            "\\btransfer\\s+of\\b.*\\bfrom\\s+(?:your\\s+)?(?:a/c|acct|account|iban)\\b.*\\b(?<!credited\\s)to\\b",
             "\\b(?:debited|deducted)\\b.*\\b(?:fawri|transfer|iban|to)\\b",
             "\\b(?:fawri\\+?|transfer)\\b.*\\b(?:debited|deducted)\\s+from\\b",
             "\\b(?:outward|outgoing)\\s+(?:fawri\\+?|transfer|remittance)\\b",
@@ -1331,14 +1331,15 @@ enum SMSParser {
         // - "You have received a Fawri+ transfer of BHD ... from ..."
         // - "Your account ending ... has been credited with BHD ... via Fawri+ from ..."
         // - "Incoming / Inward Fawri+ transfer ... to your account"
-        // - "Fawri+ transfer of BHD ... from ... credited to your account"
+        // - "Fawri+ transfer of BHD ... from ... credited to your account / BHD Ac"
         // - Arabic: "حوالة واردة" / "تحويل وارد" / "حوالة فوري+ واردة" / "تم إيداع حوالة" / "تم استلام تحويل"
         let incomingPatterns = [
             "\\breceived\\s+(?:a\\s+)?(?:fawri\\+?|transfer|payment|amount)\\b",
             "\\b(?:fawri\\+?|transfer|payment|amount)\\b.*\\breceived\\s+(?:from|in|into|to)\\b",
             "\\breceived\\s+from\\s+(?:iban|a/c|acct|acc|account)\\b",
-            "\\byour\\s+(?:a/c|acct|acc|account|iban)\\b.*\\b(?:has\\s+been\\s+)?credited\\b",
-            "\\bcredited\\s+to\\s+your\\s+(?:a/c|acct|acc|account|iban)\\b",
+            "\\bfrom\\s+(?!your\\b)(?:iban|a/c|acct|acc|ac|account)\\b.*\\bcredited\\s+to\\b",
+            "\\byour\\s+(?:a/c|acct|acc|ac|account|iban)\\b.*\\b(?:has\\s+been\\s+)?credited\\b",
+            "\\bcredited\\s+to\\s+(?:your\\s+)?(?:[a-z]{3}\\s+)?(?:a/c|acct|acc|ac|account|iban)\\b(?!\\s+ending)",
             "\\b(?:inward|incoming)\\s+(?:fawri\\+?|transfer|remittance|payment)\\b",
             "حوالة واردة", "تحويل وارد", "حوالة فوري\\+? واردة", "تم إيداع حوالة", "تم ايداع حوالة", "تم استلام حوالة", "تم استلام تحويل"
         ]
@@ -1362,11 +1363,11 @@ enum SMSParser {
             )
         }
 
-        // Direction cannot be determined reliably (e.g. isolated "Fawri+" or "credited" without verified structure)
+        // Direction cannot be determined reliably — keep categorized as Other without forcing user review
         return ClassificationOutcome(
             type: .unknown,
             confidence: .low,
-            reason: "Ambiguous \(rail ?? "transfer") direction; marked for user review"
+            reason: "Uncertain SMS format or ambiguous transaction direction; categorized as Other"
         )
     }
 
@@ -1496,9 +1497,9 @@ enum SMSParser {
         }
 
         let debitPatterns = [
-            "\\bfawri\\+?\\s+transfer\\s+of\\b.*\\bto\\b",
+            "\\bfawri\\+?\\s+transfer\\s+of\\b(?!.*\\bfrom\\s+(?:iban|a/c|acct|acc|ac|account)\\b.*\\bcredited\\s+to\\b).*\\b(?<!credited\\s)to\\b",
             "\\btransfer\\s+of\\b.*\\bto\\b.*\\bfrom\\b",
-            "\\btransfer\\s+of\\b.*\\bfrom\\s+(?:your\\s+)?(?:a/c|acct|account|iban)\\b.*\\bto\\b",
+            "\\btransfer\\s+of\\b.*\\bfrom\\s+(?:your\\s+)?(?:a/c|acct|account|iban)\\b.*\\b(?<!credited\\s)to\\b",
             "\\b(?:debited|has\\s+been\\s+debited|deducted|withdrawn)\\b",
             "\\b(?:outward|outgoing)\\s+(?:fawri\\+?|transfer|remittance|payment)\\b",
             "\\bsent\\s+(?:via\\s+fawri\\+?|to\\s+iban|to\\s+account)\\b",
@@ -1510,9 +1511,10 @@ enum SMSParser {
             "\\breceived\\s+(?:a\\s+)?(?:fawri\\+?|transfer|payment|amount)\\b",
             "\\b(?:fawri\\+?|transfer|payment|amount)\\b.*\\breceived\\s+(?:from|in|into|to)\\b",
             "\\breceived\\s+from\\s+(?:iban|a/c|acct|acc|account)\\b",
-            "\\byour\\s+(?:a/c|acct|acc|account|iban)\\b.*\\b(?:has\\s+been\\s+|was\\s+)?credited\\b",
-            "\\b(?:a/c|acct|acc|account|iban)\\s*(?:ending\\s*)?[0-9*x•#]+\\s*(?:has\\s+been\\s+|was\\s+)?credited\\b",
-            "\\bcredited\\s+(?:to\\s+your|with)\\b",
+            "\\bfrom\\s+(?!your\\b)(?:iban|a/c|acct|acc|ac|account)\\b.*\\bcredited\\s+to\\b",
+            "\\byour\\s+(?:a/c|acct|acc|ac|account|iban)\\b.*\\b(?:has\\s+been\\s+|was\\s+)?credited\\b",
+            "\\b(?:a/c|acct|acc|ac|account|iban)\\s*(?:ending\\s*)?[0-9*x•#]+\\s*(?:has\\s+been\\s+|was\\s+)?credited\\b",
+            "\\bcredited\\s+(?:to\\s+(?:your\\s+)?(?:[a-z]{3}\\s+)?(?:a/c|acct|acc|ac|account|iban)(?!\\s+ending)|with)\\b",
             "\\bcredit\\s+(?:transaction|txn|alert|advice|amount|of|to)\\b",
             "\\b(?:inward|incoming)\\s+(?:fawri\\+?|transfer|remittance|payment)\\b",
             "\\breceived\\s+in\\s+your\\b",
@@ -1700,7 +1702,7 @@ enum SMSParser {
         // Strip external counterparty IBAN/account so only the user's own account/card token remains primary
         let isOutgoingCreditedToIBAN = lowerText.range(of: "\\bpayment\\b.*\\bwas\\s+credited\\s+to\\s+iban\\s+ending\\b", options: .regularExpression) != nil
         let isIncoming = !isOutgoingCreditedToIBAN && lowerText.range(
-            of: "\\breceived\\s+(?:from|a\\s+|in|into|to)|\\bcredit\\s+transaction|\\b(?:has\\s+been|was)\\s+credited|\\bcredited\\s+(?:to\\s+your|with)|حوالة واردة|تحويل وارد|تم إيداع|تم ايداع|تم استلام",
+            of: "\\breceived\\s+(?:from|a\\s+|in|into|to)|\\bfrom\\s+(?!your\\b)(?:iban|a/c|acct|acc|ac|account)\\b.*\\bcredited\\s+to\\b|\\bcredit\\s+transaction|\\b(?:has\\s+been|was)\\s+credited|\\bcredited\\s+(?:to\\s+(?:your|[a-z]{3}\\s+(?:a/c|acct|acc|ac|account))|with)|حوالة واردة|تحويل وارد|تم إيداع|تم ايداع|تم استلام",
             options: .regularExpression
         ) != nil
         if isIncoming {
@@ -1817,9 +1819,10 @@ enum SMSParser {
                 "\\breceived\\s+from\\b",
                 "\\breceived\\s+(?:a\\s+)?(?:fawri\\+?|transfer|payment|amount)\\b",
                 "\\breceived\\s+(?:in|into|to)\\b",
+                "\\bfrom\\s+(?!your\\b)(?:iban|a/c|acct|acc|ac|account)\\b.*\\bcredited\\s+to\\b",
                 "\\bcredit\\s+(?:transaction|txn|alert|advice|amount|of)\\b",
                 "\\b(?:has\\s+been|was|is)\\s+credited\\b",
-                "\\bcredited\\s+(?:to\\s+your|with)\\b",
+                "\\bcredited\\s+(?:to\\s+(?:your\\s+)?(?:[a-z]{3}\\s+)?(?:a/c|acct|acc|ac|account|iban)(?!\\s+ending)|with)\\b",
                 "\\b(?:inward|incoming)\\s+(?:fawri\\+?|transfer|remittance|payment)\\b",
                 "حوالة واردة", "تحويل وارد", "حوالة فوري\\+? واردة", "تم إيداع", "تم ايداع", "تم استلام", "وارد لحسابك"
             ]
@@ -1960,8 +1963,8 @@ enum SMSParser {
             if rail == "ATM Withdrawal" { return "ATM Withdrawal" }
             return "Card purchase"
         case .unknown:
-            if let rail { return "\(rail) (Needs Review)" }
-            return "Bank SMS (Needs Review)"
+            if let rail { return rail }
+            return "Other Transaction"
         }
     }
 
