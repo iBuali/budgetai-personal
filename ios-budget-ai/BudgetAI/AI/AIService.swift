@@ -513,20 +513,25 @@ enum SMSImporter {
         let resolvedSender = effectiveSender ?? p.sender
 
         // Determine account involved in the transaction (supports multiple accounts e.g. 17515151 -> BisB, 17123456 -> ila).
-        let matchingDigits: String? = {
-            if p.transactionType == .transferIn {
-                return p.accountSuffix ?? p.recipientSuffix
-            }
-            // For outgoing transfers and card expenses, check accountSuffix or cardDigits
-            return p.accountSuffix ?? p.cardDigits
-        }()
+        // Never use `recipientSuffix` as `matchingDigits` because `recipientSuffix` is always the external counterparty's IBAN/account!
+        let matchingDigits: String? = p.accountSuffix ?? p.cardDigits
 
         // Highest-priority check: did the SMS match an account's configured `smsMatch` (card or account digits)?
         let explicitDigitMatchedAccount: Account? = {
             if let d = matchingDigits, let acc = SMSParser.findMatchingAccount(suffix: d, in: context) {
                 return acc
             }
-            return SMSParser.findAccountInSMSText(trimmed, detectedBank: resolvedSMSBank, in: context)
+            if let acc = SMSParser.findAccountInSMSText(trimmed, detectedBank: resolvedSMSBank, in: context) {
+                if let b = resolvedSMSBank, !b.isEmpty, acc.kind != .creditCard,
+                   let accBank = SMSParser.bankName(forAccount: acc),
+                   accBank.caseInsensitiveCompare(b) != .orderedSame,
+                   !((accBank == "ila" && b == "Bank ABC") || (accBank == "Bank ABC" && b == "ila")),
+                   SMSParser.findMatchingAccount(forBank: b, senderOrPhone: resolvedSender, digits: nil, in: context) != nil {
+                    return nil
+                }
+                return acc
+            }
+            return nil
         }()
 
         // If digits weren't extracted by regex, check if the raw SMS text contains any account's configured smsMatch
@@ -809,11 +814,14 @@ enum SMSImporter {
             target = nil
             tx.accountID = nil
         }
-        // Uncertain categorization must NOT put transactions on the list waiting for review.
-        // Only transactions with an unknown transaction type (.unknown) need review.
-        let isUncertain = p.transactionType == .unknown
+        // Uncertain categorization or uncertain SMS format / ambiguous direction must NOT put transactions on the list waiting for review;
+        // keep them categorized as Other (.other) unless the bank is unknown or the account is unmatched.
+        if p.transactionType == .unknown && tx.category != .internalTransfer {
+            p.category = .other
+            tx.category = .other
+        }
 
-        let mustQuarantine = bankUnknown || accountUnmatched || isUncertain
+        let mustQuarantine = bankUnknown || accountUnmatched
 
         if mustQuarantine {
             tx.isPending = true
@@ -1146,9 +1154,10 @@ enum SMSImporter {
             let isSameDateAndTime: Bool = {
                 guard isSameCalendarDay else { return false }
                 if let t1 = existingTime, let t2 = incomingTime {
-                    return t1 == t2
+                    if t1 == t2 { return true }
+                    // Also compare HH:mm prefix in case one includes seconds (e.g. "20:53:00" vs "20:53")
+                    if t1.prefix(5) == t2.prefix(5) { return true }
                 }
-                // Require both to have an explicit time and match to the minute
                 guard existingTime != nil, incomingTime != nil else { return false }
                 let cal = Calendar.current
                 return cal.dateComponents([.year, .month, .day, .hour, .minute], from: existing.date)
@@ -1157,22 +1166,88 @@ enum SMSImporter {
             guard isSameDateAndTime else { continue }
 
             let existingRole = originalTransferRole(for: existing, context: context) ?? (existing.isIncome ? .transferIn : .transferOut)
+            let existingRawText = existing.rawText ?? ""
+            let exSuffixes = SMSParser.extractSuffixes(in: existingRawText)
+            let inSuffixes = SMSParser.extractSuffixes(in: rawSMS)
+
+            // In a two-leg internal transfer (e.g. BisB -> ila), each bank's SMS often prints the OTHER (counterparty) account's IBAN:
+            // - BisB outgoing SMS: "was credited to IBAN ending 1101" (1101 is ila's IBAN, i.e. existing's account!)
+            // - ila incoming SMS: "from IBAN ****3876 credited to BHD Ac" (3876 is BisB's IBAN, i.e. incoming's account!)
+            let exCounterpartyFromOtherLeg = inSuffixes.recipientSuffix ?? parsed.recipientSuffix
+            let inCounterpartyFromOtherLeg = exSuffixes.recipientSuffix ?? existing.smsRecipientSuffix
+
+            let b1 = SMSParser.primaryBankName(from: existing.smsBank)
+            let b2 = SMSParser.primaryBankName(from: resolvedBank)
+            let isDifferentBanks: Bool = {
+                guard let b1, let b2, !b1.isEmpty, !b2.isEmpty else { return false }
+                return b1.caseInsensitiveCompare(b2) != .orderedSame
+            }()
 
             // 4. Each message is associated with a different account already configured in the app
-            let existingOriginAccIDCheck: UUID? = {
-                if let bankAcc = SMSParser.findMatchingAccount(forBank: existing.smsBank, senderOrPhone: existing.smsSender, digits: existing.smsAccountSuffix, in: context) {
+            var resolvedExAccID: UUID? = {
+                if let s = exSuffixes.accountSuffix, let acc = SMSParser.findMatchingAccount(suffix: s, in: context) {
+                    return acc.id
+                }
+                if let bankAcc = SMSParser.findMatchingAccount(forBank: existing.smsBank, senderOrPhone: existing.smsSender, digits: nil, in: context) {
                     return bankAcc.id
+                }
+                if let s = exCounterpartyFromOtherLeg, let acc = SMSParser.findMatchingAccount(suffix: s, in: context) {
+                    return acc.id
+                }
+                if let s = existing.smsAccountSuffix, s != exSuffixes.recipientSuffix, let acc = SMSParser.findMatchingAccount(suffix: s, in: context) {
+                    return acc.id
                 }
                 return existing.accountID
             }()
-            let incomingOriginAccIDCheck: UUID? = {
-                if let bankAcc = SMSParser.findMatchingAccount(forBank: resolvedBank, senderOrPhone: resolvedSender, digits: parsed.accountSuffix, in: context) {
+            var resolvedInAccID: UUID? = {
+                if let s = inSuffixes.accountSuffix ?? parsed.accountSuffix, let acc = SMSParser.findMatchingAccount(suffix: s, in: context) {
+                    return acc.id
+                }
+                if let bankAcc = SMSParser.findMatchingAccount(forBank: resolvedBank, senderOrPhone: resolvedSender, digits: nil, in: context) {
                     return bankAcc.id
+                }
+                if let s = inCounterpartyFromOtherLeg, let acc = SMSParser.findMatchingAccount(suffix: s, in: context) {
+                    return acc.id
                 }
                 return targetAccountID
             }()
-            guard let exAccCheck = existingOriginAccIDCheck,
-                  let inAccCheck = incomingOriginAccIDCheck,
+
+            // If both legs resolved to the same account (e.g. via fallback default account) or one was nil,
+            // use the counterparty IBAN suffix from the opposite leg or the distinct sender bank to disambiguate the two accounts.
+            if resolvedExAccID == nil || resolvedInAccID == nil || resolvedExAccID == resolvedInAccID {
+                if let sEx = exCounterpartyFromOtherLeg, let accEx = SMSParser.findMatchingAccount(suffix: sEx, in: context) {
+                    if resolvedInAccID == accEx.id,
+                       let sIn = inCounterpartyFromOtherLeg,
+                       let accIn = SMSParser.findMatchingAccount(suffix: sIn, excludingAccountID: accEx.id, in: context) {
+                        resolvedExAccID = accEx.id
+                        resolvedInAccID = accIn.id
+                    } else if resolvedInAccID != accEx.id {
+                        resolvedExAccID = accEx.id
+                    }
+                }
+                if let sIn = inCounterpartyFromOtherLeg, let accIn = SMSParser.findMatchingAccount(suffix: sIn, in: context) {
+                    if resolvedExAccID == accIn.id,
+                       let sEx = exCounterpartyFromOtherLeg,
+                       let accEx = SMSParser.findMatchingAccount(suffix: sEx, excludingAccountID: accIn.id, in: context) {
+                        resolvedInAccID = accIn.id
+                        resolvedExAccID = accEx.id
+                    } else if resolvedExAccID != accIn.id {
+                        resolvedInAccID = accIn.id
+                    }
+                }
+                if isDifferentBanks, (resolvedExAccID == nil || resolvedInAccID == nil || resolvedExAccID == resolvedInAccID) {
+                    let allAccs = (try? context.fetch(FetchDescriptor<Account>(sortBy: [SortDescriptor(\.createdAt)]))) ?? []
+                    let bankAcc1 = b1.flatMap { bank in allAccs.first(where: { SMSParser.accountMatchesBank($0, bank: bank) }) }
+                    let bankAcc2 = b2.flatMap { bank in allAccs.first(where: { $0.id != bankAcc1?.id && SMSParser.accountMatchesBank($0, bank: bank) }) }
+                    if let bankAcc1, let bankAcc2, bankAcc1.id != bankAcc2.id {
+                        resolvedExAccID = bankAcc1.id
+                        resolvedInAccID = bankAcc2.id
+                    }
+                }
+            }
+
+            guard let exAccCheck = resolvedExAccID,
+                  let inAccCheck = resolvedInAccID,
                   exAccCheck != inAccCheck,
                   Ledger.account(exAccCheck, context: context) != nil,
                   Ledger.account(inAccCheck, context: context) != nil else {
@@ -1182,30 +1257,19 @@ enum SMSImporter {
             // Record each SMS's own bank balance strictly against the account of that SMS's sender bank!
             // This guarantees the two accounts' balances are NEVER merged or applied to one account in both.
             var accountBalances: [UUID: Double] = [:]
-            let existingOriginAccID: UUID? = {
-                if let bankAcc = SMSParser.findMatchingAccount(forBank: existing.smsBank, senderOrPhone: existing.smsSender, digits: existing.smsAccountSuffix, in: context) {
-                    return bankAcc.id
-                }
-                return existing.accountID
-            }()
+            let existingOriginAccID: UUID? = exAccCheck
             if let exOrigin = existingOriginAccID, let exBal = existing.smsBalance {
                 accountBalances[exOrigin] = exBal
             }
             if let exTo = existing.toAccountID, let exToBal = existing.smsToBalance {
                 accountBalances[exTo] = exToBal
             }
-            let incomingOriginAccID: UUID? = {
-                if let bankAcc = SMSParser.findMatchingAccount(forBank: resolvedBank, senderOrPhone: resolvedSender, digits: parsed.accountSuffix, in: context) {
-                    return bankAcc.id
-                }
-                return targetAccountID
-            }()
+            let incomingOriginAccID: UUID? = inAccCheck
             if let inOrigin = incomingOriginAccID, let pBal = parsed.balance {
                 accountBalances[inOrigin] = pBal
             }
 
             // Analyze both SMS messages to determine which is the DEBIT leg (money leaving) and which is the CREDIT leg (money entering)
-            let existingRawText = existing.rawText ?? ""
             let existingLegDir = SMSParser.analyzeTransferLegDirection(
                 in: existingRawText,
                 fallbackIsIncome: existingRole == .transferIn || existing.isIncome
@@ -1398,6 +1462,9 @@ enum SMSImporter {
                 if tx.smsAccountSuffix == nil { tx.smsAccountSuffix = parsed.accountSuffix }
                 tx.smsBalance = sourceBalance
                 tx.smsToBalance = destBalance
+                tx.balanceAdjustment = 0
+                tx.toBalanceAdjustment = 0
+                tx.isPossibleDuplicate = false
 
                 if (tx.locationName == nil || tx.latitude == nil), let loc = resolvedLocation {
                     tx.locationName = loc.name
@@ -1447,8 +1514,8 @@ enum SMSImporter {
     // MARK: - Reconcile Existing Transactions (Account Digit Matching, Same-Reference Merging, and Duplicate Cleanup)
 
     /// Reconciles already-stored transactions in SwiftData so existing items on the user's device
-    /// immediately reflect account digit matching, same-reference SMS merging (highest amount + lowest balance),
-    /// and strict reference-only duplicate detection.
+    /// immediately reflect account digit matching, cross-bank internal transfer merging,
+    /// same-reference SMS merging (highest amount + lowest balance), and strict reference-only duplicate detection.
     static func reconcileExistingTransactions(context: ModelContext) {
         let allAccounts = (try? context.fetch(FetchDescriptor<Account>(sortBy: [SortDescriptor(\.createdAt)]))) ?? []
         let allTxs = (try? context.fetch(FetchDescriptor<MoneyTransaction>(sortBy: [SortDescriptor(\.date)]))) ?? []
@@ -1456,7 +1523,8 @@ enum SMSImporter {
 
         var modified = false
 
-        // 1. Backfill missing reference/suffix metadata from rawText and match accounts by configured card/account digits
+        // 1. Backfill missing reference/suffix metadata from rawText, fix misclassified counterparty suffixes,
+        // and auto-approve uncertain-format transactions that were kept as Other when bank & account are known.
         for tx in allTxs where tx.source == .sms {
             guard let raw = tx.rawText, !raw.isEmpty else { continue }
             if (tx.smsReference?.isEmpty ?? true), let ref = SMSParser.referenceNumber(in: raw) {
@@ -1464,27 +1532,60 @@ enum SMSImporter {
                 modified = true
             }
             let suffixes = SMSParser.extractSuffixes(in: raw)
-            if (tx.smsAccountSuffix?.isEmpty ?? true), let accSuf = suffixes.accountSuffix {
-                tx.smsAccountSuffix = accSuf
-                modified = true
-            }
-            if (tx.smsRecipientSuffix?.isEmpty ?? true), let recSuf = suffixes.recipientSuffix {
+            if let recSuf = suffixes.recipientSuffix, tx.smsRecipientSuffix != recSuf {
                 tx.smsRecipientSuffix = recSuf
                 modified = true
             }
+            if suffixes.accountSuffix == nil, let recSuf = suffixes.recipientSuffix, tx.smsAccountSuffix == recSuf {
+                tx.smsAccountSuffix = nil
+                modified = true
+            } else if (tx.smsAccountSuffix?.isEmpty ?? true), let accSuf = suffixes.accountSuffix {
+                tx.smsAccountSuffix = accSuf
+                modified = true
+            }
 
-            let querySuffix: String? = {
-                if tx.isIncome, tx.smsTransactionType == .transferIn {
-                    return tx.smsAccountSuffix ?? suffixes.accountSuffix ?? tx.smsRecipientSuffix
+            if tx.smsClassificationReason.localizedCaseInsensitiveContains("marked for user review") {
+                tx.smsClassificationReason = tx.smsClassificationReason.replacingOccurrences(
+                    of: "marked for user review",
+                    with: "categorized as Other",
+                    options: .caseInsensitive
+                )
+                modified = true
+            }
+            if tx.smsTransactionType == .unknown {
+                if tx.category != .internalTransfer {
+                    tx.category = .other
                 }
-                return tx.smsAccountSuffix ?? suffixes.accountSuffix
-            }()
+                if tx.isPending,
+                   tx.accountID != nil,
+                   let bank = tx.smsBank?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !bank.isEmpty,
+                   AppSettings.smsAutoApprove {
+                    _ = Ledger.approve(tx, context: context)
+                    modified = true
+                }
+            }
+
+            let querySuffix: String? = tx.smsAccountSuffix ?? suffixes.accountSuffix
 
             let matchedAcc: Account? = {
                 if let q = querySuffix, !q.isEmpty, let m = SMSParser.findMatchingAccount(suffix: q, in: context) {
                     return m
                 }
-                return SMSParser.findAccountInSMSText(raw, detectedBank: tx.smsBank, in: context)
+                if let m = SMSParser.findAccountInSMSText(raw, detectedBank: tx.smsBank, in: context) {
+                    if let b = tx.smsBank, !b.isEmpty, m.kind != .creditCard,
+                       let accBank = SMSParser.bankName(forAccount: m),
+                       accBank.caseInsensitiveCompare(b) != .orderedSame,
+                       !((accBank == "ila" && b == "Bank ABC") || (accBank == "Bank ABC" && b == "ila")),
+                       SMSParser.findMatchingAccount(forBank: b, senderOrPhone: tx.smsSender, digits: nil, in: context) != nil {
+                        return nil
+                    }
+                    return m
+                }
+                if querySuffix == nil, let b = tx.smsBank, !b.isEmpty {
+                    return SMSParser.findMatchingAccount(forBank: b, senderOrPhone: tx.smsSender, digits: nil, in: context)
+                }
+                return nil
             }()
 
             if let matchedAcc, tx.accountID != matchedAcc.id {
@@ -1492,10 +1593,15 @@ enum SMSImporter {
                 let shouldAssign: Bool = {
                     guard let currentAcc else { return true }
                     // Only reassign an existing account if the SMS has explicit digits that match `matchedAcc.smsMatch`
-                    // and do NOT match `currentAcc.smsMatch`.
+                    // and do NOT match `currentAcc.smsMatch`, or if `currentAcc` conflicts with `tx.smsBank`.
                     if let q = querySuffix, !q.isEmpty,
                        SMSParser.digitsMatch(accountMatch: matchedAcc.smsMatch, query: q),
                        !SMSParser.digitsMatch(accountMatch: currentAcc.smsMatch, query: q) {
+                        return true
+                    }
+                    if let b = tx.smsBank, !b.isEmpty,
+                       SMSParser.accountMatchesBank(matchedAcc, bank: b),
+                       !SMSParser.accountMatchesBank(currentAcc, bank: b) {
                         return true
                     }
                     return false
@@ -1503,7 +1609,7 @@ enum SMSImporter {
                 if shouldAssign {
                     if tx.isPending {
                         tx.accountID = matchedAcc.id
-                        if tx.smsTransactionType != .unknown && AppSettings.smsAutoApprove {
+                        if AppSettings.smsAutoApprove {
                             _ = Ledger.approve(tx, context: context)
                         }
                     } else {
@@ -1511,6 +1617,106 @@ enum SMSImporter {
                     }
                     modified = true
                 }
+            }
+        }
+
+        // 1b. Merge existing cross-bank / inter-account transfer SMS pairs that share the same reference, same amount, and same date & time
+        let initialSmsTxs = ((try? context.fetch(FetchDescriptor<MoneyTransaction>(sortBy: [SortDescriptor(\.date)]))) ?? []).filter { $0.source == .sms }
+        var deletedCrossBankIDs: Set<UUID> = []
+        for i in 0..<initialSmsTxs.count {
+            let first = initialSmsTxs[i]
+            guard !deletedCrossBankIDs.contains(first.id) else { continue }
+            guard let ref1 = Ledger.effectiveReference(for: first), !ref1.isEmpty else { continue }
+            guard first.smsTransactionType != .internalTransfer && first.category != .internalTransfer else { continue }
+
+            for j in (i + 1)..<initialSmsTxs.count {
+                let second = initialSmsTxs[j]
+                guard !deletedCrossBankIDs.contains(second.id) else { continue }
+                guard let ref2 = Ledger.effectiveReference(for: second), !ref2.isEmpty,
+                      ref1.caseInsensitiveCompare(ref2) == .orderedSame else { continue }
+                guard second.smsTransactionType != .internalTransfer && second.category != .internalTransfer else { continue }
+                guard abs(first.amount - second.amount) < 0.0005 else { continue }
+
+                let t1 = first.rawText.flatMap { SMSParser.extractDateAndTime(in: $0).time }
+                let t2 = second.rawText.flatMap { SMSParser.extractDateAndTime(in: $0).time }
+                let isSameDay = Calendar.current.isDate(first.date, inSameDayAs: second.date)
+                guard isSameDay, let t1, let t2, (t1 == t2 || t1.prefix(5) == t2.prefix(5)) else { continue }
+
+                let raw1 = first.rawText ?? ""
+                let raw2 = second.rawText ?? ""
+                let suf1 = SMSParser.extractSuffixes(in: raw1)
+                let suf2 = SMSParser.extractSuffixes(in: raw2)
+
+                let acc1ID: UUID? = {
+                    if let s = suf1.accountSuffix, let a = SMSParser.findMatchingAccount(suffix: s, in: context) { return a.id }
+                    if let a = SMSParser.findMatchingAccount(forBank: first.smsBank, senderOrPhone: first.smsSender, digits: nil, in: context) { return a.id }
+                    if let s = suf2.recipientSuffix ?? second.smsRecipientSuffix, let a = SMSParser.findMatchingAccount(suffix: s, in: context) { return a.id }
+                    return first.accountID
+                }()
+                let acc2ID: UUID? = {
+                    if let s = suf2.accountSuffix, let a = SMSParser.findMatchingAccount(suffix: s, in: context) { return a.id }
+                    if let a = SMSParser.findMatchingAccount(forBank: second.smsBank, senderOrPhone: second.smsSender, digits: nil, in: context) { return a.id }
+                    if let s = suf1.recipientSuffix ?? first.smsRecipientSuffix, let a = SMSParser.findMatchingAccount(suffix: s, in: context) { return a.id }
+                    return second.accountID
+                }()
+
+                guard let a1 = acc1ID, let a2 = acc2ID, a1 != a2 else { continue }
+
+                let dir1 = SMSParser.analyzeTransferLegDirection(in: raw1, fallbackIsIncome: first.isIncome)
+                let dir2 = SMSParser.analyzeTransferLegDirection(in: raw2, fallbackIsIncome: second.isIncome)
+                let firstIsDebit: Bool = {
+                    if dir1 == .debit && dir2 != .debit { return true }
+                    if dir2 == .debit && dir1 != .debit { return false }
+                    if dir1 == .credit && dir2 != .credit { return false }
+                    if dir2 == .credit && dir1 != .credit { return true }
+                    return !first.isIncome
+                }()
+
+                let fromID = firstIsDebit ? a1 : a2
+                let toID = firstIsDebit ? a2 : a1
+                let sourceBal = firstIsDebit ? first.smsBalance : second.smsBalance
+                let destBal = firstIsDebit ? second.smsBalance : first.smsBalance
+                let debitBank = firstIsDebit ? SMSParser.primaryBankName(from: first.smsBank) : SMSParser.primaryBankName(from: second.smsBank)
+                let creditBank = firstIsDebit ? SMSParser.primaryBankName(from: second.smsBank) : SMSParser.primaryBankName(from: first.smsBank)
+                let combinedBank = SMSParser.formatCombinedBanks(debitBank: debitBank, creditBank: creditBank)
+                let combinedRaw: String = {
+                    let debitText = firstIsDebit ? raw1 : raw2
+                    let creditText = firstIsDebit ? raw2 : raw1
+                    if debitText.isEmpty { return creditText }
+                    if creditText.isEmpty || debitText == creditText || debitText.contains(creditText) { return debitText }
+                    return "\(debitText)\n\n---\n\n\(creditText)"
+                }()
+
+                deletedCrossBankIDs.insert(second.id)
+                Ledger.delete(second, context: context)
+
+                Ledger.edit(first, context: context) { tx in
+                    tx.smsTransactionType = .internalTransfer
+                    tx.category = .internalTransfer
+                    tx.isIncome = false
+                    tx.accountID = fromID
+                    tx.toAccountID = toID
+                    if let srcAcc = Ledger.account(fromID, context: context), let dstAcc = Ledger.account(toID, context: context) {
+                        tx.merchant = "\(srcAcc.name) → \(dstAcc.name)"
+                    }
+                    tx.rawText = combinedRaw
+                    tx.smsBank = combinedBank
+                    tx.smsBalance = sourceBal
+                    tx.smsToBalance = destBal
+                    tx.balanceAdjustment = 0
+                    tx.toBalanceAdjustment = 0
+                    tx.isPossibleDuplicate = false
+                    tx.smsConfidence = .high
+                    tx.smsClassificationReason = "Rule 6: Merged 2 matching SMS at same date & time (Debit: \(debitBank ?? "Source") → Credit: \(creditBank ?? "Destination"))"
+                }
+
+                if first.isPending && AppSettings.smsAutoApprove {
+                    _ = Ledger.approve(first, context: context)
+                } else if !first.isPending {
+                    _ = Ledger.syncBalanceFromSMS(first, context: context)
+                }
+                modified = true
+                break
             }
         }
 
@@ -1625,5 +1831,186 @@ enum SMSImporter {
 
         // 3. Reconcile duplicates strictly by reference code
         Ledger.reconcileDuplicates(context: context)
+    }
+
+    // MARK: - Option 2: AI-Assisted Bank Statement Recognition (Fallback Mechanism)
+
+    static func analyzeBankStatement(
+        rawText: String,
+        filename: String,
+        detectedHeaders: [String] = []
+    ) async throws -> AIStatementRecognitionResult {
+        let client = try GeminiAccount.client()
+        let categories = SpendCategory.allCases.map(\.rawValue)
+
+        let schema: [String: Any] = [
+            "type": "OBJECT",
+            "properties": [
+                "bankName": ["type": "STRING", "nullable": true],
+                "docType": ["type": "STRING", "enum": ["Bank Account Statement", "Credit Card Statement", "General Financial Statement"]],
+                "currency": ["type": "STRING"],
+                "accountIBAN": ["type": "STRING", "nullable": true],
+                "cardLast4": ["type": "STRING", "nullable": true],
+                "signNotation": ["type": "STRING", "enum": ["parentheses_signed", "columnar_debit_credit", "credit_card_negative_payment", "standard_signed"]],
+                "dateFormat": ["type": "STRING", "nullable": true],
+                "confidence": ["type": "NUMBER"],
+                "isMappingUncertain": ["type": "BOOLEAN"],
+                "uncertaintyNotes": [
+                    "type": "ARRAY",
+                    "items": ["type": "STRING"]
+                ],
+                "openingBalance": ["type": "NUMBER", "nullable": true],
+                "closingBalance": ["type": "NUMBER", "nullable": true],
+                "columnMapping": [
+                    "type": "OBJECT",
+                    "properties": [
+                        "dateColumnHeader": ["type": "STRING", "nullable": true],
+                        "descriptionColumnHeader": ["type": "STRING", "nullable": true],
+                        "debitColumnHeader": ["type": "STRING", "nullable": true],
+                        "creditColumnHeader": ["type": "STRING", "nullable": true],
+                        "amountColumnHeader": ["type": "STRING", "nullable": true],
+                        "balanceColumnHeader": ["type": "STRING", "nullable": true],
+                        "referenceColumnHeader": ["type": "STRING", "nullable": true],
+                        "currencyColumnHeader": ["type": "STRING", "nullable": true]
+                    ]
+                ],
+                "transactions": [
+                    "type": "ARRAY",
+                    "items": [
+                        "type": "OBJECT",
+                        "properties": [
+                            "date": ["type": "STRING"],
+                            "merchant": ["type": "STRING"],
+                            "rawDescription": ["type": "STRING"],
+                            "debit": ["type": "NUMBER", "nullable": true],
+                            "credit": ["type": "NUMBER", "nullable": true],
+                            "amount": ["type": "NUMBER"],
+                            "isIncome": ["type": "BOOLEAN"],
+                            "balance": ["type": "NUMBER", "nullable": true],
+                            "reference": ["type": "STRING", "nullable": true],
+                            "category": ["type": "STRING", "enum": categories]
+                        ],
+                        "required": ["date", "merchant", "rawDescription", "amount", "isIncome", "category"]
+                    ]
+                ]
+            ],
+            "required": ["docType", "currency", "signNotation", "confidence", "isMappingUncertain", "uncertaintyNotes", "columnMapping", "transactions"]
+        ]
+
+        let headerHint = detectedHeaders.isEmpty ? "None pre-detected" : detectedHeaders.joined(separator: " | ")
+        let truncatedText = String(rawText.prefix(24000))
+        let system = """
+        You are an expert bank statement structure analyzer and financial transaction extractor.
+        Analyze the provided bank statement text (from PDF, Excel, or CSV, in any language including English and Arabic) and:
+        1. Identify the document structure and column mapping (date, description, debit, credit, amount, balance, reference, currency).
+        2. Identify the bank name, statement type (Bank Account Statement vs Credit Card Statement), currency, IBAN, last 4 digits of card number, date format, and amount sign notation.
+        3. Extract every real transaction row in chronological or table order without missing, duplicating, or reversing debit/credit polarity.
+        CRITICAL RULES:
+        - NEVER silently guess or fabricate missing or uncertain financial values. If any column mapping or direction is ambiguous, set isMappingUncertain=true and explain clearly in uncertaintyNotes.
+        - Exclude Opening Balance, Closing Balance, Carried Forward, Brought Forward, and summary/subtotal lines from the transactions array.
+        - For Bank Account Statements: deposits, salary, inward transfers, and credits have isIncome=true; withdrawals, purchases, outward transfers, fees, and debits have isIncome=false.
+        - For Credit Card Statements: card payments received and refunds have isIncome=true; card purchases and fees have isIncome=false.
+        - Format every transaction date as YYYY-MM-DD when unambiguous, or keep its exact date string if needed.
+        - Amount must always be a positive number (> 0).
+        """
+
+        let prompt = "Filename: \(filename)\nDetected column headers: \(headerHint)\n\nStatement Content:\n\(truncatedText)"
+        let reply = try await client.generate(
+            system: system,
+            turns: [GeminiTurn(isUser: true, text: prompt)],
+            schema: schema,
+            temperature: 0.1
+        )
+        return try decodeBankStatementAIResponse(reply)
+    }
+
+    static func decodeBankStatementAIResponse(_ jsonString: String) throws -> AIStatementRecognitionResult {
+        let obj = try GeminiClient.decodeObject(jsonString)
+
+        let bankName = (obj["bankName"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let docTypeStr = (obj["docType"] as? String) ?? StatementDocType.generic.rawValue
+        let docType = StatementDocType(rawValue: docTypeStr) ?? .generic
+        let currency = ((obj["currency"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 } ?? AppSettings.currency
+        let accountIBAN = (obj["accountIBAN"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cardLast4 = (obj["cardLast4"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let signStr = (obj["signNotation"] as? String) ?? AmountSignNotation.standardSigned.rawValue
+        let signNotation = AmountSignNotation(rawValue: signStr) ?? .standardSigned
+        let dateFormat = (obj["dateFormat"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let confidence = (obj["confidence"] as? NSNumber)?.doubleValue ?? 0.85
+        let isMappingUncertain = (obj["isMappingUncertain"] as? Bool) ?? false
+        let uncertaintyNotes = (obj["uncertaintyNotes"] as? [String]) ?? []
+        let openingBalance = (obj["openingBalance"] as? NSNumber)?.doubleValue
+        let closingBalance = (obj["closingBalance"] as? NSNumber)?.doubleValue
+
+        let mapDict = obj["columnMapping"] as? [String: Any] ?? [:]
+        func cleanHeader(_ key: String) -> String? {
+            guard let v = (mapDict[key] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !v.isEmpty else { return nil }
+            return v
+        }
+        let columnMapping = StatementColumnMapping(
+            dateColumnHeader: cleanHeader("dateColumnHeader"),
+            descriptionColumnHeader: cleanHeader("descriptionColumnHeader"),
+            debitColumnHeader: cleanHeader("debitColumnHeader"),
+            creditColumnHeader: cleanHeader("creditColumnHeader"),
+            amountColumnHeader: cleanHeader("amountColumnHeader"),
+            balanceColumnHeader: cleanHeader("balanceColumnHeader"),
+            referenceColumnHeader: cleanHeader("referenceColumnHeader"),
+            currencyColumnHeader: cleanHeader("currencyColumnHeader")
+        )
+
+        var parsedItems: [ParsedStatementItem] = []
+        let txArray = obj["transactions"] as? [[String: Any]] ?? []
+        for txObj in txArray {
+            let dateStr = (txObj["date"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard let date = StatementService.parseDate(dateStr) else { continue }
+
+            let debitVal = (txObj["debit"] as? NSNumber)?.doubleValue ?? 0
+            let creditVal = (txObj["credit"] as? NSNumber)?.doubleValue ?? 0
+            let rawAmt = (txObj["amount"] as? NSNumber)?.doubleValue ?? 0
+            let amount = rawAmt > 0 ? abs(rawAmt) : max(abs(debitVal), abs(creditVal))
+            guard amount > 0 else { continue }
+
+            let isIncome: Bool = {
+                if creditVal > 0 && debitVal == 0 { return true }
+                if debitVal > 0 && creditVal == 0 { return false }
+                return (txObj["isIncome"] as? Bool) ?? false
+            }()
+
+            let rawDesc = (txObj["rawDescription"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let rawMerch = (txObj["merchant"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? rawDesc
+            let cleaned = BankProfileRegistry.cleanMerchantDescription(rawMerch.isEmpty ? rawDesc : rawMerch, docType: docType)
+            let finalMerchant = cleaned.merchant.isEmpty ? (rawMerch.isEmpty ? "Statement Transaction" : rawMerch) : cleaned.merchant
+            let ref = ((txObj["reference"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 } ?? cleaned.ref
+            let cat = cleaned.category ?? SpendCategory.resolve(txObj["category"] as? String)
+
+            parsedItems.append(ParsedStatementItem(
+                date: date,
+                merchant: finalMerchant,
+                amount: amount,
+                isIncome: isIncome,
+                reference: ref,
+                category: cat,
+                rawDescription: rawDesc.isEmpty ? finalMerchant : rawDesc,
+                isSelected: !isMappingUncertain,
+                aiSuggestedCategory: true
+            ))
+        }
+
+        return AIStatementRecognitionResult(
+            detectedBank: bankName?.isEmpty == false ? bankName : nil,
+            docType: docType,
+            currency: currency,
+            accountIBAN: accountIBAN?.isEmpty == false ? accountIBAN : nil,
+            cardLast4: cardLast4?.isEmpty == false ? cardLast4 : nil,
+            signNotation: signNotation,
+            dateFormat: dateFormat?.isEmpty == false ? dateFormat : nil,
+            columnMapping: columnMapping,
+            confidence: confidence,
+            isMappingUncertain: isMappingUncertain,
+            uncertaintyNotes: uncertaintyNotes,
+            openingBalance: openingBalance,
+            closingBalance: closingBalance,
+            items: parsedItems
+        )
     }
 }
