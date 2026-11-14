@@ -179,7 +179,6 @@ struct HomeView: View {
                     spendingCard(f)
                     financialItemsSection
                     safeCard(f)
-                    cashAndBankCard(f)
                     duplicatesBanner
                     billsSection(f)
                 }
@@ -223,9 +222,6 @@ struct HomeView: View {
                     }
                     billToPay = nil
                 }
-            }
-            .onAppear {
-                SMSImporter.reconcileExistingTransactions(context: context)
             }
         }
     }
@@ -673,39 +669,6 @@ struct HomeView: View {
             }
             .buttonStyle(PressableStyle())
         }
-    }
-
-    private func cashAndBankCard(_ f: Finance) -> some View {
-        NavigationLink(value: HomeRoute.netWorth) {
-            HStack(spacing: 12) {
-                IconBadge(symbol: "building.columns.fill", color: Theme.cobalt)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Cash and bank").font(.subheadline).foregroundStyle(Theme.secondaryInk)
-                    Text(Money.format(f.totalAssets, currency))
-                        .font(.headline.monospacedDigit())
-                        .foregroundStyle(Theme.ink)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.75)
-                        .animatedNumber(f.totalAssets)
-                }
-                Spacer()
-                VStack(alignment: .trailing, spacing: 2) {
-                    Text("Total assets")
-                        .font(.caption)
-                        .foregroundStyle(Theme.secondaryInk)
-                    if f.totalLiabilities > 0 {
-                        Text("Debts \(Money.short(f.totalLiabilities))")
-                            .font(.caption)
-                            .foregroundStyle(Theme.negative)
-                            .animatedNumber(f.totalLiabilities)
-                    }
-                }
-                .monospacedDigit()
-                Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(.tertiary)
-            }
-            .card()
-        }
-        .buttonStyle(PressableStyle())
     }
 
     private func billsSection(_ f: Finance) -> some View {

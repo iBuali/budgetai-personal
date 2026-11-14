@@ -270,7 +270,6 @@ struct TransactionRow: View {
                 .foregroundStyle(tx.isPending ? Theme.secondaryInk : (tx.isIncome ? Theme.positive : (tx.isTransfer ? Theme.secondaryInk : Theme.negative)))
                 .lineLimit(1)
                 .layoutPriority(1)
-                .animatedNumber(tx.effectiveTransactionType == .internalTransfer ? tx.amount : tx.signedAmount)
         }
         .padding(.vertical, 4)
         .accessibilityElement(children: .combine)

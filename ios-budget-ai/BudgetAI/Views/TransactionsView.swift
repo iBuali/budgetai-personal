@@ -21,9 +21,9 @@ struct TxFilterState: Equatable {
     var smsOnly = false
     var duplicatesOnly = false
 
-    /// Number of filters beyond the quick type chips.
+    /// Number of filters beyond the quick type chips (defaulting to the current cycle).
     var activeCount: Int {
-        (range == .all ? 0 : 1) + (categories.isEmpty ? 0 : 1) + (accounts.isEmpty ? 0 : 1) + (smsOnly ? 1 : 0) + (duplicatesOnly ? 1 : 0)
+        (range == .thisCycle ? 0 : 1) + (categories.isEmpty ? 0 : 1) + (accounts.isEmpty ? 0 : 1) + (smsOnly ? 1 : 0) + (duplicatesOnly ? 1 : 0)
     }
 
     var interval: DateInterval? {
@@ -128,8 +128,16 @@ struct TransactionsView: View {
     var body: some View {
         let _ = cycleStartDay
         let currentFiltered = computeFiltered()
-        let currentPending = transactions.filter(\.isPending)
-        let currentNeedsReview = transactions.filter { $0.isPending || $0.isPossibleDuplicate }
+        var currentPending: [MoneyTransaction] = []
+        var currentNeedsReview: [MoneyTransaction] = []
+        for tx in transactions {
+            if tx.isPending {
+                currentPending.append(tx)
+                currentNeedsReview.append(tx)
+            } else if tx.isPossibleDuplicate {
+                currentNeedsReview.append(tx)
+            }
+        }
         let currentGrouped = mode == .list ? computeGrouped(from: currentFiltered) : []
         let showSummary = mode == .list && (filters.activeCount > 0 || filters.kind != .all) && !currentFiltered.isEmpty
         let currentTotals = showSummary ? computeTotals(from: currentFiltered) : (0.0, 0.0)
@@ -297,13 +305,13 @@ struct TransactionsView: View {
                         } description: {
                             Text("Try a different date range or fewer filters.")
                         } actions: {
-                            if filters.range != .all && filters.activeCount == 1 && filters.kind == .all {
+                            if filters.range == .thisCycle && filters.activeCount == 0 && filters.kind == .all {
                                 Button("Show all time") {
                                     withAnimation(.snappy) { filters = TxFilterState(kind: filters.kind, range: .all) }
                                 }
                             } else {
                                 Button("Clear filters") {
-                                    withAnimation(.snappy) { filters = TxFilterState(kind: filters.kind, range: .all) }
+                                    withAnimation(.snappy) { filters = TxFilterState(kind: filters.kind) }
                                 }
                             }
                         }
@@ -357,7 +365,6 @@ struct TransactionsView: View {
                 StatementExportSheet()
             }
             .onAppear {
-                SMSImporter.reconcileExistingTransactions(context: context)
                 applyRequestedFilterIfNeeded()
             }
             .onChange(of: appState.requestedTransactionsFilter) { _, _ in
@@ -539,8 +546,8 @@ struct TransactionsView: View {
     private var activeChips: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
-                if filters.range != .all {
-                    removable(filters.rangeLabel, symbol: "calendar") { filters.range = .all }
+                if filters.range != .thisCycle {
+                    removable(filters.rangeLabel, symbol: "calendar") { filters.range = .thisCycle }
                 }
                 if !filters.categories.isEmpty {
                     let names = filters.categories.compactMap { SpendCategory(rawValue: $0)?.title }.sorted()
@@ -552,7 +559,7 @@ struct TransactionsView: View {
                 }
                 if filters.smsOnly { removable("From SMS", symbol: "message") { filters.smsOnly = false } }
                 if filters.duplicatesOnly { removable("Duplicates", symbol: "exclamationmark.circle") { filters.duplicatesOnly = false } }
-                Button("Clear all") { withAnimation(.snappy) { filters = TxFilterState(kind: filters.kind, range: .all) } }
+                Button("Clear all") { withAnimation(.snappy) { filters = TxFilterState(kind: filters.kind) } }
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(Theme.cobalt)
             }
@@ -1521,9 +1528,6 @@ struct TransactionDetailView: View {
                     } label: {
                         Label("Match \(account.name) to bank balance", systemImage: "equal.circle.fill")
                     }
-                } else if tx.balanceAdjustment != 0 {
-                    Label("\(account.name) matched (\(Money.format(tx.balanceAdjustment, currency, signed: true)))", systemImage: "checkmark.seal.fill")
-                        .foregroundStyle(Theme.positive)
                 }
             }
 
@@ -1552,9 +1556,6 @@ struct TransactionDetailView: View {
                         } label: {
                             Label("Match \(toAccount.name) to bank balance", systemImage: "equal.circle.fill")
                         }
-                    } else if tx.toBalanceAdjustment != 0 {
-                        Label("\(toAccount.name) matched (\(Money.format(tx.toBalanceAdjustment, currency, signed: true)))", systemImage: "checkmark.seal.fill")
-                            .foregroundStyle(Theme.positive)
                     }
                 }
             }

@@ -2876,8 +2876,10 @@ struct BudgetAITests {
     @Test func transactionFilterDefaultsToThisCycle() throws {
         let defaultFilter = TxFilterState()
         #expect(defaultFilter.range == .thisCycle)
+        #expect(defaultFilter.activeCount == 0)
         let reviewFilter = TxFilterState(kind: .review, range: .all)
         #expect(reviewFilter.range == .all)
+        #expect(reviewFilter.activeCount == 1)
     }
 
     @Test func categoryBreakdownAndRangeFilters() throws {

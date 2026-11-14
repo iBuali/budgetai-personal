@@ -57,11 +57,23 @@ struct Finance {
 
     init(transactions: [MoneyTransaction], accounts: [Account] = [], budgets: [Budget] = [],
          goals: [SavingsGoal] = [], bills: [Bill] = [], now: Date = .now) {
-        let approved = transactions.filter { !$0.isPending }
+        var approved: [MoneyTransaction] = []
+        var spending: [MoneyTransaction] = []
+        var income: [MoneyTransaction] = []
+        approved.reserveCapacity(transactions.count)
+        for tx in transactions where !tx.isPending {
+            approved.append(tx)
+            if tx.isSpending {
+                spending.append(tx)
+            }
+            if tx.isOrdinaryIncome {
+                income.append(tx)
+            }
+        }
         self.transactions = approved
         self.approvedTransactions = approved
-        self.spendingTransactions = approved.filter(\.isSpending)
-        self.ordinaryIncomeTransactions = approved.filter(\.isOrdinaryIncome)
+        self.spendingTransactions = spending
+        self.ordinaryIncomeTransactions = income
         self.accounts = accounts
         self.budgets = budgets
         self.goals = goals
