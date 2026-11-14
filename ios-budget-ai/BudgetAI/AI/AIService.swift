@@ -1832,6 +1832,9 @@ enum SMSImporter {
         // 3. Reconcile duplicates strictly by reference code
         Ledger.reconcileDuplicates(context: context)
     }
+}
+
+extension AIService {
 
     // MARK: - Option 2: AI-Assisted Bank Statement Recognition (Fallback Mechanism)
 
