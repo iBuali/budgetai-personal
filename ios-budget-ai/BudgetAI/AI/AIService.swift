@@ -781,7 +781,8 @@ enum SMSImporter {
             || savedRuleAccount != nil
             || SMSParser.findMatchingAccount(forBank: effectiveBank, senderOrPhone: resolvedSender, digits: matchingDigits, in: context) != nil
         let bankUnknown: Bool = {
-            if isExplicitDigitMatch || matchedByDigits != nil { return false }
+            if isExplicitDigitMatch || matchedByDigits != nil || p.matchedUserRule { return false }
+            if resolvedSMSBank == nil && p.transactionType == .unknown && savedRuleAccount == nil { return true }
             if targetAccount != nil && (accountID != nil || savedRuleAccount != nil) { return false }
             return effectiveBank == nil || effectiveBank?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true || effectiveBank?.lowercased().contains("unknown") == true
         }()
@@ -1932,12 +1933,25 @@ extension AIService {
 
         let bankName = (obj["bankName"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
         let docTypeStr = (obj["docType"] as? String) ?? StatementDocType.generic.rawValue
-        let docType = StatementDocType(rawValue: docTypeStr) ?? .generic
+        let docType: StatementDocType = {
+            if let exact = StatementDocType(rawValue: docTypeStr) { return exact }
+            let low = docTypeStr.lowercased()
+            if low.contains("credit") || low.contains("card") { return .creditCard }
+            if low.contains("bank") || low.contains("account") { return .bankAccount }
+            return .generic
+        }()
         let currency = ((obj["currency"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 } ?? AppSettings.currency
         let accountIBAN = (obj["accountIBAN"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
         let cardLast4 = (obj["cardLast4"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
         let signStr = (obj["signNotation"] as? String) ?? AmountSignNotation.standardSigned.rawValue
-        let signNotation = AmountSignNotation(rawValue: signStr) ?? .standardSigned
+        let signNotation: AmountSignNotation = {
+            if let exact = AmountSignNotation(rawValue: signStr) { return exact }
+            let low = signStr.lowercased()
+            if low.contains("columnar") || (low.contains("debit") && low.contains("credit")) { return .columnarDebitCredit }
+            if low.contains("parenthes") { return .parenthesesSigned }
+            if low.contains("credit_card") || low.contains("creditcard") { return .creditCardNegativePayment }
+            return .standardSigned
+        }()
         let dateFormat = (obj["dateFormat"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
         let confidence = (obj["confidence"] as? NSNumber)?.doubleValue ?? 0.85
         let isMappingUncertain = (obj["isMappingUncertain"] as? Bool) ?? false
