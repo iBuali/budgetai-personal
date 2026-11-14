@@ -286,7 +286,26 @@ enum Ledger {
     @discardableResult
     static func syncBalanceForAccount(id: UUID, balance: Double, on tx: MoneyTransaction, isToAccount: Bool = false, context: ModelContext, force: Bool = false) -> Double? {
         guard force || AppSettings.smsSyncBalance, !tx.isPending, !tx.isCardLimitBalance,
-              let account = account(id, context: context), !account.kind.isLiability else { return nil }
+              let account = account(id, context: context),
+              (!account.kind.isLiability || account.kind == .creditCard) else { return nil }
+        if account.kind == .creditCard && account.creditLimit > 0 {
+            if balance > account.creditLimit {
+                account.creditLimit = balance
+            }
+            let currentRemaining = account.cardRemainingBalance
+            let diff = balance - currentRemaining
+            if abs(diff) >= 0.0005 {
+                account.balance = max(0, account.creditLimit - balance)
+                if isToAccount {
+                    tx.toBalanceAdjustment += diff
+                } else {
+                    tx.balanceAdjustment += diff
+                }
+                recordSnapshot(context: context)
+                try? context.save()
+            }
+            return balance
+        }
         let diff = balance - account.balance
         if abs(diff) >= 0.0005 {
             account.balance = balance
