@@ -33,6 +33,8 @@ struct BankProfileRule: Codable, Identifiable {
     var ibanPrefix: String?
     var notes: String
     var confidenceThreshold: Double
+    var columnMapping: StatementColumnMapping?
+    var isAILearned: Bool?
 
     init(
         id: String,
@@ -45,7 +47,9 @@ struct BankProfileRule: Codable, Identifiable {
         swiftCode: String? = nil,
         ibanPrefix: String? = nil,
         notes: String = "",
-        confidenceThreshold: Double = 0.85
+        confidenceThreshold: Double = 0.85,
+        columnMapping: StatementColumnMapping? = nil,
+        isAILearned: Bool? = nil
     ) {
         self.id = id
         self.bankName = bankName
@@ -58,6 +62,25 @@ struct BankProfileRule: Codable, Identifiable {
         self.ibanPrefix = ibanPrefix
         self.notes = notes
         self.confidenceThreshold = confidenceThreshold
+        self.columnMapping = columnMapping
+        self.isAILearned = isAILearned
+    }
+}
+
+/// Represents a learned or confirmed column/field mapping for tabular or structured statements
+struct StatementColumnMapping: Codable, Hashable, Equatable {
+    var dateColumnHeader: String?
+    var descriptionColumnHeader: String?
+    var debitColumnHeader: String?
+    var creditColumnHeader: String?
+    var amountColumnHeader: String?
+    var balanceColumnHeader: String?
+    var referenceColumnHeader: String?
+    var currencyColumnHeader: String?
+
+    var hasAnyMapping: Bool {
+        [dateColumnHeader, descriptionColumnHeader, debitColumnHeader, creditColumnHeader, amountColumnHeader, balanceColumnHeader, referenceColumnHeader, currencyColumnHeader]
+            .contains { ($0?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false) }
     }
 }
 
@@ -330,6 +353,111 @@ enum BankProfileRegistry {
         if let encoded = try? JSONEncoder().encode(existing) {
             UserDefaults.standard.set(encoded, forKey: userProfilesKey)
         }
+    }
+
+    static func deleteLearnedProfile(id: String) {
+        var existing = loadUserLearnedProfiles()
+        existing.removeAll { $0.id == id }
+        if let encoded = try? JSONEncoder().encode(existing) {
+            UserDefaults.standard.set(encoded, forKey: userProfilesKey)
+        }
+    }
+
+    /// Saves a verified statement layout & column mapping rule to the Knowledge Base for future automatic recognition.
+    /// Never stores personal account balances or individual transaction amounts as detection rules.
+    @discardableResult
+    static func learnFromConfirmedStatement(
+        bankName: String,
+        docType: StatementDocType,
+        signNotation: AmountSignNotation,
+        primaryCurrency: String,
+        dateFormat: String?,
+        columnMapping: StatementColumnMapping?,
+        headerKeywords: [String] = []
+    ) -> BankProfileRule {
+        let trimmedBank = bankName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let safeBank = trimmedBank.isEmpty ? "Custom Bank Statement" : trimmedBank
+        let slug = safeBank.lowercased()
+            .replacingOccurrences(of: #"[^a-z0-9]+"#, with: "_", options: .regularExpression)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "_"))
+
+        var keywords = headerKeywords
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && $0.count >= 2 }
+        if !keywords.contains(where: { $0.caseInsensitiveCompare(safeBank) == .orderedSame }) {
+            keywords.insert(safeBank, at: 0)
+        }
+        if let map = columnMapping {
+            let colHeaders = [
+                map.dateColumnHeader,
+                map.descriptionColumnHeader,
+                map.debitColumnHeader,
+                map.creditColumnHeader,
+                map.amountColumnHeader,
+                map.balanceColumnHeader,
+                map.referenceColumnHeader
+            ].compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+            for h in colHeaders where !keywords.contains(where: { $0.caseInsensitiveCompare(h) == .orderedSame }) {
+                keywords.append(h)
+            }
+        }
+
+        let datePatterns: [String] = {
+            if let df = dateFormat?.trimmingCharacters(in: .whitespacesAndNewlines), !df.isEmpty {
+                return [df, "dd/MM/yyyy", "yyyy-MM-dd", "dd-MM-yyyy", "dd MMM yyyy"]
+            }
+            return ["dd/MM/yyyy", "yyyy-MM-dd", "dd-MM-yyyy", "dd MMM yyyy"]
+        }()
+
+        let ruleID = "learned_\(slug)_\(docType.rawValue)"
+        let rule = BankProfileRule(
+            id: ruleID,
+            bankName: safeBank,
+            docType: docType,
+            headerKeywords: keywords,
+            signNotation: signNotation,
+            datePatterns: datePatterns,
+            primaryCurrency: primaryCurrency.isEmpty ? "BHD" : primaryCurrency,
+            notes: "Learned & verified statement profile (\(docType.rawValue))",
+            confidenceThreshold: 0.75,
+            columnMapping: columnMapping?.hasAnyMapping == true ? columnMapping : nil,
+            isAILearned: true
+        )
+        saveLearnedProfile(rule)
+        return rule
+    }
+
+    /// Matches a learned profile whose column mapping headers appear in the given table header row
+    static func matchLearnedColumnProfile(forHeaders headers: [String]) -> BankProfileRule? {
+        let lowerHeaders = Set(headers.map {
+            $0.lowercased()
+                .replacingOccurrences(of: "\u{00A0}", with: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }.filter { !$0.isEmpty })
+        guard !lowerHeaders.isEmpty else { return nil }
+
+        for profile in loadUserLearnedProfiles() {
+            guard let mapping = profile.columnMapping, mapping.hasAnyMapping else { continue }
+            var required: [String] = []
+            if let d = mapping.dateColumnHeader?.lowercased().trimmingCharacters(in: .whitespacesAndNewlines), !d.isEmpty {
+                required.append(d)
+            }
+            if let desc = mapping.descriptionColumnHeader?.lowercased().trimmingCharacters(in: .whitespacesAndNewlines), !desc.isEmpty {
+                required.append(desc)
+            }
+            let valCols = [mapping.amountColumnHeader, mapping.debitColumnHeader, mapping.creditColumnHeader]
+                .compactMap { $0?.lowercased().trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            required.append(contentsOf: valCols)
+            guard required.count >= 2 else { continue }
+            let matchedCount = required.filter { req in
+                lowerHeaders.contains(req) || lowerHeaders.contains(where: { $0.contains(req) || req.contains($0) })
+            }.count
+            if matchedCount == required.count {
+                return profile
+            }
+        }
+        return nil
     }
 }
 
