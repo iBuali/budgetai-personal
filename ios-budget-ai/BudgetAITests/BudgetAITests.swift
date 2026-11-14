@@ -2562,4 +2562,63 @@ struct BudgetAITests {
             #expect(abs(ila.balance - 1221.954) < 0.0001)
         }
     }
+
+    // MARK: - 23. Visa Card & Loan Balance Tracking, Progress & Due Dates
+
+    @Test func visaCardAndLoanProgressAndAutomaticBalanceUpdates() throws {
+        let context = makeCleanContext()
+        let cal = Calendar.current
+        let dueSoon = cal.date(byAdding: .day, value: 5, to: cal.startOfDay(for: .now)) ?? .now
+
+        // 1. Visa Card: set limit & initial used balance, then link expense and payment
+        let bank = Account(name: "NBB", kind: .bank, institution: "NBB", balance: 1000.000)
+        let visa = Account(name: "Visa Infinite", kind: .creditCard, institution: "BisB", balance: 200.000)
+        visa.creditLimit = 1000.000
+        visa.paymentDueDate = dueSoon
+        visa.paymentDueReminder = true
+        context.insert(bank)
+        context.insert(visa)
+        try context.save()
+
+        #expect(abs(visa.cardUsedBalance - 200.000) < 0.0001)
+        #expect(abs(visa.cardRemainingBalance - 800.000) < 0.0001)
+        #expect(abs(visa.cardUsedProgress - 0.2) < 0.0001)
+
+        // Linked expense increases used balance and decreases remaining balance
+        let spend = MoneyTransaction(amount: 150.000, isIncome: false, merchant: "Lulu", category: .groceries, source: .manual, accountID: visa.id)
+        Ledger.add(spend, context: context)
+        #expect(abs(visa.cardUsedBalance - 350.000) < 0.0001)
+        #expect(abs(visa.cardRemainingBalance - 650.000) < 0.0001)
+        #expect(abs(visa.cardUsedProgress - 0.35) < 0.0001)
+
+        // Linked full payment reduces used balance to 0, restores remaining to 1000, and advances due date
+        let payCard = MoneyTransaction(amount: 350.000, isIncome: false, merchant: "Visa Payment", category: .visaTransfer, source: .transfer, accountID: bank.id)
+        payCard.toAccountID = visa.id
+        Ledger.add(payCard, context: context)
+        #expect(abs(visa.cardUsedBalance - 0.0) < 0.0001)
+        #expect(abs(visa.cardRemainingBalance - 1000.000) < 0.0001)
+        #expect(visa.paymentDueDate > dueSoon)
+
+        // 2. Loan: total amount, remaining balance, monthly installment, paid progress, and payment update
+        let loan = Account(name: "Car Loan", kind: .loan, institution: "BBK", balance: 4000.000)
+        loan.loanTotalAmount = 5000.000
+        loan.loanMonthlyInstallment = 250.000
+        loan.paymentDueDate = dueSoon
+        loan.paymentDueReminder = true
+        context.insert(loan)
+        try context.save()
+
+        #expect(abs(loan.loanPaidAmount - 1000.000) < 0.0001)
+        #expect(abs(loan.loanRemainingBalance - 4000.000) < 0.0001)
+        #expect(abs(loan.loanPaidProgress - 0.2) < 0.0001)
+
+        // Record installment payment from bank -> loan
+        let payLoan = MoneyTransaction(amount: 250.000, isIncome: false, merchant: "Car Loan Installment", category: .internalTransfer, source: .transfer, accountID: bank.id)
+        payLoan.toAccountID = loan.id
+        Ledger.add(payLoan, context: context)
+        #expect(abs(loan.loanRemainingBalance - 3750.000) < 0.0001)
+        #expect(abs(loan.loanPaidAmount - 1250.000) < 0.0001)
+        #expect(abs(loan.loanPaidProgress - 0.25) < 0.0001)
+        #expect(loan.paymentDueDate > dueSoon)
+    }
 }

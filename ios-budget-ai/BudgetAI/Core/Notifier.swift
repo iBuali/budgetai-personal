@@ -44,23 +44,27 @@ enum Notifier {
         }
     }
 
-    /// Schedules monthly payment due reminders for Visa / credit card accounts so the user can pay before bank fees apply.
+    /// Schedules monthly payment due reminders for Visa / credit card and loan accounts.
     static func rescheduleCreditCards(_ accounts: [Account]) {
         let center = UNUserNotificationCenter.current()
-        struct CardReminderItem {
+        struct LiabilityReminderItem {
             let id: String
             let name: String
+            let kind: AccountKind
             let balance: Double
+            let monthlyInstallment: Double
             let daysBefore: Int
             let dueDates: [Date]
         }
-        let items: [CardReminderItem] = accounts
-            .filter { $0.kind == .creditCard && $0.paymentDueReminder }
+        let items: [LiabilityReminderItem] = accounts
+            .filter { $0.kind.isLiability && $0.paymentDueReminder }
             .map {
-                CardReminderItem(
+                LiabilityReminderItem(
                     id: $0.id.uuidString,
-                    name: $0.name.isEmpty ? "Visa Card" : $0.name,
+                    name: $0.name.isEmpty ? ($0.kind == .loan ? "Loan" : "Visa Card") : $0.name,
+                    kind: $0.kind,
                     balance: $0.balance,
+                    monthlyInstallment: $0.loanMonthlyInstallment,
                     daysBefore: max(0, $0.paymentReminderDaysBefore),
                     dueDates: $0.upcomingDueDates(count: 6)
                 )
@@ -82,15 +86,26 @@ enum Notifier {
                         comps.minute = 0
                         if let fire = cal.date(from: comps), fire > now {
                             let content = UNMutableNotificationContent()
+                            let what = item.kind == .loan ? "installment" : "payment"
                             if item.daysBefore == 0 {
-                                content.title = "\(item.name) payment due today"
+                                content.title = "\(item.name) \(what) due today"
                             } else {
-                                content.title = "\(item.name) payment due in \(item.daysBefore) day\(item.daysBefore == 1 ? "" : "s")"
+                                content.title = "\(item.name) \(what) due in \(item.daysBefore) day\(item.daysBefore == 1 ? "" : "s")"
                             }
-                            if idx == 0 && item.balance > 0.0005 {
-                                content.body = "Balance owed: \(Money.format(item.balance, code)). Pay by \(dueLabel) before the bank deducts late fees."
+                            if item.kind == .loan {
+                                if item.monthlyInstallment > 0.0005 && idx == 0 && item.balance > 0.0005 {
+                                    content.body = "Installment: \(Money.format(item.monthlyInstallment, code)) · Remaining: \(Money.format(item.balance, code)). Due by \(dueLabel)."
+                                } else if idx == 0 && item.balance > 0.0005 {
+                                    content.body = "Remaining loan balance: \(Money.format(item.balance, code)). Due by \(dueLabel)."
+                                } else {
+                                    content.body = "Your \(item.name) loan installment is due by \(dueLabel)."
+                                }
                             } else {
-                                content.body = "Pay your \(item.name) balance by \(dueLabel) before the bank deducts late fees."
+                                if idx == 0 && item.balance > 0.0005 {
+                                    content.body = "Balance owed: \(Money.format(item.balance, code)). Pay by \(dueLabel) before the bank deducts late fees."
+                                } else {
+                                    content.body = "Pay your \(item.name) balance by \(dueLabel) before the bank deducts late fees."
+                                }
                             }
                             content.sound = .default
                             let trigger = UNCalendarNotificationTrigger(dateMatching: comps, repeats: false)

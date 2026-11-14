@@ -126,33 +126,60 @@ struct NetWorthView: View {
 
     private func accountRow(_ account: Account) -> some View {
         Button { editing = account } label: {
-            HStack(spacing: 12) {
-                AccountIcon(account: account, size: 40)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(account.name)
-                        .foregroundStyle(Theme.ink)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 12) {
+                    AccountIcon(account: account, size: 40)
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            Text(account.name)
+                                .foregroundStyle(Theme.ink)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.85)
+                            if account.kind.isLiability {
+                                dueBadge(for: account)
+                            }
+                        }
+                        let baseSubtitle = account.institution.isEmpty ? account.kind.title : "\(account.kind.title) · \(account.institution)"
+                        let extraSubtitle: String = {
+                            if account.kind == .loan && account.loanMonthlyInstallment > 0 {
+                                return "\(baseSubtitle) · \(Money.format(account.loanMonthlyInstallment, currency))/mo"
+                            }
+                            return baseSubtitle
+                        }()
+                        Text(account.includeInNetWorth ? extraSubtitle : "\(extraSubtitle) · Excluded from net worth")
+                            .font(.caption)
+                            .foregroundStyle(Theme.secondaryInk)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                    }
+                    Spacer(minLength: 8)
+                    let signedBalance = account.kind.isLiability ? -account.balance : account.balance
+                    Text(Money.format(signedBalance, currency))
+                        .font(.body.weight(.medium).monospacedDigit())
+                        .foregroundStyle(!account.includeInNetWorth ? Theme.secondaryInk : (account.kind.isLiability ? Theme.negative : Theme.ink))
                         .lineLimit(1)
-                        .minimumScaleFactor(0.85)
-                    let baseSubtitle = account.institution.isEmpty ? account.kind.title : "\(account.kind.title) · \(account.institution)"
-                    let dueSubtitle = account.kind == .creditCard && account.paymentDueReminder
-                        ? "\(baseSubtitle) · Due \(account.nextUpcomingDueDate().formatted(.dateTime.day().month(.abbreviated)))"
-                        : baseSubtitle
-                    Text(account.includeInNetWorth ? dueSubtitle : "\(dueSubtitle) · Excluded from net worth")
-                        .font(.caption)
-                        .foregroundStyle(Theme.secondaryInk)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.8)
+                        .minimumScaleFactor(0.75)
+                        .layoutPriority(1)
+                        .animatedNumber(signedBalance)
                 }
-                Spacer(minLength: 8)
-                let signedBalance = account.kind.isLiability ? -account.balance : account.balance
-                Text(Money.format(signedBalance, currency))
-                    .font(.body.weight(.medium).monospacedDigit())
-                    .foregroundStyle(!account.includeInNetWorth ? Theme.secondaryInk : (account.kind.isLiability ? Theme.negative : Theme.ink))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.75)
-                    .layoutPriority(1)
-                    .animatedNumber(signedBalance)
+
+                if account.kind == .creditCard && account.cardLimit > 0 {
+                    LiabilityProgressBar(
+                        progress: account.cardUsedProgress,
+                        tint: account.cardUsedProgress >= 0.9 ? Theme.negative : (account.cardUsedProgress >= 0.7 ? Theme.warning : Theme.cobalt),
+                        leadingText: "Used \(Money.format(account.cardUsedBalance, currency))",
+                        trailingText: "Remaining \(Money.format(account.cardRemainingBalance, currency))"
+                    )
+                } else if account.kind == .loan && account.loanOriginalAmount > 0 {
+                    LiabilityProgressBar(
+                        progress: account.loanPaidProgress,
+                        tint: Theme.positive,
+                        leadingText: "Paid \(Money.format(account.loanPaidAmount, currency))",
+                        trailingText: "Remaining \(Money.format(account.loanRemainingBalance, currency))"
+                    )
+                }
             }
+            .padding(.vertical, 2)
         }
         .buttonStyle(.plain)
         .swipeActions(edge: .leading) {
@@ -178,6 +205,58 @@ struct NetWorthView: View {
             } label: { Label("Delete", systemImage: "trash") }
         }
     }
+    @ViewBuilder
+    private func dueBadge(for account: Account) -> some View {
+        let due = account.nextUpcomingDueDate()
+        let days = account.daysUntilDue()
+        let label = days == 0 ? "Due today" : "Due \(due.formatted(.dateTime.day().month(.abbreviated)))"
+        let tint: Color = days <= 3 && account.balance > 0.0005 ? Theme.warning : Theme.secondaryInk
+        HStack(spacing: 3) {
+            if account.paymentDueReminder {
+                Image(systemName: "bell.fill")
+                    .font(.system(size: 9, weight: .semibold))
+            }
+            Text(label)
+                .font(.caption2.weight(.semibold))
+        }
+        .foregroundStyle(tint)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(tint.opacity(0.12), in: Capsule())
+    }
+}
+
+private struct LiabilityProgressBar: View {
+    let progress: Double
+    let tint: Color
+    let leadingText: String
+    let trailingText: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            GeometryReader { geo in
+                let clamped = min(1, max(0, progress))
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(tint.opacity(0.14))
+                    Capsule()
+                        .fill(tint)
+                        .frame(width: max(clamped > 0 ? 6 : 0, geo.size.width * clamped))
+                }
+            }
+            .frame(height: 6)
+
+            HStack {
+                Text(leadingText)
+                    .font(.caption2.weight(.medium).monospacedDigit())
+                    .foregroundStyle(Theme.secondaryInk)
+                Spacer()
+                Text(trailingText)
+                    .font(.caption2.weight(.medium).monospacedDigit())
+                    .foregroundStyle(Theme.secondaryInk)
+            }
+        }
+    }
 }
 
 struct AccountEditor: View {
@@ -189,6 +268,9 @@ struct AccountEditor: View {
     @State private var kind: AccountKind = .bank
     @State private var institution = ""
     @State private var balanceText = ""
+    @State private var creditLimitText = ""
+    @State private var loanTotalAmountText = ""
+    @State private var loanMonthlyInstallmentText = ""
     @State private var emoji = ""
     @State private var smsMatch = ""
     @State private var includeInNetWorth = true
@@ -210,20 +292,100 @@ struct AccountEditor: View {
                     TextField("Bank or provider (optional)", text: $institution)
                 }
                 Section {
-                    HStack {
-                        Text(kind.isLiability ? "Amount owed" : (kind == .property || kind == .investment ? "Current value" : "Balance"))
-                        Spacer()
-                        TextField(Money.format(0, currency), text: $balanceText)
-                            .keyboardType(.numbersAndPunctuation)
-                            .multilineTextAlignment(.trailing)
-                            .monospacedDigit()
+                    if kind == .creditCard {
+                        HStack {
+                            Text("Card limit")
+                            Spacer()
+                            TextField(Money.format(0, currency), text: $creditLimitText)
+                                .keyboardType(.numbersAndPunctuation)
+                                .multilineTextAlignment(.trailing)
+                                .monospacedDigit()
+                        }
+                        HStack {
+                            Text("Used balance")
+                            Spacer()
+                            TextField(Money.format(0, currency), text: $balanceText)
+                                .keyboardType(.numbersAndPunctuation)
+                                .multilineTextAlignment(.trailing)
+                                .monospacedDigit()
+                        }
+                        let limitVal = max(0, Money.parse(creditLimitText) ?? 0)
+                        let usedVal = max(0, Money.parse(balanceText) ?? 0)
+                        if limitVal > 0 {
+                            let remainingVal = max(0, limitVal - usedVal)
+                            let ratio = min(1, max(0, usedVal / limitVal))
+                            LiabilityProgressBar(
+                                progress: ratio,
+                                tint: ratio >= 0.9 ? Theme.negative : (ratio >= 0.7 ? Theme.warning : Theme.cobalt),
+                                leadingText: "Used \(Money.format(usedVal, currency))",
+                                trailingText: "Remaining \(Money.format(remainingVal, currency))"
+                            )
+                            .padding(.vertical, 4)
+                        }
+                    } else if kind == .loan {
+                        HStack {
+                            Text("Total loan amount")
+                            Spacer()
+                            TextField(Money.format(0, currency), text: $loanTotalAmountText)
+                                .keyboardType(.numbersAndPunctuation)
+                                .multilineTextAlignment(.trailing)
+                                .monospacedDigit()
+                        }
+                        HStack {
+                            Text("Remaining balance")
+                            Spacer()
+                            TextField(Money.format(0, currency), text: $balanceText)
+                                .keyboardType(.numbersAndPunctuation)
+                                .multilineTextAlignment(.trailing)
+                                .monospacedDigit()
+                        }
+                        HStack {
+                            Text("Monthly installment")
+                            Spacer()
+                            TextField(Money.format(0, currency), text: $loanMonthlyInstallmentText)
+                                .keyboardType(.numbersAndPunctuation)
+                                .multilineTextAlignment(.trailing)
+                                .monospacedDigit()
+                        }
+                        let totalVal = max(Money.parse(loanTotalAmountText) ?? 0, max(0, Money.parse(balanceText) ?? 0))
+                        let remVal = max(0, Money.parse(balanceText) ?? 0)
+                        if totalVal > 0 {
+                            let paidVal = max(0, totalVal - remVal)
+                            let ratio = min(1, max(0, paidVal / totalVal))
+                            LiabilityProgressBar(
+                                progress: ratio,
+                                tint: Theme.positive,
+                                leadingText: "Paid \(Money.format(paidVal, currency))",
+                                trailingText: "Remaining \(Money.format(remVal, currency))"
+                            )
+                            .padding(.vertical, 4)
+                        }
+                    } else {
+                        HStack {
+                            Text(kind == .property || kind == .investment ? "Current value" : "Balance")
+                            Spacer()
+                            TextField(Money.format(0, currency), text: $balanceText)
+                                .keyboardType(.numbersAndPunctuation)
+                                .multilineTextAlignment(.trailing)
+                                .monospacedDigit()
+                        }
                     }
                     Toggle("Include in net worth", isOn: $includeInNetWorth)
+                } header: {
+                    if kind == .creditCard {
+                        Text("Visa Card Balance")
+                    } else if kind == .loan {
+                        Text("Loan Details")
+                    }
                 } footer: {
                     if !includeInNetWorth {
                         Text("Excluded from your net worth total and Spendable balance in Safe to Spend.")
+                    } else if kind == .creditCard {
+                        Text("Used balance updates automatically from linked Visa transactions and payments. Subtracted from net worth.")
+                    } else if kind == .loan {
+                        Text("Remaining balance updates automatically from recorded loan payments. Subtracted from net worth.")
                     } else {
-                        Text(kind.isLiability ? "Subtracted from your net worth and Safe to Spend." : "Counts toward your assets, net worth, and Spendable balance in Safe to Spend.")
+                        Text("Counts toward your assets, net worth, and Spendable balance in Safe to Spend.")
                     }
                 }
                 if kind == .bank || kind == .creditCard || kind == .cash {
@@ -241,13 +403,13 @@ struct AccountEditor: View {
                         Text(kind == .creditCard ? "Bank SMS messages mentioning this card number or its last digits will be routed to this credit card automatically." : "Bank messages mentioning these IBAN, account, or card digits are filed to this account automatically. Separate multiple numbers with a comma (e.g. 3876, 4821).")
                     }
                 }
-                if kind == .creditCard {
+                if kind.isLiability {
                     Section {
+                        DatePicker("Payment due date", selection: $paymentDueDate, displayedComponents: .date)
                         Toggle(isOn: $paymentDueReminder.animation(.snappy)) {
                             Label("Payment due reminder", systemImage: "bell.badge.fill")
                         }
                         if paymentDueReminder {
-                            DatePicker("Payment due date", selection: $paymentDueDate, displayedComponents: .date)
                             Stepper(value: $reminderDaysBefore, in: 0...14) {
                                 HStack {
                                     Text("Remind me")
@@ -259,11 +421,11 @@ struct AccountEditor: View {
                             }
                         }
                     } header: {
-                        Text("Visa payment")
+                        Text(kind == .loan ? "Loan payment reminder" : "Visa payment reminder")
                     } footer: {
                         Text(paymentDueReminder
-                             ? "You'll get a notification at 9:00 AM \(reminderDaysBefore == 0 ? "on the due date" : "\(reminderDaysBefore) day\(reminderDaysBefore == 1 ? "" : "s") before it and again on the due date") every month, so you can pay before the bank deducts late fees. Paying the card in full moves the reminder to next month."
-                             : "Turn on to get a monthly reminder before your card payment is due.")
+                             ? "You'll get a notification at 9:00 AM \(reminderDaysBefore == 0 ? "on the due date" : "\(reminderDaysBefore) day\(reminderDaysBefore == 1 ? "" : "s") before it and again on the due date") every month."
+                             : "Turn on to get a monthly reminder before your \(kind == .loan ? "loan installment" : "card payment") is due.")
                     }
                 }
                 if let account {
@@ -297,14 +459,27 @@ struct AccountEditor: View {
                 paymentDueReminder = account.paymentDueReminder
                 paymentDueDate = account.paymentDueDate
                 reminderDaysBefore = account.paymentReminderDaysBefore
-                balanceText = Money.number(account.balance, decimals: Money.digits(currency)).replacingOccurrences(of: ",", with: "")
+                let decimals = Money.digits(currency)
+                balanceText = Money.number(account.balance, decimals: decimals).replacingOccurrences(of: ",", with: "")
                 if account.balance < 0 { balanceText = "-" + balanceText }
+                if account.creditLimit > 0 {
+                    creditLimitText = Money.number(account.creditLimit, decimals: decimals).replacingOccurrences(of: ",", with: "")
+                }
+                if account.loanTotalAmount > 0 {
+                    loanTotalAmountText = Money.number(account.loanTotalAmount, decimals: decimals).replacingOccurrences(of: ",", with: "")
+                }
+                if account.loanMonthlyInstallment > 0 {
+                    loanMonthlyInstallmentText = Money.number(account.loanMonthlyInstallment, decimals: decimals).replacingOccurrences(of: ",", with: "")
+                }
             }
         }
     }
 
     private func save() {
         let balance = Money.parse(balanceText) ?? 0
+        let parsedCreditLimit = max(0, Money.parse(creditLimitText) ?? 0)
+        let parsedLoanTotal = max(0, Money.parse(loanTotalAmountText) ?? 0)
+        let parsedInstallment = max(0, Money.parse(loanMonthlyInstallmentText) ?? 0)
         let target: Account
         if let account {
             target = account
@@ -321,7 +496,10 @@ struct AccountEditor: View {
             context.insert(new)
             target = new
         }
-        target.paymentDueReminder = kind == .creditCard && paymentDueReminder
+        target.creditLimit = kind == .creditCard ? parsedCreditLimit : 0
+        target.loanTotalAmount = kind == .loan ? max(parsedLoanTotal, balance) : 0
+        target.loanMonthlyInstallment = kind == .loan ? parsedInstallment : 0
+        target.paymentDueReminder = kind.isLiability && paymentDueReminder
         target.paymentDueDate = paymentDueDate
         target.paymentReminderDaysBefore = reminderDaysBefore
         let trimmedMatch = target.smsMatch.trimmingCharacters(in: .whitespacesAndNewlines)

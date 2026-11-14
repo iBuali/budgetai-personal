@@ -45,6 +45,11 @@ struct BackupAccountRecord: Codable, Hashable, Sendable {
     var includeInNetWorth: Bool
     var smsMatch: String
     var paymentDueDate: Date
+    var creditLimit: Double?
+    var loanTotalAmount: Double?
+    var loanMonthlyInstallment: Double?
+    var paymentDueReminder: Bool?
+    var paymentReminderDaysBefore: Int?
 }
 
 struct BackupTransactionRecord: Codable, Hashable, Sendable {
@@ -481,7 +486,12 @@ final class ICloudBackupService {
                     emoji: $0.emoji,
                     includeInNetWorth: $0.includeInNetWorth,
                     smsMatch: $0.smsMatch,
-                    paymentDueDate: $0.paymentDueDate
+                    paymentDueDate: $0.paymentDueDate,
+                    creditLimit: $0.creditLimit,
+                    loanTotalAmount: $0.loanTotalAmount,
+                    loanMonthlyInstallment: $0.loanMonthlyInstallment,
+                    paymentDueReminder: $0.paymentDueReminder,
+                    paymentReminderDaysBefore: $0.paymentReminderDaysBefore
                 )
             }
 
@@ -782,6 +792,11 @@ final class ICloudBackupService {
                     acc.id = accRec.id
                     acc.smsMatch = accRec.smsMatch
                     acc.paymentDueDate = accRec.paymentDueDate
+                    acc.creditLimit = accRec.creditLimit ?? 0
+                    acc.loanTotalAmount = accRec.loanTotalAmount ?? 0
+                    acc.loanMonthlyInstallment = accRec.loanMonthlyInstallment ?? 0
+                    acc.paymentDueReminder = accRec.paymentDueReminder ?? false
+                    acc.paymentReminderDaysBefore = accRec.paymentReminderDaysBefore ?? 3
                     context.insert(acc)
                     summary.restoredAccountsCount += 1
                 }

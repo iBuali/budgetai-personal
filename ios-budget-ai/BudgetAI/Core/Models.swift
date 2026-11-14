@@ -262,12 +262,18 @@ final class Account {
     var smsMatch: String = ""
     /// Whether this account's balance is included in Net Worth calculations.
     var includeInNetWorth: Bool = true
-    /// Whether to notify the user before the credit card payment due date so they can pay before bank fees apply.
+    /// Whether to notify the user before the payment due date (Visa card or Loan) so they can pay on time.
     var paymentDueReminder: Bool = false
-    /// Next payment due date for a credit card (repeats monthly).
+    /// Next payment due date for a credit card or loan (repeats monthly).
     var paymentDueDate: Date = Calendar.current.date(byAdding: .day, value: 14, to: .now) ?? .now
     /// How many days before `paymentDueDate` to send the payment reminder notification.
     var paymentReminderDaysBefore: Int = 3
+    /// Total credit limit for a Visa / credit card account.
+    var creditLimit: Double = 0
+    /// Total original principal amount for a loan account.
+    var loanTotalAmount: Double = 0
+    /// Scheduled monthly installment amount for a loan account.
+    var loanMonthlyInstallment: Double = 0
 
     init(name: String, kind: AccountKind, institution: String = "", balance: Double, emoji: String = "", includeInNetWorth: Bool = true) {
         self.id = UUID()
@@ -284,6 +290,45 @@ final class Account {
     var kind: AccountKind {
         get { AccountKind(rawValue: kindRaw) ?? .bank }
         set { kindRaw = newValue.rawValue }
+    }
+
+    // MARK: - Visa Card & Loan Metrics
+
+    /// Used (owed) balance on a Visa / credit card.
+    var cardUsedBalance: Double { max(0, balance) }
+
+    /// Configured credit limit on a Visa / credit card.
+    var cardLimit: Double { max(0, creditLimit) }
+
+    /// Remaining available credit on a Visa / credit card.
+    var cardRemainingBalance: Double {
+        cardLimit > 0 ? max(0, cardLimit - cardUsedBalance) : 0
+    }
+
+    /// Fraction of the credit card limit currently used (0...1).
+    var cardUsedProgress: Double {
+        cardLimit > 0 ? min(1, max(0, cardUsedBalance / cardLimit)) : 0
+    }
+
+    /// Remaining balance owed on a loan.
+    var loanRemainingBalance: Double { max(0, balance) }
+
+    /// Total loan amount (defaults to remaining balance if not explicitly configured).
+    var loanOriginalAmount: Double { max(loanTotalAmount, loanRemainingBalance) }
+
+    /// Amount already paid toward the loan.
+    var loanPaidAmount: Double { max(0, loanOriginalAmount - loanRemainingBalance) }
+
+    /// Fraction of the loan already paid off (0...1).
+    var loanPaidProgress: Double {
+        loanOriginalAmount > 0 ? min(1, max(0, loanPaidAmount / loanOriginalAmount)) : 0
+    }
+
+    /// Number of calendar days from `now` until `nextUpcomingDueDate`.
+    func daysUntilDue(from now: Date = .now, calendar: Calendar = .current) -> Int {
+        let today = calendar.startOfDay(for: now)
+        let due = nextUpcomingDueDate(from: today, calendar: calendar)
+        return calendar.dateComponents([.day], from: today, to: due).day ?? 0
     }
 
     /// Returns the next upcoming monthly due date on or after `now` (preserving the chosen day of month).
@@ -327,9 +372,19 @@ final class Account {
         return dates
     }
 
-    /// When a credit card's balance is paid in full within 20 days before its upcoming due date, move the due date to next month.
-    func advanceDueDateIfPaid(on paymentDate: Date = .now, calendar: Calendar = .current) {
-        guard kind == .creditCard, paymentDueReminder, balance <= 0.0005 else { return }
+    /// When a credit card's balance is paid in full (or a loan installment is paid) within 20 days before its upcoming due date, move the due date to next month.
+    func advanceDueDateIfPaid(on paymentDate: Date = .now, paymentAmount: Double = 0, calendar: Calendar = .current) {
+        guard paymentDueReminder else { return }
+        let shouldAdvance: Bool
+        switch kind {
+        case .creditCard:
+            shouldAdvance = balance <= 0.0005
+        case .loan:
+            shouldAdvance = balance <= 0.0005 || (loanMonthlyInstallment > 0 && paymentAmount + 0.0005 >= loanMonthlyInstallment)
+        default:
+            shouldAdvance = false
+        }
+        guard shouldAdvance else { return }
         let payDay = calendar.startOfDay(for: paymentDate)
         let upcoming = nextUpcomingDueDate(from: payDay, calendar: calendar)
         let daysUntilDue = calendar.dateComponents([.day], from: payDay, to: upcoming).day ?? 99

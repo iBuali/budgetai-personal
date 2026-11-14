@@ -141,6 +141,9 @@ enum Ledger {
         if let id = tx.accountID, let account = account(id, context: context) {
             if account.kind.isLiability {
                 account.balance += (tx.isIncome ? -tx.amount : tx.amount) * sign
+                if sign > 0 && tx.isIncome {
+                    account.advanceDueDateIfPaid(on: tx.date, paymentAmount: tx.amount)
+                }
             } else {
                 account.balance += tx.signedAmount * sign
             }
@@ -149,9 +152,9 @@ enum Ledger {
         if (isInternal || (tx.smsTransactionType == nil && tx.isTransfer)),
            let to = tx.toAccountID, to != tx.accountID, let dest = account(to, context: context) {
             dest.balance += (dest.kind.isLiability ? -tx.amount : tx.amount) * sign
-            if sign > 0 && dest.kind == .creditCard {
-                // Paid in full shortly before the due date → move the reminder to next month's due date.
-                dest.advanceDueDateIfPaid(on: tx.date)
+            if sign > 0 && (dest.kind == .creditCard || dest.kind == .loan) {
+                // Paid in full / installment paid shortly before the due date → move the reminder to next month's due date.
+                dest.advanceDueDateIfPaid(on: tx.date, paymentAmount: tx.amount)
             }
         }
         // Automatically update the linked savings goal when a transfer contributes to it.
@@ -375,10 +378,10 @@ enum Ledger {
         return accounts.first(where: { $0.kind == .bank })?.id ?? accounts.first?.id
     }
 
-    /// Re-schedules Visa / credit card payment-due reminders (e.g. after a payment moved the due date).
+    /// Re-schedules Visa card and loan payment-due reminders (e.g. after a payment moved the due date).
     static func refreshCardReminders(context: ModelContext) {
         let accounts = (try? context.fetch(FetchDescriptor<Account>())) ?? []
-        guard accounts.contains(where: { $0.kind == .creditCard && $0.paymentDueReminder }) else { return }
+        guard accounts.contains(where: { $0.kind.isLiability && $0.paymentDueReminder }) else { return }
         Notifier.rescheduleCreditCards(accounts)
     }
 
