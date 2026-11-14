@@ -16,6 +16,8 @@ enum Keys {
     static let iCloudBackupSchedule = "iCloudBackupSchedule"
     static let iCloudLastBackupDate = "iCloudLastBackupDate"
     static let iCloudLastBackupStatus = "iCloudLastBackupStatus"
+    static let homeAccountOrder = "homeAccountOrder"
+    static let homeHiddenAccounts = "homeHiddenAccounts"
 }
 
 enum AppSettings {
@@ -83,4 +85,78 @@ enum Money {
     }
 
     static let popularCurrencies = ["BHD", "SAR", "AED", "KWD", "QAR", "OMR", "USD", "EUR", "GBP", "INR", "PKR", "EGP"]
+}
+
+struct HomeAccountPreferences {
+    static func parseIDs(_ raw: String) -> [UUID] {
+        raw.split(separator: ",")
+            .compactMap { UUID(uuidString: String($0).trimmingCharacters(in: .whitespaces)) }
+    }
+
+    static func encodeIDs(_ ids: [UUID]) -> String {
+        ids.map(\.uuidString).joined(separator: ",")
+    }
+
+    static func hiddenSet(_ hiddenRaw: String) -> Set<UUID> {
+        Set(parseIDs(hiddenRaw))
+    }
+
+    static func orderedAccounts(
+        from accounts: [Account],
+        orderRaw: String,
+        hiddenRaw: String,
+        includeHidden: Bool = false
+    ) -> [Account] {
+        let orderIDs = parseIDs(orderRaw)
+        let hidden = hiddenSet(hiddenRaw)
+        let byID = Dictionary(uniqueKeysWithValues: accounts.map { ($0.id, $0) })
+
+        var result: [Account] = []
+        var seen: Set<UUID> = []
+
+        for id in orderIDs {
+            if let acc = byID[id], !seen.contains(id) {
+                seen.insert(id)
+                if includeHidden || !hidden.contains(id) {
+                    result.append(acc)
+                }
+            }
+        }
+
+        for acc in accounts where !seen.contains(acc.id) {
+            seen.insert(acc.id)
+            if includeHidden || !hidden.contains(acc.id) {
+                result.append(acc)
+            }
+        }
+
+        return result
+    }
+
+    static func toggleVisibility(for id: UUID, hiddenRaw: String) -> String {
+        var current = parseIDs(hiddenRaw)
+        if let idx = current.firstIndex(of: id) {
+            current.remove(at: idx)
+        } else {
+            current.append(id)
+        }
+        return encodeIDs(current)
+    }
+
+    static func move(
+        from source: IndexSet,
+        to destination: Int,
+        in accounts: [Account],
+        orderRaw: String
+    ) -> String {
+        var ordered = orderedAccounts(from: accounts, orderRaw: orderRaw, hiddenRaw: "", includeHidden: true).map(\.id)
+        let moving = source.sorted().map { ordered[$0] }
+        for idx in source.sorted(by: >) {
+            ordered.remove(at: idx)
+        }
+        let adjustedDestination = destination - source.filter { $0 < destination }.count
+        let insertIndex = min(max(0, adjustedDestination), ordered.count)
+        ordered.insert(contentsOf: moving, at: insertIndex)
+        return encodeIDs(ordered)
+    }
 }

@@ -978,7 +978,8 @@ struct TransactionRulesListView: View {
                 }
             }
         }
-        .navigationTitle("Transaction Rules")
+        .navigationTitle("")
+        .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             if !store.rules.isEmpty {
                 ToolbarItem(placement: .topBarTrailing) {

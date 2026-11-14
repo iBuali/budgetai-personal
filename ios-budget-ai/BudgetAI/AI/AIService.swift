@@ -1514,6 +1514,50 @@ enum SMSImporter {
 
     // MARK: - Reconcile Existing Transactions (Account Digit Matching, Same-Reference Merging, and Duplicate Cleanup)
 
+    private static let reconcileCacheLock = NSLock()
+    private static var lastReconcileSignature: [ObjectIdentifier: Int] = [:]
+
+    private static func reconcileSignature(
+        accounts: [Account],
+        transactions: [MoneyTransaction]
+    ) -> Int {
+        var hasher = Hasher()
+        hasher.combine(AppSettings.smsAutoApprove)
+        for bank in BahrainBankCatalog.customBanks {
+            hasher.combine(bank)
+        }
+        hasher.combine(accounts.count)
+        for acc in accounts {
+            hasher.combine(acc.id)
+            hasher.combine(acc.name)
+            hasher.combine(acc.kindRaw)
+            hasher.combine(acc.smsMatch)
+        }
+        hasher.combine(transactions.count)
+        for tx in transactions {
+            hasher.combine(tx.id)
+            hasher.combine(tx.source == .sms)
+            hasher.combine(tx.isPending)
+            hasher.combine(tx.isPossibleDuplicate)
+            hasher.combine(tx.isIncome)
+            hasher.combine(tx.amount)
+            hasher.combine(tx.date)
+            hasher.combine(tx.accountID)
+            hasher.combine(tx.toAccountID)
+            hasher.combine(tx.categoryRaw)
+            hasher.combine(tx.smsTransactionTypeRaw)
+            hasher.combine(tx.smsBank)
+            hasher.combine(tx.smsReference)
+            hasher.combine(tx.smsAccountSuffix)
+            hasher.combine(tx.smsRecipientSuffix)
+            hasher.combine(tx.smsSender)
+            hasher.combine(tx.smsBalance)
+            hasher.combine(tx.smsToBalance)
+            hasher.combine(tx.rawText?.count)
+        }
+        return hasher.finalize()
+    }
+
     /// Reconciles already-stored transactions in SwiftData so existing items on the user's device
     /// immediately reflect account digit matching, cross-bank internal transfer merging,
     /// same-reference SMS merging (highest amount + lowest balance), and strict reference-only duplicate detection.
@@ -1521,6 +1565,35 @@ enum SMSImporter {
         let allAccounts = (try? context.fetch(FetchDescriptor<Account>(sortBy: [SortDescriptor(\.createdAt)]))) ?? []
         let allTxs = (try? context.fetch(FetchDescriptor<MoneyTransaction>(sortBy: [SortDescriptor(\.date)]))) ?? []
         guard !allTxs.isEmpty else { return }
+
+        let ctxKey = ObjectIdentifier(context)
+        let signature = reconcileSignature(accounts: allAccounts, transactions: allTxs)
+        reconcileCacheLock.lock()
+        let isUnchanged = lastReconcileSignature[ctxKey] == signature
+        reconcileCacheLock.unlock()
+        if isUnchanged { return }
+
+        let accountsByID = Dictionary(uniqueKeysWithValues: allAccounts.map { ($0.id, $0) })
+        var suffixCache: [UUID: (accountSuffix: String?, recipientSuffix: String?)] = [:]
+        var timeCache: [UUID: String] = [:]
+
+        func cachedSuffixes(for tx: MoneyTransaction) -> (accountSuffix: String?, recipientSuffix: String?) {
+            if let cached = suffixCache[tx.id] { return cached }
+            guard let raw = tx.rawText, !raw.isEmpty else {
+                suffixCache[tx.id] = (nil, nil)
+                return (nil, nil)
+            }
+            let parsed = SMSParser.extractSuffixes(in: raw)
+            suffixCache[tx.id] = parsed
+            return parsed
+        }
+
+        func cachedTime(for tx: MoneyTransaction) -> String? {
+            if let cached = timeCache[tx.id] { return cached.isEmpty ? nil : cached }
+            let parsed = tx.rawText.flatMap { SMSParser.extractDateAndTime(in: $0).time }
+            timeCache[tx.id] = parsed ?? ""
+            return parsed
+        }
 
         var modified = false
 
@@ -1532,7 +1605,7 @@ enum SMSImporter {
                 tx.smsReference = ref
                 modified = true
             }
-            let suffixes = SMSParser.extractSuffixes(in: raw)
+            let suffixes = cachedSuffixes(for: tx)
             if let recSuf = suffixes.recipientSuffix, tx.smsRecipientSuffix != recSuf {
                 tx.smsRecipientSuffix = recSuf
                 modified = true
@@ -1590,7 +1663,7 @@ enum SMSImporter {
             }()
 
             if let matchedAcc, tx.accountID != matchedAcc.id {
-                let currentAcc = tx.accountID.flatMap { id in allAccounts.first(where: { $0.id == id }) }
+                let currentAcc = tx.accountID.flatMap { accountsByID[$0] }
                 let shouldAssign: Bool = {
                     guard let currentAcc else { return true }
                     // Only reassign an existing account if the SMS has explicit digits that match `matchedAcc.smsMatch`
@@ -1621,207 +1694,242 @@ enum SMSImporter {
             }
         }
 
+        // Reuse fetched allTxs (already sorted by date) and bucket by normalized reference code
+        // so cross-bank and same-reference pairing run in linear time instead of O(N^2).
+        let smsTxs = allTxs.filter { $0.source == .sms }
+        let cal = Calendar.current
+
         // 1b. Merge existing cross-bank / inter-account transfer SMS pairs that share the same reference, same amount, and same date & time
-        let initialSmsTxs = ((try? context.fetch(FetchDescriptor<MoneyTransaction>(sortBy: [SortDescriptor(\.date)]))) ?? []).filter { $0.source == .sms }
+        var crossBankBuckets: [String: [MoneyTransaction]] = [:]
+        var crossBankKeys: [String] = []
+        for tx in smsTxs {
+            guard tx.smsTransactionType != .internalTransfer,
+                  tx.category != .internalTransfer,
+                  let ref = Ledger.effectiveReference(for: tx),
+                  !ref.isEmpty else { continue }
+            let key = ref.uppercased()
+            if crossBankBuckets[key] == nil { crossBankKeys.append(key) }
+            crossBankBuckets[key, default: []].append(tx)
+        }
+
         var deletedCrossBankIDs: Set<UUID> = []
-        for i in 0..<initialSmsTxs.count {
-            let first = initialSmsTxs[i]
-            guard !deletedCrossBankIDs.contains(first.id) else { continue }
-            guard let ref1 = Ledger.effectiveReference(for: first), !ref1.isEmpty else { continue }
-            guard first.smsTransactionType != .internalTransfer && first.category != .internalTransfer else { continue }
+        for key in crossBankKeys {
+            guard let bucket = crossBankBuckets[key], bucket.count >= 2 else { continue }
+            for i in 0..<bucket.count {
+                let first = bucket[i]
+                guard !deletedCrossBankIDs.contains(first.id) else { continue }
+                guard let ref1 = Ledger.effectiveReference(for: first), !ref1.isEmpty else { continue }
+                guard first.smsTransactionType != .internalTransfer && first.category != .internalTransfer else { continue }
 
-            for j in (i + 1)..<initialSmsTxs.count {
-                let second = initialSmsTxs[j]
-                guard !deletedCrossBankIDs.contains(second.id) else { continue }
-                guard let ref2 = Ledger.effectiveReference(for: second), !ref2.isEmpty,
-                      ref1.caseInsensitiveCompare(ref2) == .orderedSame else { continue }
-                guard second.smsTransactionType != .internalTransfer && second.category != .internalTransfer else { continue }
-                guard abs(first.amount - second.amount) < 0.0005 else { continue }
+                for j in (i + 1)..<bucket.count {
+                    let second = bucket[j]
+                    guard !deletedCrossBankIDs.contains(second.id) else { continue }
+                    guard let ref2 = Ledger.effectiveReference(for: second), !ref2.isEmpty,
+                          ref1.caseInsensitiveCompare(ref2) == .orderedSame else { continue }
+                    guard second.smsTransactionType != .internalTransfer && second.category != .internalTransfer else { continue }
+                    guard abs(first.amount - second.amount) < 0.0005 else { continue }
 
-                let t1 = first.rawText.flatMap { SMSParser.extractDateAndTime(in: $0).time }
-                let t2 = second.rawText.flatMap { SMSParser.extractDateAndTime(in: $0).time }
-                let isSameDay = Calendar.current.isDate(first.date, inSameDayAs: second.date)
-                guard isSameDay, let t1, let t2, (t1 == t2 || t1.prefix(5) == t2.prefix(5)) else { continue }
+                    let t1 = cachedTime(for: first)
+                    let t2 = cachedTime(for: second)
+                    let isSameDay = cal.isDate(first.date, inSameDayAs: second.date)
+                    guard isSameDay, let t1, let t2, (t1 == t2 || t1.prefix(5) == t2.prefix(5)) else { continue }
 
-                let raw1 = first.rawText ?? ""
-                let raw2 = second.rawText ?? ""
-                let suf1 = SMSParser.extractSuffixes(in: raw1)
-                let suf2 = SMSParser.extractSuffixes(in: raw2)
+                    let raw1 = first.rawText ?? ""
+                    let raw2 = second.rawText ?? ""
+                    let suf1 = cachedSuffixes(for: first)
+                    let suf2 = cachedSuffixes(for: second)
 
-                let acc1ID: UUID? = {
-                    if let s = suf1.accountSuffix, let a = SMSParser.findMatchingAccount(suffix: s, in: context) { return a.id }
-                    if let a = SMSParser.findMatchingAccount(forBank: first.smsBank, senderOrPhone: first.smsSender, digits: nil, in: context) { return a.id }
-                    if let s = suf2.recipientSuffix ?? second.smsRecipientSuffix, let a = SMSParser.findMatchingAccount(suffix: s, in: context) { return a.id }
-                    return first.accountID
-                }()
-                let acc2ID: UUID? = {
-                    if let s = suf2.accountSuffix, let a = SMSParser.findMatchingAccount(suffix: s, in: context) { return a.id }
-                    if let a = SMSParser.findMatchingAccount(forBank: second.smsBank, senderOrPhone: second.smsSender, digits: nil, in: context) { return a.id }
-                    if let s = suf1.recipientSuffix ?? first.smsRecipientSuffix, let a = SMSParser.findMatchingAccount(suffix: s, in: context) { return a.id }
-                    return second.accountID
-                }()
+                    let acc1ID: UUID? = {
+                        if let s = suf1.accountSuffix, let a = SMSParser.findMatchingAccount(suffix: s, in: context) { return a.id }
+                        if let a = SMSParser.findMatchingAccount(forBank: first.smsBank, senderOrPhone: first.smsSender, digits: nil, in: context) { return a.id }
+                        if let s = suf2.recipientSuffix ?? second.smsRecipientSuffix, let a = SMSParser.findMatchingAccount(suffix: s, in: context) { return a.id }
+                        return first.accountID
+                    }()
+                    let acc2ID: UUID? = {
+                        if let s = suf2.accountSuffix, let a = SMSParser.findMatchingAccount(suffix: s, in: context) { return a.id }
+                        if let a = SMSParser.findMatchingAccount(forBank: second.smsBank, senderOrPhone: second.smsSender, digits: nil, in: context) { return a.id }
+                        if let s = suf1.recipientSuffix ?? first.smsRecipientSuffix, let a = SMSParser.findMatchingAccount(suffix: s, in: context) { return a.id }
+                        return second.accountID
+                    }()
 
-                guard let a1 = acc1ID, let a2 = acc2ID, a1 != a2 else { continue }
+                    guard let a1 = acc1ID, let a2 = acc2ID, a1 != a2 else { continue }
 
-                let dir1 = SMSParser.analyzeTransferLegDirection(in: raw1, fallbackIsIncome: first.isIncome)
-                let dir2 = SMSParser.analyzeTransferLegDirection(in: raw2, fallbackIsIncome: second.isIncome)
-                let firstIsDebit: Bool = {
-                    if dir1 == .debit && dir2 != .debit { return true }
-                    if dir2 == .debit && dir1 != .debit { return false }
-                    if dir1 == .credit && dir2 != .credit { return false }
-                    if dir2 == .credit && dir1 != .credit { return true }
-                    return !first.isIncome
-                }()
+                    let dir1 = SMSParser.analyzeTransferLegDirection(in: raw1, fallbackIsIncome: first.isIncome)
+                    let dir2 = SMSParser.analyzeTransferLegDirection(in: raw2, fallbackIsIncome: second.isIncome)
+                    let firstIsDebit: Bool = {
+                        if dir1 == .debit && dir2 != .debit { return true }
+                        if dir2 == .debit && dir1 != .debit { return false }
+                        if dir1 == .credit && dir2 != .credit { return false }
+                        if dir2 == .credit && dir1 != .credit { return true }
+                        return !first.isIncome
+                    }()
 
-                let fromID = firstIsDebit ? a1 : a2
-                let toID = firstIsDebit ? a2 : a1
-                let sourceBal = firstIsDebit ? first.smsBalance : second.smsBalance
-                let destBal = firstIsDebit ? second.smsBalance : first.smsBalance
-                let debitBank = firstIsDebit ? SMSParser.primaryBankName(from: first.smsBank) : SMSParser.primaryBankName(from: second.smsBank)
-                let creditBank = firstIsDebit ? SMSParser.primaryBankName(from: second.smsBank) : SMSParser.primaryBankName(from: first.smsBank)
-                let combinedBank = SMSParser.formatCombinedBanks(debitBank: debitBank, creditBank: creditBank)
-                let combinedRaw: String = {
-                    let debitText = firstIsDebit ? raw1 : raw2
-                    let creditText = firstIsDebit ? raw2 : raw1
-                    if debitText.isEmpty { return creditText }
-                    if creditText.isEmpty || debitText == creditText || debitText.contains(creditText) { return debitText }
-                    return "\(debitText)\n\n---\n\n\(creditText)"
-                }()
+                    let fromID = firstIsDebit ? a1 : a2
+                    let toID = firstIsDebit ? a2 : a1
+                    let sourceBal = firstIsDebit ? first.smsBalance : second.smsBalance
+                    let destBal = firstIsDebit ? second.smsBalance : first.smsBalance
+                    let debitBank = firstIsDebit ? SMSParser.primaryBankName(from: first.smsBank) : SMSParser.primaryBankName(from: second.smsBank)
+                    let creditBank = firstIsDebit ? SMSParser.primaryBankName(from: second.smsBank) : SMSParser.primaryBankName(from: first.smsBank)
+                    let combinedBank = SMSParser.formatCombinedBanks(debitBank: debitBank, creditBank: creditBank)
+                    let combinedRaw: String = {
+                        let debitText = firstIsDebit ? raw1 : raw2
+                        let creditText = firstIsDebit ? raw2 : raw1
+                        if debitText.isEmpty { return creditText }
+                        if creditText.isEmpty || debitText == creditText || debitText.contains(creditText) { return debitText }
+                        return "\(debitText)\n\n---\n\n\(creditText)"
+                    }()
 
-                deletedCrossBankIDs.insert(second.id)
-                Ledger.delete(second, context: context)
+                    deletedCrossBankIDs.insert(second.id)
+                    Ledger.delete(second, context: context)
 
-                Ledger.edit(first, context: context) { tx in
-                    tx.smsTransactionType = .internalTransfer
-                    tx.category = .internalTransfer
-                    tx.isIncome = false
-                    tx.accountID = fromID
-                    tx.toAccountID = toID
-                    if let srcAcc = Ledger.account(fromID, context: context), let dstAcc = Ledger.account(toID, context: context) {
-                        tx.merchant = "\(srcAcc.name) → \(dstAcc.name)"
+                    Ledger.edit(first, context: context) { tx in
+                        tx.smsTransactionType = .internalTransfer
+                        tx.category = .internalTransfer
+                        tx.isIncome = false
+                        tx.accountID = fromID
+                        tx.toAccountID = toID
+                        if let srcAcc = accountsByID[fromID] ?? Ledger.account(fromID, context: context),
+                           let dstAcc = accountsByID[toID] ?? Ledger.account(toID, context: context) {
+                            tx.merchant = "\(srcAcc.name) → \(dstAcc.name)"
+                        }
+                        tx.rawText = combinedRaw
+                        tx.smsBank = combinedBank
+                        tx.smsBalance = sourceBal
+                        tx.smsToBalance = destBal
+                        tx.balanceAdjustment = 0
+                        tx.toBalanceAdjustment = 0
+                        tx.isPossibleDuplicate = false
+                        tx.smsConfidence = .high
+                        tx.smsClassificationReason = "Rule 6: Merged 2 matching SMS at same date & time (Debit: \(debitBank ?? "Source") → Credit: \(creditBank ?? "Destination"))"
                     }
-                    tx.rawText = combinedRaw
-                    tx.smsBank = combinedBank
-                    tx.smsBalance = sourceBal
-                    tx.smsToBalance = destBal
-                    tx.balanceAdjustment = 0
-                    tx.toBalanceAdjustment = 0
-                    tx.isPossibleDuplicate = false
-                    tx.smsConfidence = .high
-                    tx.smsClassificationReason = "Rule 6: Merged 2 matching SMS at same date & time (Debit: \(debitBank ?? "Source") → Credit: \(creditBank ?? "Destination"))"
-                }
 
-                if first.isPending && AppSettings.smsAutoApprove {
-                    _ = Ledger.approve(first, context: context)
-                } else if !first.isPending {
-                    _ = Ledger.syncBalanceFromSMS(first, context: context)
+                    if first.isPending && AppSettings.smsAutoApprove {
+                        _ = Ledger.approve(first, context: context)
+                    } else if !first.isPending {
+                        _ = Ledger.syncBalanceFromSMS(first, context: context)
+                    }
+                    modified = true
+                    break
                 }
-                modified = true
-                break
             }
         }
 
         // 2. Merge existing SMS transactions that share the same reference, same date & time, and same direction/account
-        let smsTxs = ((try? context.fetch(FetchDescriptor<MoneyTransaction>(sortBy: [SortDescriptor(\.date)]))) ?? []).filter { $0.source == .sms }
+        var sameRefBuckets: [String: [MoneyTransaction]] = [:]
+        var sameRefKeys: [String] = []
+        for tx in smsTxs {
+            guard !deletedCrossBankIDs.contains(tx.id),
+                  tx.smsTransactionType != .internalTransfer,
+                  tx.category != .internalTransfer,
+                  let ref = Ledger.effectiveReference(for: tx),
+                  !ref.isEmpty else { continue }
+            let key = ref.uppercased()
+            if sameRefBuckets[key] == nil { sameRefKeys.append(key) }
+            sameRefBuckets[key, default: []].append(tx)
+        }
+
         var deletedIDs: Set<UUID> = []
+        for key in sameRefKeys {
+            guard let bucket = sameRefBuckets[key], bucket.count >= 2 else { continue }
+            for i in 0..<bucket.count {
+                let primary = bucket[i]
+                guard !deletedIDs.contains(primary.id) else { continue }
+                guard let ref1 = Ledger.effectiveReference(for: primary), !ref1.isEmpty else { continue }
+                guard primary.smsTransactionType != .internalTransfer && primary.category != .internalTransfer else { continue }
 
-        for i in 0..<smsTxs.count {
-            let primary = smsTxs[i]
-            guard !deletedIDs.contains(primary.id) else { continue }
-            guard let ref1 = Ledger.effectiveReference(for: primary), !ref1.isEmpty else { continue }
-            guard primary.smsTransactionType != .internalTransfer && primary.category != .internalTransfer else { continue }
+                for j in (i + 1)..<bucket.count {
+                    let secondary = bucket[j]
+                    guard !deletedIDs.contains(secondary.id) else { continue }
+                    guard let ref2 = Ledger.effectiveReference(for: secondary), !ref2.isEmpty,
+                          ref1.caseInsensitiveCompare(ref2) == .orderedSame else { continue }
+                    guard primary.isIncome == secondary.isIncome,
+                          secondary.smsTransactionType != .internalTransfer,
+                          secondary.category != .internalTransfer else { continue }
 
-            for j in (i + 1)..<smsTxs.count {
-                let secondary = smsTxs[j]
-                guard !deletedIDs.contains(secondary.id) else { continue }
-                guard let ref2 = Ledger.effectiveReference(for: secondary), !ref2.isEmpty,
-                      ref1.caseInsensitiveCompare(ref2) == .orderedSame else { continue }
-                guard primary.isIncome == secondary.isIncome,
-                      secondary.smsTransactionType != .internalTransfer,
-                      secondary.category != .internalTransfer else { continue }
+                    let timeDiff = abs(primary.date.timeIntervalSince(secondary.date))
+                    let t1 = cachedTime(for: primary)
+                    let t2 = cachedTime(for: secondary)
+                    let isSameDateAndTime: Bool = {
+                        if let t1, let t2 {
+                            return (t1 == t2 && cal.isDate(primary.date, inSameDayAs: secondary.date)) || timeDiff <= 180
+                        }
+                        if timeDiff <= 180 { return true }
+                        return cal.isDate(primary.date, inSameDayAs: secondary.date) && (t1 == nil || t2 == nil)
+                    }()
+                    guard isSameDateAndTime else { continue }
 
-                let timeDiff = abs(primary.date.timeIntervalSince(secondary.date))
-                let t1 = primary.rawText.flatMap { SMSParser.extractDateAndTime(in: $0).time }
-                let t2 = secondary.rawText.flatMap { SMSParser.extractDateAndTime(in: $0).time }
-                let isSameDateAndTime: Bool = {
-                    if let t1, let t2 {
-                        return (t1 == t2 && Calendar.current.isDate(primary.date, inSameDayAs: secondary.date)) || timeDiff <= 180
-                    }
-                    if timeDiff <= 180 { return true }
-                    return Calendar.current.isDate(primary.date, inSameDayAs: secondary.date) && (t1 == nil || t2 == nil)
-                }()
-                guard isSameDateAndTime else { continue }
-
-                let s1 = primary.smsAccountSuffix?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                let s2 = secondary.smsAccountSuffix?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                if !s1.isEmpty && !s2.isEmpty && !SMSParser.digitsMatch(accountMatch: s1, query: s2) {
-                    continue
-                }
-                if s1.isEmpty == s2.isEmpty {
-                    if let a1 = primary.accountID, let a2 = secondary.accountID, a1 != a2 {
+                    let s1 = primary.smsAccountSuffix?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    let s2 = secondary.smsAccountSuffix?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    if !s1.isEmpty && !s2.isEmpty && !SMSParser.digitsMatch(accountMatch: s1, query: s2) {
                         continue
                     }
-                }
-
-                let amountDiffers = abs(primary.amount - secondary.amount) >= 0.0005
-                let balanceDiffers: Bool = {
-                    guard let b1 = primary.smsBalance, let b2 = secondary.smsBalance else { return false }
-                    return abs(b1 - b2) >= 0.0005
-                }()
-                guard amountDiffers || balanceDiffers else { continue }
-
-                let highestAmount = max(primary.amount, secondary.amount)
-                let lowestBalance: Double? = {
-                    if let b1 = primary.smsBalance, let b2 = secondary.smsBalance {
-                        return min(b1, b2)
+                    if s1.isEmpty == s2.isEmpty {
+                        if let a1 = primary.accountID, let a2 = secondary.accountID, a1 != a2 {
+                            continue
+                        }
                     }
-                    return primary.smsBalance ?? secondary.smsBalance
-                }()
-                let mergedSuffix = (!s1.isEmpty ? s1 : nil) ?? (!s2.isEmpty ? s2 : nil)
-                let digitAccID = mergedSuffix.flatMap { SMSParser.findMatchingAccount(suffix: $0, in: context)?.id }
-                let mergedAccID: UUID? = {
-                    if let digitAccID { return digitAccID }
-                    if !s1.isEmpty, let a1 = primary.accountID { return a1 }
-                    if !s2.isEmpty, let a2 = secondary.accountID { return a2 }
-                    return primary.accountID ?? secondary.accountID
-                }()
-                let mergedBank = primary.smsBank ?? secondary.smsBank
-                let mergedSender = primary.smsSender ?? secondary.smsSender
-                let mergedRecip = primary.smsRecipientSuffix ?? secondary.smsRecipientSuffix
-                let raw1 = primary.rawText ?? ""
-                let raw2 = secondary.rawText ?? ""
-                let combinedRaw: String = {
-                    if raw1.isEmpty { return raw2 }
-                    if raw2.isEmpty || raw1 == raw2 || raw1.contains(raw2) { return raw1 }
-                    return "\(raw1)\n\n---\n\n\(raw2)"
-                }()
 
-                deletedIDs.insert(secondary.id)
-                Ledger.delete(secondary, context: context)
+                    let amountDiffers = abs(primary.amount - secondary.amount) >= 0.0005
+                    let balanceDiffers: Bool = {
+                        guard let b1 = primary.smsBalance, let b2 = secondary.smsBalance else { return false }
+                        return abs(b1 - b2) >= 0.0005
+                    }()
+                    guard amountDiffers || balanceDiffers else { continue }
 
-                Ledger.edit(primary, context: context) { tx in
-                    tx.amount = highestAmount
-                    tx.smsBalance = lowestBalance
-                    if let mergedAccID { tx.accountID = mergedAccID }
-                    if let mergedBank { tx.smsBank = mergedBank }
-                    if let mergedSender { tx.smsSender = mergedSender }
-                    if let mergedSuffix { tx.smsAccountSuffix = mergedSuffix }
-                    if let mergedRecip { tx.smsRecipientSuffix = mergedRecip }
-                    if isGenericSMSMerchant(tx.merchant) && !isGenericSMSMerchant(secondary.merchant) {
-                        tx.merchant = secondary.merchant
-                    } else if isGenericSMSMerchant(tx.merchant), let recip = mergedRecip {
-                        tx.merchant = "IBAN ending \(recip)"
+                    let highestAmount = max(primary.amount, secondary.amount)
+                    let lowestBalance: Double? = {
+                        if let b1 = primary.smsBalance, let b2 = secondary.smsBalance {
+                            return min(b1, b2)
+                        }
+                        return primary.smsBalance ?? secondary.smsBalance
+                    }()
+                    let mergedSuffix = (!s1.isEmpty ? s1 : nil) ?? (!s2.isEmpty ? s2 : nil)
+                    let digitAccID = mergedSuffix.flatMap { SMSParser.findMatchingAccount(suffix: $0, in: context)?.id }
+                    let mergedAccID: UUID? = {
+                        if let digitAccID { return digitAccID }
+                        if !s1.isEmpty, let a1 = primary.accountID { return a1 }
+                        if !s2.isEmpty, let a2 = secondary.accountID { return a2 }
+                        return primary.accountID ?? secondary.accountID
+                    }()
+                    let mergedBank = primary.smsBank ?? secondary.smsBank
+                    let mergedSender = primary.smsSender ?? secondary.smsSender
+                    let mergedRecip = primary.smsRecipientSuffix ?? secondary.smsRecipientSuffix
+                    let raw1 = primary.rawText ?? ""
+                    let raw2 = secondary.rawText ?? ""
+                    let combinedRaw: String = {
+                        if raw1.isEmpty { return raw2 }
+                        if raw2.isEmpty || raw1 == raw2 || raw1.contains(raw2) { return raw1 }
+                        return "\(raw1)\n\n---\n\n\(raw2)"
+                    }()
+
+                    deletedIDs.insert(secondary.id)
+                    Ledger.delete(secondary, context: context)
+
+                    Ledger.edit(primary, context: context) { tx in
+                        tx.amount = highestAmount
+                        tx.smsBalance = lowestBalance
+                        if let mergedAccID { tx.accountID = mergedAccID }
+                        if let mergedBank { tx.smsBank = mergedBank }
+                        if let mergedSender { tx.smsSender = mergedSender }
+                        if let mergedSuffix { tx.smsAccountSuffix = mergedSuffix }
+                        if let mergedRecip { tx.smsRecipientSuffix = mergedRecip }
+                        if isGenericSMSMerchant(tx.merchant) && !isGenericSMSMerchant(secondary.merchant) {
+                            tx.merchant = secondary.merchant
+                        } else if isGenericSMSMerchant(tx.merchant), let recip = mergedRecip {
+                            tx.merchant = "IBAN ending \(recip)"
+                        }
+                        tx.rawText = combinedRaw
+                        tx.isPossibleDuplicate = false
+                        tx.smsConfidence = .high
+                        tx.smsClassificationReason = "Merged SMS with same reference (\(ref1)), date & time, and account using highest amount and lowest balance"
                     }
-                    tx.rawText = combinedRaw
-                    tx.isPossibleDuplicate = false
-                    tx.smsConfidence = .high
-                    tx.smsClassificationReason = "Merged SMS with same reference (\(ref1)), date & time, and account using highest amount and lowest balance"
-                }
+                    timeCache.removeValue(forKey: primary.id)
 
-                if !primary.isPending {
-                    _ = Ledger.syncBalanceFromSMS(primary, context: context)
+                    if !primary.isPending {
+                        _ = Ledger.syncBalanceFromSMS(primary, context: context)
+                    }
+                    modified = true
                 }
-                modified = true
             }
         }
 
@@ -1832,6 +1940,12 @@ enum SMSImporter {
 
         // 3. Reconcile duplicates strictly by reference code
         Ledger.reconcileDuplicates(context: context)
+
+        let postTxs = (try? context.fetch(FetchDescriptor<MoneyTransaction>(sortBy: [SortDescriptor(\.date)]))) ?? allTxs
+        let postSig = reconcileSignature(accounts: allAccounts, transactions: postTxs)
+        reconcileCacheLock.lock()
+        lastReconcileSignature[ctxKey] = postSig
+        reconcileCacheLock.unlock()
     }
 }
 

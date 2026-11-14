@@ -144,20 +144,6 @@ struct SMSImportSettingsSection: View {
 
     var body: some View {
         Section {
-            NavigationLink {
-                TransactionRulesListView()
-            } label: {
-                HStack {
-                    Label("Transaction Rules", systemImage: "slider.horizontal.3")
-                    Spacer()
-                    let count = TransactionRuleStore.shared.rules.count
-                    if count > 0 {
-                        Text("\(count) saved")
-                            .font(.subheadline)
-                            .foregroundStyle(Theme.secondaryInk)
-                    }
-                }
-            }
             Picker(selection: $autoApprove) {
                 Text("Add automatically").tag(true)
                 Text("Ask me to approve").tag(false)

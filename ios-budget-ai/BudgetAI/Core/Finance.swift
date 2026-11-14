@@ -41,24 +41,33 @@ enum ChartRange: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
-/// Pure calculations over the user's data. Cheap to rebuild on every render.
+/// Pure calculations over the user's data. Pre-indexes approved transactions for fast rendering.
 struct Finance {
     let transactions: [MoneyTransaction]
+    let approvedTransactions: [MoneyTransaction]
+    let spendingTransactions: [MoneyTransaction]
+    let ordinaryIncomeTransactions: [MoneyTransaction]
     let accounts: [Account]
     let budgets: [Budget]
     let goals: [SavingsGoal]
     let bills: [Bill]
     let now: Date
     let cal = Calendar.current
+    let thisMonth: DateInterval
 
     init(transactions: [MoneyTransaction], accounts: [Account], budgets: [Budget] = [],
          goals: [SavingsGoal] = [], bills: [Bill] = [], now: Date = .now) {
-        self.transactions = transactions.filter { !$0.isPending }
+        let approved = transactions.filter { !$0.isPending }
+        self.transactions = approved
+        self.approvedTransactions = approved
+        self.spendingTransactions = approved.filter(\.isSpending)
+        self.ordinaryIncomeTransactions = approved.filter(\.isOrdinaryIncome)
         self.accounts = accounts
         self.budgets = budgets
         self.goals = goals
         self.bills = bills
         self.now = now
+        self.thisMonth = Cycle.interval(containing: now)
     }
 
     // MARK: Balances
@@ -68,6 +77,20 @@ struct Finance {
     var totalLiabilities: Double { accounts.filter { $0.includeInNetWorth && $0.kind.isLiability }.reduce(0) { $0 + $1.balance } }
     var netWorth: Double { totalAssets - totalLiabilities }
 
+    /// Liability amount deducted in Safe to Spend for an account.
+    /// Loans count only their monthly installment payment rather than the full remaining loan balance.
+    func safeToSpendLiability(for account: Account) -> Double {
+        guard account.includeInNetWorth, account.kind.isLiability, account.balance > 0 else { return 0 }
+        if account.kind == .loan {
+            return min(account.balance, max(0, account.loanMonthlyInstallment))
+        }
+        return max(0, account.balance)
+    }
+
+    var safeToSpendLiabilities: Double {
+        accounts.reduce(0) { $0 + safeToSpendLiability(for: $1) }
+    }
+
     // MARK: Periods
 
     /// Budget cycle containing `date` (custom start day aware).
@@ -75,30 +98,62 @@ struct Finance {
         Cycle.interval(containing: date)
     }
 
-    var thisMonth: DateInterval { monthInterval(now) }
     var lastMonth: DateInterval {
         monthInterval(cal.date(byAdding: .month, value: -1, to: now) ?? now)
     }
 
+    func rangeInterval(_ range: ChartRange) -> DateInterval {
+        let today = cal.startOfDay(for: now)
+        let endOfToday = cal.date(byAdding: .day, value: 1, to: today) ?? now.addingTimeInterval(86_400)
+        switch range {
+        case .week:
+            let start = cal.date(byAdding: .day, value: -6, to: today) ?? today
+            return DateInterval(start: start, end: endOfToday)
+        case .month:
+            return thisMonth
+        case .year:
+            let firstMonth = cal.date(byAdding: .month, value: -11, to: now) ?? now
+            let start = monthInterval(firstMonth).start
+            let end = max(thisMonth.end, endOfToday)
+            return DateInterval(start: start, end: end)
+        }
+    }
+
+    func rangeSubtitle(_ range: ChartRange) -> String {
+        switch range {
+        case .week: "Last 7 days"
+        case .month: Cycle.label(thisMonth)
+        case .year: "Last 12 months"
+        }
+    }
+
     func transactions(in interval: DateInterval) -> [MoneyTransaction] {
-        transactions.filter { $0.date >= interval.start && $0.date < interval.end }
+        approvedTransactions.filter { $0.date >= interval.start && $0.date < interval.end }
     }
 
     func income(in interval: DateInterval) -> Double {
-        transactions(in: interval).filter(\.isOrdinaryIncome).reduce(0) { $0 + $1.amount }
+        ordinaryIncomeTransactions.reduce(0) {
+            ($1.date >= interval.start && $1.date < interval.end) ? $0 + $1.amount : $0
+        }
     }
 
     func expenses(in interval: DateInterval) -> Double {
-        transactions(in: interval).filter(\.isSpending).reduce(0) { $0 + $1.amount }
+        spendingTransactions.reduce(0) {
+            ($1.date >= interval.start && $1.date < interval.end) ? $0 + $1.amount : $0
+        }
     }
 
     func spent(_ category: SpendCategory, in interval: DateInterval) -> Double {
-        transactions(in: interval).filter { $0.isSpending && $0.category == category }.reduce(0) { $0 + $1.amount }
+        spendingTransactions.reduce(0) {
+            ($1.date >= interval.start && $1.date < interval.end && $1.categoryRaw == category.rawValue) ? $0 + $1.amount : $0
+        }
     }
 
     func spent(for budget: Budget, in interval: DateInterval) -> Double {
         let keys = Set(budget.categories.map(\.rawValue))
-        return transactions(in: interval).filter { $0.isSpending && keys.contains($0.categoryRaw) }.reduce(0) { $0 + $1.amount }
+        return spendingTransactions.reduce(0) {
+            ($1.date >= interval.start && $1.date < interval.end && keys.contains($1.categoryRaw)) ? $0 + $1.amount : $0
+        }
     }
 
     var monthIncome: Double { income(in: thisMonth) }
@@ -120,8 +175,10 @@ struct Finance {
     var totalBudget: Double { budgets.reduce(0) { $0 + $1.limit } }
 
     func budgetSpent(in interval: DateInterval) -> Double {
-        let cats = Set(budgets.flatMap(\.categories))
-        return transactions(in: interval).filter { $0.isSpending && cats.contains($0.category) }.reduce(0) { $0 + $1.amount }
+        let keys = Set(budgets.flatMap(\.categories).map(\.rawValue))
+        return spendingTransactions.reduce(0) {
+            ($1.date >= interval.start && $1.date < interval.end && keys.contains($1.categoryRaw)) ? $0 + $1.amount : $0
+        }
     }
 
     var budgetLeft: Double { totalBudget - budgetSpent(in: thisMonth) }
@@ -152,13 +209,15 @@ struct Finance {
 
     var safeToSpend: SafeToSpend {
         SafeToSpend(spendable: totalAssets, billsDue: billsDueRestOfMonth, essentials: essentialsRemaining,
-                    savings: savingsRemaining, liabilities: totalLiabilities, daysLeft: daysLeftInMonth)
+                    savings: savingsRemaining, liabilities: safeToSpendLiabilities, daysLeft: daysLeftInMonth)
     }
 
     // MARK: Forecast
 
     var avgDailyDiscretionary: Double {
-        let spend = transactions(in: thisMonth).filter { $0.isSpending && $0.source != .bill }.reduce(0) { $0 + $1.amount }
+        let spend = spendingTransactions.reduce(0) {
+            ($1.date >= thisMonth.start && $1.date < thisMonth.end && $1.source != .bill) ? $0 + $1.amount : $0
+        }
         return spend / Double(daysElapsed)
     }
 
@@ -178,28 +237,47 @@ struct Finance {
             return effect
         }
         let today = cal.startOfDay(for: now)
-        var actual: [ChartPoint] = []
+        var days: [Date] = []
         var day = thisMonth.start
         while day <= today {
+            days.append(day)
             guard let next = cal.date(byAdding: .day, value: 1, to: day) else { break }
-            let after = transactions.filter { $0.date >= next && $0.date <= now }.reduce(0) { $0 + liquidEffect($1) }
-            actual.append(ChartPoint(date: day, value: liquidBalance - after))
             day = next
         }
+
+        // Group transaction effects by start-of-day in a single pass, then accumulate suffix totals.
+        var effectByDay: [Date: Double] = [:]
+        if let firstNext = days.first.flatMap({ cal.date(byAdding: .day, value: 1, to: $0) }) {
+            for tx in approvedTransactions where tx.date >= firstNext && tx.date <= now {
+                let dStart = cal.startOfDay(for: tx.date)
+                effectByDay[dStart, default: 0] += liquidEffect(tx)
+            }
+        }
+        var actual = Array(repeating: ChartPoint(date: today, value: liquidBalance), count: days.count)
+        var runningAfter = 0.0
+        for idx in stride(from: days.count - 1, through: 0, by: -1) {
+            let d = days[idx]
+            actual[idx] = ChartPoint(date: d, value: liquidBalance - runningAfter)
+            runningAfter += effectByDay[d, default: 0]
+        }
+
         var projected: [ChartPoint] = []
         if let last = actual.last {
             projected.append(last)
             let remainingDays = max(0, daysLeftInMonth - 1)
-            let billsByDay = bills.filter { $0.nextDueDate < thisMonth.end }
+            let billsByDay = Dictionary(grouping: bills.filter { $0.nextDueDate < thisMonth.end }) {
+                cal.startOfDay(for: $0.nextDueDate)
+            }
             var running = last.value
             for i in stride(from: 1, through: remainingDays, by: 1) {
                 guard let d = cal.date(byAdding: .day, value: i, to: today) else { continue }
                 running -= avgDailyDiscretionary
-                running -= billsByDay.filter { cal.isDate($0.nextDueDate, inSameDayAs: d) }.reduce(0) { $0 + $1.amount }
+                let dStart = cal.startOfDay(for: d)
+                running -= (billsByDay[dStart] ?? []).reduce(0) { $0 + $1.amount }
                 projected.append(ChartPoint(date: d, value: running))
             }
             // Overdue bills land on the last day.
-            let overdue = billsByDay.filter { $0.nextDueDate < today }.reduce(0) { $0 + $1.amount }
+            let overdue = bills.filter { $0.nextDueDate < today }.reduce(0) { $0 + $1.amount }
             if overdue > 0, let lastP = projected.popLast() {
                 projected.append(ChartPoint(date: lastP.date, value: lastP.value - overdue))
             }
@@ -213,25 +291,45 @@ struct Finance {
         let today = cal.startOfDay(for: now)
         switch range {
         case .week:
+            guard let start = cal.date(byAdding: .day, value: -6, to: today),
+                  let end = cal.date(byAdding: .day, value: 1, to: today) else { return [] }
+            var byDay: [Date: Double] = [:]
+            for tx in spendingTransactions where tx.date >= start && tx.date < end {
+                byDay[cal.startOfDay(for: tx.date), default: 0] += tx.amount
+            }
             return (0..<7).reversed().compactMap { offset in
-                guard let d = cal.date(byAdding: .day, value: -offset, to: today),
-                      let e = cal.date(byAdding: .day, value: 1, to: d) else { return nil }
-                return ChartPoint(date: d, value: expenses(in: DateInterval(start: d, end: e)))
+                guard let d = cal.date(byAdding: .day, value: -offset, to: today) else { return nil }
+                return ChartPoint(date: d, value: byDay[d, default: 0])
             }
         case .month:
+            guard let end = cal.date(byAdding: .day, value: 1, to: today) else { return [] }
+            var byDay: [Date: Double] = [:]
+            for tx in spendingTransactions where tx.date >= thisMonth.start && tx.date < end {
+                byDay[cal.startOfDay(for: tx.date), default: 0] += tx.amount
+            }
             var points: [ChartPoint] = []
             var d = thisMonth.start
             while d <= today {
                 guard let e = cal.date(byAdding: .day, value: 1, to: d) else { break }
-                points.append(ChartPoint(date: d, value: expenses(in: DateInterval(start: d, end: e))))
+                points.append(ChartPoint(date: d, value: byDay[d, default: 0]))
                 d = e
             }
             return points
         case .year:
-            return (0..<12).reversed().compactMap { offset in
+            let intervals: [DateInterval] = (0..<12).reversed().compactMap { offset in
                 guard let m = cal.date(byAdding: .month, value: -offset, to: now) else { return nil }
-                let interval = monthInterval(m)
-                return ChartPoint(date: interval.start, value: expenses(in: interval))
+                return monthInterval(m)
+            }
+            guard let minStart = intervals.first?.start, let maxEnd = intervals.last?.end else { return [] }
+            var bucketTotals = Array(repeating: 0.0, count: intervals.count)
+            for tx in spendingTransactions where tx.date >= minStart && tx.date < maxEnd {
+                for idx in intervals.indices where tx.date >= intervals[idx].start && tx.date < intervals[idx].end {
+                    bucketTotals[idx] += tx.amount
+                    break
+                }
+            }
+            return intervals.indices.map { idx in
+                ChartPoint(date: intervals[idx].start, value: bucketTotals[idx])
             }
         }
     }
@@ -240,19 +338,44 @@ struct Finance {
         spendingSeries(range).reduce(0) { $0 + $1.value }
     }
 
+    func spent(_ range: ChartRange) -> Double {
+        expenses(in: rangeInterval(range))
+    }
+
     func categoryBreakdown(in interval: DateInterval) -> [(category: SpendCategory, amount: Double)] {
         var totals: [SpendCategory: Double] = [:]
-        for tx in transactions(in: interval) where tx.isSpending {
+        for tx in spendingTransactions where tx.date >= interval.start && tx.date < interval.end {
             totals[tx.category, default: 0] += tx.amount
         }
         return totals.map { ($0.key, $0.value) }.sorted { $0.1 > $1.1 }
     }
 
+    func categoryBreakdown(_ range: ChartRange) -> [(category: SpendCategory, amount: Double)] {
+        categoryBreakdown(in: rangeInterval(range))
+    }
+
     func monthlyTotals(months: Int = 6) -> [MonthTotal] {
-        (0..<months).reversed().compactMap { offset in
+        let intervals: [DateInterval] = (0..<months).reversed().compactMap { offset in
             guard let m = cal.date(byAdding: .month, value: -offset, to: now) else { return nil }
-            let interval = monthInterval(m)
-            return MonthTotal(month: interval.start, income: income(in: interval), expenses: expenses(in: interval))
+            return monthInterval(m)
+        }
+        guard let minStart = intervals.first?.start, let maxEnd = intervals.last?.end else { return [] }
+        var incomes = Array(repeating: 0.0, count: intervals.count)
+        var expenses = Array(repeating: 0.0, count: intervals.count)
+        for tx in ordinaryIncomeTransactions where tx.date >= minStart && tx.date < maxEnd {
+            for idx in intervals.indices where tx.date >= intervals[idx].start && tx.date < intervals[idx].end {
+                incomes[idx] += tx.amount
+                break
+            }
+        }
+        for tx in spendingTransactions where tx.date >= minStart && tx.date < maxEnd {
+            for idx in intervals.indices where tx.date >= intervals[idx].start && tx.date < intervals[idx].end {
+                expenses[idx] += tx.amount
+                break
+            }
+        }
+        return intervals.indices.map { idx in
+            MonthTotal(month: intervals[idx].start, income: incomes[idx], expenses: expenses[idx])
         }
     }
 
@@ -267,7 +390,7 @@ struct Finance {
 
     func recurringCandidates() -> [RecurringCandidate] {
         guard let start = cal.date(byAdding: .day, value: -150, to: now) else { return [] }
-        let recent = transactions.filter { $0.isSpending && $0.date >= start && $0.source != .bill }
+        let recent = spendingTransactions.filter { $0.date >= start && $0.source != .bill }
         let groups = Dictionary(grouping: recent) { Finance.merchantKey($0.merchant) }
         let billKeys = Set(bills.map { Finance.merchantKey($0.name) })
         var results: [RecurringCandidate] = []

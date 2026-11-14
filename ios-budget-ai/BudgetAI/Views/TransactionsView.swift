@@ -13,7 +13,7 @@ enum TxDateRange: String, CaseIterable, Identifiable {
 
 struct TxFilterState: Equatable {
     var kind: TxFilter = .all
-    var range: TxDateRange = .all
+    var range: TxDateRange = .thisCycle
     var customStart: Date = Calendar.current.date(byAdding: .day, value: -30, to: .now) ?? .now
     var customEnd: Date = .now
     var categories: Set<String> = []
@@ -80,6 +80,7 @@ struct TransactionsView: View {
     @Query(sort: \MoneyTransaction.date, order: .reverse) private var transactions: [MoneyTransaction]
     @Query(sort: \Account.createdAt) private var accounts: [Account]
     @AppStorage(Keys.currency) private var currency = "BHD"
+    @AppStorage(Keys.cycleStartDay) private var cycleStartDay = 1
     @State private var query = ""
     @State private var filters = TxFilterState()
     @State private var mode: TxViewMode = .list
@@ -91,20 +92,17 @@ struct TransactionsView: View {
     @State private var selectedDay: Date = Calendar.current.startOfDay(for: .now)
     @State private var approvedTick = 0
 
-    private var pending: [MoneyTransaction] { transactions.filter(\.isPending) }
-    private var needsReviewItems: [MoneyTransaction] { transactions.filter { $0.isPending || $0.isPossibleDuplicate } }
-
     private func matchesSearch(_ tx: MoneyTransaction) -> Bool {
         guard !query.isEmpty else { return true }
         return tx.merchant.localizedCaseInsensitiveContains(query)
             || tx.category.title.localizedCaseInsensitiveContains(query)
-            || (tx.subcategory?.title.localizedCaseInsensitiveContains(query) ?? false)
             || tx.note.localizedCaseInsensitiveContains(query)
     }
 
-    private var filtered: [MoneyTransaction] {
+    private func computeFiltered() -> [MoneyTransaction] {
+        let ignoreDatesForReview = mode == .calendar || filters.range == .thisCycle
         if filters.kind == .review {
-            return transactions.filter { ($0.isPending || $0.isPossibleDuplicate) && filters.matches($0, ignoringDates: mode == .calendar) && matchesSearch($0) }
+            return transactions.filter { ($0.isPending || $0.isPossibleDuplicate) && filters.matches($0, ignoringDates: ignoreDatesForReview) && matchesSearch($0) }
         }
         if filters.kind == .all {
             return transactions.filter { filters.matches($0, ignoringDates: mode == .calendar) && matchesSearch($0) }
@@ -112,14 +110,14 @@ struct TransactionsView: View {
         return transactions.filter { !$0.isPending && filters.matches($0, ignoringDates: mode == .calendar) && matchesSearch($0) }
     }
 
-    private var grouped: [(day: Date, items: [MoneyTransaction])] {
+    private func computeGrouped(from items: [MoneyTransaction]) -> [(day: Date, items: [MoneyTransaction])] {
         let cal = Calendar.current
-        let groups = Dictionary(grouping: filtered) { cal.startOfDay(for: $0.date) }
+        let groups = Dictionary(grouping: items) { cal.startOfDay(for: $0.date) }
         return groups.map { ($0.key, $0.value) }.sorted { $0.day > $1.day }
     }
 
-    private var filteredTotals: (income: Double, spent: Double) {
-        filtered.reduce((0, 0)) { acc, tx in
+    private func computeTotals(from items: [MoneyTransaction]) -> (income: Double, spent: Double) {
+        items.reduce((0, 0)) { acc, tx in
             guard !tx.isPending else { return acc }
             if tx.isOrdinaryIncome { return (acc.0 + tx.amount, acc.1) }
             if tx.isSpending { return (acc.0, acc.1 + tx.amount) }
@@ -128,10 +126,18 @@ struct TransactionsView: View {
     }
 
     var body: some View {
+        let _ = cycleStartDay
+        let currentFiltered = computeFiltered()
+        let currentPending = transactions.filter(\.isPending)
+        let currentNeedsReview = transactions.filter { $0.isPending || $0.isPossibleDuplicate }
+        let currentGrouped = mode == .list ? computeGrouped(from: currentFiltered) : []
+        let showSummary = mode == .list && (filters.activeCount > 0 || filters.kind != .all) && !currentFiltered.isEmpty
+        let currentTotals = showSummary ? computeTotals(from: currentFiltered) : (0.0, 0.0)
+
         NavigationStack {
             List {
                 Section {
-                    chips
+                    chips(needsReviewCount: currentNeedsReview.count)
                         .listRowInsets(EdgeInsets())
                         .listRowBackground(Color.clear)
                     if filters.activeCount > 0 {
@@ -142,7 +148,7 @@ struct TransactionsView: View {
                 }
 
                 if filters.kind == .review {
-                    if filtered.isEmpty {
+                    if currentFiltered.isEmpty {
                         Section {
                             HStack(spacing: 12) {
                                 Image(systemName: "shield.lefthalf.filled.badge.checkmark")
@@ -160,12 +166,12 @@ struct TransactionsView: View {
                             .padding(.vertical, 4)
                         }
                     } else {
-                        let pendingFiltered = filtered.filter(\.isPending)
-                        let duplicateFiltered = filtered.filter(\.isPossibleDuplicate)
+                        let pendingFiltered = currentFiltered.filter(\.isPending)
+                        let duplicateFiltered = currentFiltered.filter(\.isPossibleDuplicate)
                         Section {
                             HStack {
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Text("\(filtered.count) transaction\(filtered.count == 1 ? "" : "s") to review")
+                                    Text("\(currentFiltered.count) transaction\(currentFiltered.count == 1 ? "" : "s") to review")
                                         .font(.subheadline.weight(.medium))
                                         .foregroundStyle(Theme.ink)
                                     if !pendingFiltered.isEmpty && !duplicateFiltered.isEmpty {
@@ -208,7 +214,7 @@ struct TransactionsView: View {
                             }
                         }
                     }
-                } else if filters.kind == .all && !needsReviewItems.isEmpty && query.isEmpty {
+                } else if filters.kind == .all && !currentNeedsReview.isEmpty && query.isEmpty {
                     Section {
                         Button {
                             withAnimation(.snappy) { filters.kind = .review }
@@ -223,7 +229,7 @@ struct TransactionsView: View {
                                         .foregroundStyle(Theme.warning)
                                 }
                                 VStack(alignment: .leading, spacing: 3) {
-                                    Text("\(needsReviewItems.count) needing review")
+                                    Text("\(currentNeedsReview.count) needing review")
                                         .font(.subheadline.weight(.semibold))
                                         .foregroundStyle(Theme.ink)
                                     Text("Tap to open Needs Review tab, approve pending SMS, or resolve duplicates.")
@@ -231,10 +237,10 @@ struct TransactionsView: View {
                                         .foregroundStyle(Theme.secondaryInk)
                                 }
                                 Spacer()
-                                if !pending.isEmpty {
+                                if !currentPending.isEmpty {
                                     Button("Approve all") {
-                                        let count = pending.count
-                                        withAnimation { _ = Ledger.approveAll(pending, context: context) }
+                                        let count = currentPending.count
+                                        withAnimation { _ = Ledger.approveAll(currentPending, context: context) }
                                         approvedTick += 1
                                         appState.show("Approved \(count) transaction\(count == 1 ? "" : "s")")
                                     }
@@ -254,12 +260,12 @@ struct TransactionsView: View {
                 }
 
                 if mode == .list {
-                    if filters.activeCount > 0 || filters.kind != .all, !filtered.isEmpty {
-                        Section { summaryRow }
+                    if showSummary {
+                        Section { summaryRow(count: currentFiltered.count, totals: currentTotals) }
                     }
-                    listSections
+                    listSections(grouped: currentGrouped)
                 } else {
-                    calendarSections
+                    calendarSections(filtered: currentFiltered)
                 }
             }
             .listStyle(.insetGrouped)
@@ -273,7 +279,7 @@ struct TransactionsView: View {
                 }
             }
             .overlay {
-                if mode == .list && filtered.isEmpty && filters.kind != .review {
+                if mode == .list && currentFiltered.isEmpty && filters.kind != .review {
                     if transactions.isEmpty {
                         ContentUnavailableView {
                             Label("No transactions yet", systemImage: "list.bullet.rectangle")
@@ -291,7 +297,15 @@ struct TransactionsView: View {
                         } description: {
                             Text("Try a different date range or fewer filters.")
                         } actions: {
-                            Button("Clear filters") { withAnimation(.snappy) { filters = TxFilterState() } }
+                            if filters.range != .all && filters.activeCount == 1 && filters.kind == .all {
+                                Button("Show all time") {
+                                    withAnimation(.snappy) { filters = TxFilterState(kind: filters.kind, range: .all) }
+                                }
+                            } else {
+                                Button("Clear filters") {
+                                    withAnimation(.snappy) { filters = TxFilterState(kind: filters.kind, range: .all) }
+                                }
+                            }
                         }
                     }
                 }
@@ -309,13 +323,6 @@ struct TransactionsView: View {
                     }
                 }
                 ToolbarItemGroup(placement: .topBarTrailing) {
-                    NavigationLink {
-                        TransactionRulesListView()
-                    } label: {
-                        Image(systemName: "slider.horizontal.3")
-                    }
-                    .accessibilityLabel("Transaction Rules")
-
                     Button {
                         withAnimation(.snappy) { mode = mode == .list ? .calendar : .list }
                     } label: {
@@ -369,53 +376,10 @@ struct TransactionsView: View {
     private func applyRequestedFilterIfNeeded() {
         guard let requested = appState.requestedTransactionsFilter else { return }
         withAnimation(.snappy) {
-            filters = TxFilterState(kind: requested)
+            filters = TxFilterState(kind: requested, range: requested == .review ? .all : .thisCycle)
             mode = .list
         }
         appState.requestedTransactionsFilter = nil
-    }
-
-    // MARK: Pending
-
-    private var pendingSection: some View {
-        Section {
-            ForEach(pending) { tx in
-                NavigationLink(value: tx.id) {
-                    TransactionRow(tx: tx, currency: currency)
-                }
-                .listRowBackground(Theme.warning.opacity(0.07))
-                .swipeActions(edge: .leading, allowsFullSwipe: true) {
-                    Button {
-                        approve(tx)
-                    } label: { Label("Approve", systemImage: "checkmark") }
-                    .tint(Theme.positive)
-                }
-                .swipeActions(edge: .trailing) {
-                    Button(role: .destructive) {
-                        withAnimation { Ledger.delete(tx, context: context) }
-                        appState.show("Rejected")
-                    } label: { Label("Reject", systemImage: "xmark") }
-                }
-            }
-        } header: {
-            HStack {
-                Label("Waiting for approval · \(pending.count)", systemImage: "clock.fill")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(Theme.warning)
-                Spacer()
-                Button("Approve all") {
-                    let count = pending.count
-                    withAnimation { _ = Ledger.approveAll(pending, context: context) }
-                    approvedTick += 1
-                    appState.show("Approved \(count) transaction\(count == 1 ? "" : "s")")
-                }
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(Theme.cobalt)
-            }
-            .textCase(nil)
-        } footer: {
-            Text("Swipe right to approve, left to reject. Approved items update balances and budgets.")
-        }
     }
 
     private func approve(_ tx: MoneyTransaction) {
@@ -428,7 +392,7 @@ struct TransactionsView: View {
     // MARK: List
 
     @ViewBuilder
-    private var listSections: some View {
+    private func listSections(grouped: [(day: Date, items: [MoneyTransaction])]) -> some View {
         ForEach(grouped, id: \.day) { group in
             Section {
                 ForEach(group.items) { tx in row(tx) }
@@ -477,26 +441,25 @@ struct TransactionsView: View {
         }
     }
 
-    private var summaryRow: some View {
-        let t = filteredTotals
-        return HStack {
+    private func summaryRow(count: Int, totals: (income: Double, spent: Double)) -> some View {
+        HStack {
             VStack(alignment: .leading, spacing: 2) {
-                Text("\(filtered.count) transaction\(filtered.count == 1 ? "" : "s")")
+                Text("\(count) transaction\(count == 1 ? "" : "s")")
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(Theme.secondaryInk)
-                    .animatedNumber(Double(filtered.count))
+                    .animatedNumber(Double(count))
                 Text(filters.rangeLabel).font(.subheadline.weight(.semibold)).foregroundStyle(Theme.ink)
             }
             Spacer()
             VStack(alignment: .trailing, spacing: 2) {
-                if t.income > 0 {
-                    Text(Money.format(t.income, currency, signed: true))
+                if totals.income > 0 {
+                    Text(Money.format(totals.income, currency, signed: true))
                         .foregroundStyle(Theme.positive)
-                        .animatedNumber(t.income)
+                        .animatedNumber(totals.income)
                 }
-                Text(Money.format(-t.spent, currency, signed: true))
+                Text(Money.format(-totals.spent, currency, signed: true))
                     .foregroundStyle(Theme.ink)
-                    .animatedNumber(-t.spent)
+                    .animatedNumber(-totals.spent)
             }
             .font(.subheadline.weight(.semibold).monospacedDigit())
         }
@@ -505,7 +468,7 @@ struct TransactionsView: View {
     // MARK: Calendar
 
     @ViewBuilder
-    private var calendarSections: some View {
+    private func calendarSections(filtered: [MoneyTransaction]) -> some View {
         let cal = Calendar.current
         let dayTotals = Dictionary(grouping: filtered) { cal.startOfDay(for: $0.date) }
         Section {
@@ -540,7 +503,7 @@ struct TransactionsView: View {
 
     // MARK: Chips
 
-    private var chips: some View {
+    private func chips(needsReviewCount: Int) -> some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
                 ForEach(TxFilter.allCases) { f in
@@ -549,8 +512,8 @@ struct TransactionsView: View {
                     } label: {
                         HStack(spacing: 6) {
                             Text(f.rawValue)
-                            if f == .review && !needsReviewItems.isEmpty {
-                                Text("\(needsReviewItems.count)")
+                            if f == .review && needsReviewCount > 0 {
+                                Text("\(needsReviewCount)")
                                     .font(.caption2.bold().monospacedDigit())
                                     .padding(.horizontal, 6)
                                     .padding(.vertical, 2)
@@ -589,7 +552,7 @@ struct TransactionsView: View {
                 }
                 if filters.smsOnly { removable("From SMS", symbol: "message") { filters.smsOnly = false } }
                 if filters.duplicatesOnly { removable("Duplicates", symbol: "exclamationmark.circle") { filters.duplicatesOnly = false } }
-                Button("Clear all") { withAnimation(.snappy) { filters = TxFilterState(kind: filters.kind) } }
+                Button("Clear all") { withAnimation(.snappy) { filters = TxFilterState(kind: filters.kind, range: .all) } }
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(Theme.cobalt)
             }

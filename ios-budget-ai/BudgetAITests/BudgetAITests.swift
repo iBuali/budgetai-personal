@@ -623,17 +623,23 @@ struct BudgetAITests {
 
     @Test func safeToSpendSubtractsLiabilities() throws {
         let bank = Account(name: "Checking", kind: .bank, balance: 1000.0)
-        let loan = Account(name: "Car Loan", kind: .loan, balance: 200.0)
+        let loan = Account(name: "Car Loan", kind: .loan, balance: 4000.0)
+        loan.loanTotalAmount = 5000.0
+        loan.loanMonthlyInstallment = 200.0
         let bill = Bill(name: "Internet", amount: 50.0, category: .bills, nextDueDate: .now.addingTimeInterval(86400 * 2), frequency: .monthly)
         let f = Finance(transactions: [], accounts: [bank, loan], bills: [bill])
 
         let safe = f.safeToSpend
         #expect(safe.spendable == 1000.0)
         #expect(safe.billsDue == 50.0)
+        // Safe to spend counts only the monthly loan installment (200), not full remaining balance (4000)
         #expect(safe.liabilities == 200.0)
         // monthly = max(0, 1000 - 50 - 0 - 0 - 200) = 750.0
         #expect(safe.monthly == 750.0)
         #expect(safe.isShort == false)
+        // Net worth / total liabilities still preserve the full remaining loan balance
+        #expect(f.totalLiabilities == 4000.0)
+        #expect(f.netWorth == -3000.0)
     }
 
     // MARK: - Financial Time Machine engine
@@ -2849,5 +2855,114 @@ struct BudgetAITests {
         #expect(abs(futureItems[1].amount - 120.000) < 0.0001)
         #expect(futureItems[1].isIncome == true)
         #expect(futureItems[1].reference == "GIB998813")
+    }
+
+    @Test func safeToSpendLoanMonthlyVsCardLiabilities() throws {
+        let bank = Account(name: "Checking", kind: .bank, balance: 2000.0)
+        let card = Account(name: "Visa Card", kind: .creditCard, balance: 150.0)
+        let zeroInstallmentLoan = Account(name: "Personal Loan", kind: .loan, balance: 3000.0)
+        zeroInstallmentLoan.loanMonthlyInstallment = 0.0
+        let cappedLoan = Account(name: "Mini Loan", kind: .loan, balance: 90.0)
+        cappedLoan.loanMonthlyInstallment = 250.0
+
+        let f = Finance(transactions: [], accounts: [bank, card, zeroInstallmentLoan, cappedLoan])
+        #expect(f.safeToSpendLiability(for: card) == 150.0)
+        #expect(f.safeToSpendLiability(for: zeroInstallmentLoan) == 0.0)
+        #expect(f.safeToSpendLiability(for: cappedLoan) == 90.0)
+        #expect(f.safeToSpend.liabilities == 240.0)
+        #expect(f.totalLiabilities == 3240.0)
+    }
+
+    @Test func transactionFilterDefaultsToThisCycle() throws {
+        let defaultFilter = TxFilterState()
+        #expect(defaultFilter.range == .thisCycle)
+        let reviewFilter = TxFilterState(kind: .review, range: .all)
+        #expect(reviewFilter.range == .all)
+    }
+
+    @Test func categoryBreakdownAndRangeFilters() throws {
+        let now = Date()
+        let groceries1 = MoneyTransaction(amount: 45.0, isIncome: false, merchant: "Lulu", category: .groceries, date: now.addingTimeInterval(-3600))
+        let groceries2 = MoneyTransaction(amount: 15.0, isIncome: false, merchant: "Alosra", category: .groceries, date: now.addingTimeInterval(-1800))
+        let dining = MoneyTransaction(amount: 25.0, isIncome: false, merchant: "Cafe", category: .dining, date: now.addingTimeInterval(-900))
+        let pending = MoneyTransaction(amount: 999.0, isIncome: false, merchant: "Pending", category: .shopping, date: now)
+        pending.isPending = true
+        let salary = MoneyTransaction(amount: 1500.0, isIncome: true, merchant: "Salary", category: .income, date: now)
+        let transfer = MoneyTransaction(amount: 200.0, isIncome: false, merchant: "Move", category: .internalTransfer, date: now)
+
+        let f = Finance(transactions: [groceries1, groceries2, dining, pending, salary, transfer])
+        let breakdown = f.categoryBreakdown(.week)
+        #expect(breakdown.count == 2)
+        #expect(breakdown[0].category == .groceries)
+        #expect(abs(breakdown[0].amount - 60.0) < 0.0001)
+        #expect(breakdown[1].category == .dining)
+        #expect(abs(breakdown[1].amount - 25.0) < 0.0001)
+        #expect(abs(f.spent(.week) - 85.0) < 0.0001)
+        #expect(f.rangeSubtitle(.week) == "Last 7 days")
+        #expect(!f.rangeSubtitle(.month).isEmpty)
+        #expect(!f.rangeSubtitle(.year).isEmpty)
+    }
+
+    @Test func balanceSeriesSinglePassMatchesExpectedNet() throws {
+        let bank = Account(name: "Main", kind: .bank, balance: 1000.0)
+        let today = Calendar.current.startOfDay(for: .now).addingTimeInterval(3600)
+        let expense = MoneyTransaction(amount: 120.0, isIncome: false, merchant: "Store", category: .shopping, date: today)
+        let income = MoneyTransaction(amount: 500.0, isIncome: true, merchant: "Bonus", category: .income, date: today)
+
+        let f = Finance(transactions: [expense, income], accounts: [bank])
+        let series = f.balanceSeries()
+        #expect(!series.isEmpty)
+        #expect(abs((series.last?.value ?? 0) - 1000.0) < 0.0001)
+        let prev = series.dropLast().last?.value ?? 0
+        // Before today's net change (+500 - 120 = +380), balance was 620
+        #expect(abs(prev - 620.0) < 0.0001)
+    }
+
+    @Test func homeAccountPreferencesOrderingAndVisibility() throws {
+        let bank = Account(name: "Checking", kind: .bank, balance: 1500.0)
+        let cash = Account(name: "Wallet", kind: .cash, balance: 120.0)
+        let invest = Account(name: "Stocks", kind: .investment, balance: 3200.0)
+        let property = Account(name: "Car", kind: .property, balance: 5000.0)
+        let other = Account(name: "Gold", kind: .otherAsset, balance: 800.0)
+        let card = Account(name: "Visa", kind: .creditCard, balance: 250.0)
+        card.creditLimit = 1000.0
+        let loan = Account(name: "Auto Loan", kind: .loan, balance: 2000.0)
+        loan.loanTotalAmount = 5000.0
+
+        let all = [bank, cash, invest, property, other, card, loan]
+
+        // Default ordering includes all 7 AccountKind items
+        let initialVisible = HomeAccountPreferences.orderedAccounts(from: all, orderRaw: "", hiddenRaw: "")
+        #expect(initialVisible.map(\.id) == all.map(\.id))
+
+        // Toggling visibility hides items when includeHidden == false, retains when true
+        var hiddenRaw = HomeAccountPreferences.toggleVisibility(for: cash.id, hiddenRaw: "")
+        hiddenRaw = HomeAccountPreferences.toggleVisibility(for: other.id, hiddenRaw: hiddenRaw)
+        let afterHide = HomeAccountPreferences.orderedAccounts(from: all, orderRaw: "", hiddenRaw: hiddenRaw)
+        #expect(afterHide.count == 5)
+        #expect(!afterHide.contains(where: { $0.id == cash.id || $0.id == other.id }))
+        let allIncludingHidden = HomeAccountPreferences.orderedAccounts(
+            from: all,
+            orderRaw: "",
+            hiddenRaw: hiddenRaw,
+            includeHidden: true
+        )
+        #expect(allIncludingHidden.count == 7)
+
+        // Unhide cash
+        hiddenRaw = HomeAccountPreferences.toggleVisibility(for: cash.id, hiddenRaw: hiddenRaw)
+        let afterUnhide = HomeAccountPreferences.orderedAccounts(from: all, orderRaw: "", hiddenRaw: hiddenRaw)
+        #expect(afterUnhide.contains(where: { $0.id == cash.id }))
+
+        // Move card (index 5) to index 0
+        let newOrderRaw = HomeAccountPreferences.move(from: IndexSet(integer: 5), to: 0, in: all, orderRaw: "")
+        let reordered = HomeAccountPreferences.orderedAccounts(from: all, orderRaw: newOrderRaw, hiddenRaw: "")
+        #expect(reordered.first?.id == card.id)
+
+        // Newly added accounts appear automatically after saved items
+        let newLoan = Account(name: "Home Loan", kind: .loan, balance: 15000.0)
+        let withNew = HomeAccountPreferences.orderedAccounts(from: all + [newLoan], orderRaw: newOrderRaw, hiddenRaw: "")
+        #expect(withNew.first?.id == card.id)
+        #expect(withNew.last?.id == newLoan.id)
     }
 }

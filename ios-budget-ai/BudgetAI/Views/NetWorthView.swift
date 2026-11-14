@@ -3,6 +3,7 @@ import SwiftData
 import Charts
 
 struct NetWorthView: View {
+    var initialAccountID: UUID? = nil
     @Environment(\.modelContext) private var context
     @Query(sort: \Account.createdAt) private var accounts: [Account]
     @Query(sort: \NetWorthSnapshot.day) private var snapshots: [NetWorthSnapshot]
@@ -11,6 +12,7 @@ struct NetWorthView: View {
     @State private var editing: Account?
     @State private var showNew = false
     @State private var selectedDate: Date?
+    @State private var didOpenInitialAccount = false
 
     private let ranges = [(label: "3M", months: 3), (label: "6M", months: 6), (label: "1Y", months: 12), (label: "All", months: 1200)]
 
@@ -26,7 +28,8 @@ struct NetWorthView: View {
         let pts = points
         let change = (pts.last?.value ?? f.netWorth) - (pts.first?.value ?? f.netWorth)
         let selected = selectedDate.flatMap { d in pts.min(by: { abs($0.date.timeIntervalSince(d)) < abs($1.date.timeIntervalSince(d)) }) }
-        List {
+        ScrollViewReader { proxy in
+            List {
             Section {
                 VStack(alignment: .leading, spacing: 6) {
                     let heroValue = selected?.value ?? f.netWorth
@@ -122,6 +125,15 @@ struct NetWorthView: View {
         .toolbar(.hidden, for: .tabBar)
         .sheet(item: $editing) { AccountEditor(account: $0) }
         .sheet(isPresented: $showNew) { AccountEditor(account: nil) }
+        .onAppear {
+            guard !didOpenInitialAccount, let targetID = initialAccountID else { return }
+            didOpenInitialAccount = true
+            if let target = accounts.first(where: { $0.id == targetID }) {
+                proxy.scrollTo(targetID, anchor: .center)
+                editing = target
+            }
+        }
+        }
     }
 
     private func accountRow(_ account: Account) -> some View {
@@ -182,6 +194,7 @@ struct NetWorthView: View {
             .padding(.vertical, 2)
         }
         .buttonStyle(.plain)
+        .id(account.id)
         .swipeActions(edge: .leading) {
             Button {
                 withAnimation(.spring(response: 0.42, dampingFraction: 0.86)) {

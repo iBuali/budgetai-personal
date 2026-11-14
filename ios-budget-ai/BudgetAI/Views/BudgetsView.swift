@@ -786,7 +786,7 @@ struct SafeToSpendView: View {
                 row("Upcoming bills", "Due before month end", s.billsDue, symbol: "calendar", color: Theme.warning, sign: -1)
                 row("Essential spending", "Left in essential budgets", s.essentials, symbol: "cart.fill", color: Color(hex: 0x22A565), sign: -1)
                 row("Savings commitments", "Still to set aside this month", s.savings, symbol: "banknote.fill", color: Color(hex: 0x8B5CF6), sign: -1)
-                row("Loans & liabilities", "Outstanding debt and loans", s.liabilities, symbol: "creditcard.trianglebadge.exclamationmark", color: Theme.negative, sign: -1)
+                row("Loans & liabilities", "Monthly loan payments & card balances", s.liabilities, symbol: "creditcard.trianglebadge.exclamationmark", color: Theme.negative, sign: -1)
                 LabeledContent {
                     Text(Money.format(s.monthly, currency))
                         .font(.headline.monospacedDigit())
@@ -854,12 +854,13 @@ struct SafeToSpendView: View {
                 }
             }
 
-            let liabilities = accounts.filter { $0.includeInNetWorth && $0.kind.isLiability && $0.balance > 0 }
+            let liabilities = accounts.filter { f.safeToSpendLiability(for: $0) > 0 }
             if !liabilities.isEmpty {
                 Section("Loans & liabilities") {
                     ForEach(liabilities) { acc in
+                        let counted = f.safeToSpendLiability(for: acc)
                         LabeledContent {
-                            Text(Money.format(-acc.balance, currency, signed: true))
+                            Text(Money.format(-counted, currency, signed: true))
                                 .font(.body.monospacedDigit())
                                 .foregroundStyle(Theme.negative)
                                 .lineLimit(1)
@@ -870,7 +871,8 @@ struct SafeToSpendView: View {
                                 Text(acc.name)
                                     .lineLimit(1)
                                     .minimumScaleFactor(0.85)
-                                Text(acc.institution.isEmpty ? acc.kind.title : "\(acc.kind.title) · \(acc.institution)")
+                                let baseSub = acc.institution.isEmpty ? acc.kind.title : "\(acc.kind.title) · \(acc.institution)"
+                                Text(acc.kind == .loan ? "\(baseSub) · Monthly payment" : baseSub)
                                     .font(.caption2)
                                     .foregroundStyle(Theme.secondaryInk)
                                     .lineLimit(1)
