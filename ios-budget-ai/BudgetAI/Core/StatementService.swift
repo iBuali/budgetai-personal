@@ -2,6 +2,12 @@ import Foundation
 import SwiftData
 import PDFKit
 import UniformTypeIdentifiers
+#if canImport(Vision)
+import Vision
+#endif
+#if canImport(UIKit)
+import UIKit
+#endif
 #if canImport(zlib)
 import zlib
 #endif
@@ -80,6 +86,23 @@ struct ParsedStatementItem: Identifiable, Hashable {
     }
 }
 
+struct AIStatementRecognitionResult: Equatable {
+    var detectedBank: String?
+    var docType: StatementDocType
+    var currency: String
+    var accountIBAN: String?
+    var cardLast4: String?
+    var signNotation: AmountSignNotation
+    var dateFormat: String?
+    var columnMapping: StatementColumnMapping
+    var confidence: Double
+    var isMappingUncertain: Bool
+    var uncertaintyNotes: [String]
+    var openingBalance: Double?
+    var closingBalance: Double?
+    var items: [ParsedStatementItem]
+}
+
 struct StatementParseResult {
     var items: [ParsedStatementItem]
     var detectedBank: String?
@@ -90,15 +113,53 @@ struct StatementParseResult {
     var statementPeriodStart: Date?
     var statementPeriodEnd: Date?
     var rawTextSnippet: String = ""
+    var rawFullText: String = ""
     var profileName: String? = nil
     var confidenceScore: Double = 1.0
     var openingBalance: Double? = nil
     var closingBalance: Double? = nil
     var inconsistencies: [String] = []
+    var detectedCurrency: String? = nil
+    var detectedHeaders: [String] = []
+    var detectedColumnMapping: StatementColumnMapping? = nil
+    var isAIFallbackResult: Bool = false
+    var aiFieldMappingNeedsConfirmation: Bool = false
 
     var totalItemsCount: Int { items.count }
     var newItemsCount: Int { items.filter { !$0.isDuplicate }.count }
     var duplicatesCount: Int { items.filter { $0.isDuplicate }.count }
+    var selectedItemsCount: Int { items.filter { $0.isSelected }.count }
+
+    /// True when the primary parser found no items, had low confidence, or encountered structural inconsistencies
+    var shouldOfferAIFallback: Bool {
+        items.isEmpty || confidenceScore < 0.75 || !inconsistencies.isEmpty
+    }
+
+    /// Selects all non-duplicate items; if all items were marked duplicate, selects all items so "Select All" always responds
+    mutating func selectAllNew() {
+        let hasNew = items.contains(where: { !$0.isDuplicate })
+        for idx in items.indices {
+            if hasNew {
+                items[idx].isSelected = !items[idx].isDuplicate
+            } else {
+                items[idx].isSelected = true
+            }
+        }
+    }
+
+    /// Explicitly selects every item in the statement (including any flagged duplicates)
+    mutating func selectAll() {
+        for idx in items.indices {
+            items[idx].isSelected = true
+        }
+    }
+
+    /// Explicitly deselects every item in the statement
+    mutating func deselectAll() {
+        for idx in items.indices {
+            items[idx].isSelected = false
+        }
+    }
 }
 
 // MARK: - Bank Statement Service
@@ -145,17 +206,17 @@ enum StatementService {
         }
 
         if result.items.isEmpty && result.inconsistencies.isEmpty {
-            result.inconsistencies.append("No transactions could be mapped safely. Manually map Date, Description and Debit/Credit or signed Amount columns in a CSV/Excel export.")
+            result.inconsistencies.append("No transactions could be mapped safely. Use Option 2 (AI-Assisted Statement Recognition) or manually map columns.")
         }
-        if result.items.contains(where: { !$0.isSelected && !$0.isDuplicate }) && result.inconsistencies.isEmpty {
-            result.inconsistencies.append("The date order or column mapping is ambiguous. Manually map the columns and date format in a CSV/Excel export, or correct each row before selecting it.")
-        }
-        if let opening = result.openingBalance, let closing = result.closingBalance,
-           !(result.profileName?.contains("Credit Card") ?? false) {
-            let movement = result.items.reduce(0.0) { $0 + ($1.isIncome ? $1.amount : -$1.amount) }
-            if abs(opening + movement - closing) > 0.005 {
-                result.inconsistencies.append("Extracted transactions do not reconcile with the opening and closing balances. Check for missing rows or incorrect column mapping before importing.")
-                for index in result.items.indices { result.items[index].isSelected = false }
+        if let opening = result.openingBalance, let closing = result.closingBalance, !result.items.isEmpty {
+            let isCreditCard = (result.profileName?.localizedCaseInsensitiveContains("Credit Card") ?? false) || result.detectedCardLast4 != nil
+            let bankMovement = result.items.reduce(0.0) { $0 + ($1.isIncome ? $1.amount : -$1.amount) }
+            let cardMovement = result.items.reduce(0.0) { $0 + ($1.isIncome ? -$1.amount : $1.amount) }
+            let bankDiff = abs(opening + bankMovement - closing)
+            let cardDiff = abs(opening + cardMovement - closing)
+            let bestDiff = isCreditCard ? min(bankDiff, cardDiff) : bankDiff
+            if bestDiff > 0.05 {
+                result.inconsistencies.append("Opening and closing balances differ from the sum of extracted rows by \(String(format: "%.3f", bestDiff)). Review extracted items or use AI-Assisted Recognition if any rows were missed.")
             }
         }
         // Apply duplicate detection against existing transactions
@@ -253,7 +314,69 @@ enum StatementService {
         return nil
     }
 
-    // MARK: - PDF Parsing
+    // MARK: - PDF Parsing (Including Scanned PDF OCR Support)
+
+    private static func extractTextViaOCR(from doc: PDFDocument) -> String {
+        #if canImport(Vision) && canImport(UIKit)
+        var ocrText = ""
+        let maxPages = min(doc.pageCount, 30)
+        for i in 0..<maxPages {
+            guard let page = doc.page(at: i) else { continue }
+            let bounds = page.bounds(for: .mediaBox)
+            guard bounds.width > 10 && bounds.height > 10 else { continue }
+            let scale: CGFloat = 2.0
+            let renderSize = CGSize(width: bounds.width * scale, height: bounds.height * scale)
+            let renderer = UIGraphicsImageRenderer(size: renderSize)
+            let img = renderer.image { ctx in
+                UIColor.white.setFill()
+                ctx.fill(CGRect(origin: .zero, size: renderSize))
+                ctx.cgContext.saveGState()
+                ctx.cgContext.translateBy(x: 0, y: renderSize.height)
+                ctx.cgContext.scaleBy(x: scale, y: -scale)
+                page.draw(with: .mediaBox, to: ctx.cgContext)
+                ctx.cgContext.restoreGState()
+            }
+            guard let cgImage = img.cgImage else { continue }
+            let request = VNRecognizeTextRequest()
+            request.recognitionLevel = .accurate
+            request.usesLanguageCorrection = true
+            request.recognitionLanguages = ["en-US", "ar-SA"]
+            let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+            try? handler.perform([request])
+            guard let observations = request.results, !observations.isEmpty else { continue }
+            // Group observations into lines sorted top-to-bottom (Vision Y is 0 at bottom, 1 at top), then left-to-right
+            let sorted = observations.sorted { a, b in
+                let ay = (a.boundingBox.midY * 50).rounded()
+                let by = (b.boundingBox.midY * 50).rounded()
+                return ay == by ? a.boundingBox.minX < b.boundingBox.minX : ay > by
+            }
+            var currentLineY: CGFloat?
+            var currentLineParts: [String] = []
+            var pageLines: [String] = []
+            for obs in sorted {
+                guard let candidate = obs.topCandidates(1).first?.string.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !candidate.isEmpty else { continue }
+                let y = obs.boundingBox.midY
+                if let lastY = currentLineY, abs(lastY - y) < 0.015 {
+                    currentLineParts.append(candidate)
+                } else {
+                    if !currentLineParts.isEmpty {
+                        pageLines.append(currentLineParts.joined(separator: "  "))
+                    }
+                    currentLineParts = [candidate]
+                    currentLineY = y
+                }
+            }
+            if !currentLineParts.isEmpty {
+                pageLines.append(currentLineParts.joined(separator: "  "))
+            }
+            ocrText += pageLines.joined(separator: "\n") + "\n"
+        }
+        return ocrText
+        #else
+        return ""
+        #endif
+    }
 
     static func parsePDF(data: Data, accounts: [Account]) -> StatementParseResult {
         guard let doc = PDFDocument(data: data) else {
@@ -267,27 +390,36 @@ enum StatementService {
             }
         }
 
+        var usedOCR = false
+        if fullText.trimmingCharacters(in: .whitespacesAndNewlines).count < 20 {
+            let ocr = extractTextViaOCR(from: doc)
+            if !ocr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                fullText = ocr
+                usedOCR = true
+            }
+        }
+
         let detected = extractHeaderMetadata(from: fullText)
         let matchedAcc = matchAccount(ibanOrAcc: detected.iban, cardLast4: detected.cardLast4, bank: detected.bank, in: accounts)
 
-        let table = StatementPDFTable.extract(doc)
+        let table = usedOCR ? nil : StatementPDFTable.extract(doc)
         var items = table.map { parseCSVRows($0, profile: detected.profile) } ?? []
         if items.isEmpty {
             items = parseTextLinesToItems(fullText, profile: detected.profile)
         }
+        if items.isEmpty {
+            items = parseCSVRows(fullText, profile: detected.profile)
+        }
         var issues: [String] = []
         if items.isEmpty {
             issues.append(fullText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                ? "This PDF has no readable text or is locked. Unlock it or use an OCR/text-based PDF or Excel export."
-                : "The statement columns could not be mapped safely. Please manually map Date, Description and Debit/Credit or signed Amount in a CSV/Excel export.")
-        } else if table == nil {
-            for index in items.indices { items[index].isSelected = false }
-            issues.append("This PDF layout is unrecognized. Review each extracted date, amount and direction before selecting transactions.")
+                ? "This PDF has no readable text or is locked. Use Option 2 (AI-Assisted Statement Recognition) or unlock the file."
+                : "The statement columns could not be mapped automatically. Use Option 2 (AI-Assisted Statement Recognition) or manually map columns.")
+        } else if usedOCR {
+            issues.append("Scanned PDF extracted via OCR. Please review extracted transactions or run Option 2 (AI-Assisted Recognition) for verification.")
         }
-        if let table, !items.isEmpty, table.components(separatedBy: "\n").count - 1 != items.count {
-            issues.append("Some dated rows could not be mapped safely. Check all rows and manually map the statement columns before importing.")
-            for index in items.indices { items[index].isSelected = false }
-        }
+
+        let tableHeaders = extractDetectedHeaders(from: table ?? fullText)
 
         return StatementParseResult(
             items: items,
@@ -299,11 +431,14 @@ enum StatementService {
             statementPeriodStart: detected.startDate,
             statementPeriodEnd: detected.endDate,
             rawTextSnippet: String(fullText.prefix(400)),
+            rawFullText: fullText,
             profileName: "\(detected.profile.bankName) (\(detected.profile.docType.rawValue))",
-            confidenceScore: detected.confidence,
+            confidenceScore: usedOCR ? min(detected.confidence, 0.72) : detected.confidence,
             openingBalance: detected.openingBalance,
             closingBalance: detected.closingBalance,
-            inconsistencies: issues
+            inconsistencies: issues,
+            detectedCurrency: detected.profile.primaryCurrency,
+            detectedHeaders: tableHeaders
         )
     }
 
@@ -318,6 +453,7 @@ enum StatementService {
         if items.isEmpty {
             items = parseTextLinesToItems(text, profile: detected.profile)
         }
+        let headers = extractDetectedHeaders(from: text)
 
         return StatementParseResult(
             items: items,
@@ -329,10 +465,13 @@ enum StatementService {
             statementPeriodStart: detected.startDate,
             statementPeriodEnd: detected.endDate,
             rawTextSnippet: String(text.prefix(400)),
+            rawFullText: text,
             profileName: "\(detected.profile.bankName) (\(detected.profile.docType.rawValue))",
             confidenceScore: detected.confidence,
             openingBalance: detected.openingBalance,
-            closingBalance: detected.closingBalance
+            closingBalance: detected.closingBalance,
+            detectedCurrency: detected.profile.primaryCurrency,
+            detectedHeaders: headers
         )
     }
 
@@ -360,6 +499,7 @@ enum StatementService {
         if items.isEmpty {
             items = parseTextLinesToItems(text, profile: detected.profile)
         }
+        let headers = extractDetectedHeaders(from: text)
 
         return StatementParseResult(
             items: items,
@@ -371,10 +511,13 @@ enum StatementService {
             statementPeriodStart: detected.startDate,
             statementPeriodEnd: detected.endDate,
             rawTextSnippet: String(text.prefix(400)),
+            rawFullText: text,
             profileName: "\(detected.profile.bankName) (\(detected.profile.docType.rawValue))",
             confidenceScore: detected.confidence,
             openingBalance: detected.openingBalance,
-            closingBalance: detected.closingBalance
+            closingBalance: detected.closingBalance,
+            detectedCurrency: detected.profile.primaryCurrency,
+            detectedHeaders: headers
         )
     }
 
@@ -428,6 +571,7 @@ enum StatementService {
         let finalIban = detected.iban ?? detectedInZip.iban
         let finalCard = detected.cardLast4 ?? detectedInZip.cardLast4
         let matchedAcc = matchAccount(ibanOrAcc: finalIban, cardLast4: finalCard, bank: finalBank, in: accounts)
+        let headers = extractDetectedHeaders(from: combinedText)
 
         return StatementParseResult(
             items: items,
@@ -439,10 +583,13 @@ enum StatementService {
             statementPeriodStart: detected.startDate ?? detectedInZip.startDate,
             statementPeriodEnd: detected.endDate ?? detectedInZip.endDate,
             rawTextSnippet: String(combinedText.prefix(400)),
+            rawFullText: combinedText,
             profileName: "\(detected.profile.bankName) (\(detected.profile.docType.rawValue))",
             confidenceScore: max(detected.confidence, detectedInZip.confidence),
             openingBalance: detected.openingBalance ?? detectedInZip.openingBalance,
-            closingBalance: detected.closingBalance ?? detectedInZip.closingBalance
+            closingBalance: detected.closingBalance ?? detectedInZip.closingBalance,
+            detectedCurrency: detected.profile.primaryCurrency,
+            detectedHeaders: headers
         )
     }
 
@@ -648,10 +795,21 @@ enum StatementService {
     private static func determineIsIncome(
         amountString: String,
         lineText: String,
-        profile: BankProfileRule?
+        profile: BankProfileRule?,
+        typeIndicator: String? = nil
     ) -> Bool {
         let upperText = lineText.uppercased()
-        let upperAmt = amountString.uppercased()
+        let upperAmt = amountString.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        let upperType = (typeIndicator ?? "").trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+
+        if !upperType.isEmpty {
+            if upperType == "CR" || upperType == "C" || upperType.contains("CREDIT") || upperType.contains("DEPOSIT") || upperType.contains("IN") || upperType.contains("دائن") || upperType.contains("إيداع") {
+                return true
+            }
+            if upperType == "DR" || upperType == "D" || upperType.contains("DEBIT") || upperType.contains("WITHDRAWAL") || upperType.contains("OUT") || upperType.contains("مدين") || upperType.contains("سحب") {
+                return false
+            }
+        }
 
         if let notation = profile?.signNotation {
             switch notation {
@@ -660,13 +818,13 @@ enum StatementService {
                 if upperAmt.contains("(+)") || upperText.contains("(+)") || upperAmt.hasPrefix("+") {
                     return true
                 }
-                if upperAmt.contains("(-)") || upperText.contains("(-)") || upperAmt.contains("(") || upperAmt.hasPrefix("-") {
+                if upperAmt.contains("(-)") || upperText.contains("(-)") || upperAmt.contains("(") || upperAmt.hasPrefix("-") || upperAmt.hasSuffix("-") {
                     return false
                 }
             case .creditCardNegativePayment:
                 // Credit card style:
                 // "PAYMENT RECEIVED" or negative amount is payment towards card (credit/income)
-                if upperText.contains("PAYMENT RECEIVED") || upperText.contains("PAYMENT - THANK YOU") || upperAmt.contains("-") || upperAmt.contains("(") {
+                if upperText.contains("PAYMENT RECEIVED") || upperText.contains("PAYMENT - THANK YOU") || upperText.contains("REFUND") || upperAmt.contains("-") || upperAmt.contains("(") || upperAmt.contains("CR") {
                     return true
                 }
                 // Purchases/debits are positive
@@ -676,15 +834,30 @@ enum StatementService {
             }
         }
 
-        if upperAmt.contains("DR") || upperAmt.contains("(-)") || upperAmt.contains("-") || (upperAmt.contains("(") && !upperAmt.contains("(+)")) { return false }
-        if upperAmt.contains("CR") || upperAmt.contains("(+)") || upperAmt.hasPrefix("+") { return true }
-        if profile?.signNotation == .standardSigned { return true }
+        let hasExplicitMinus = upperAmt.contains("(-)") || upperAmt.hasPrefix("-") || upperAmt.hasSuffix("-")
+            || upperAmt.range(of: #"-\s*\d"#, options: .regularExpression) != nil
+            || (upperAmt.contains("(") && !upperAmt.contains("(+)"))
+        let hasExplicitDR = upperAmt.range(of: #"\bDR\b"#, options: .regularExpression) != nil
+            || upperText.range(of: #"\d+(?:\.\d+)?\s*DR\b"#, options: .regularExpression) != nil
+        if hasExplicitDR || hasExplicitMinus { return false }
 
-        // Generic fallback heuristics
-        if upperText.contains("PAYMENT RECEIVED") || upperText.contains("SALARY") || upperText.contains("DEPOSIT") || upperText.contains("REFUND") || upperText.contains("CREDIT") || upperAmt.contains("CR") || upperAmt.contains("(+)") || upperAmt.hasPrefix("+") {
+        let hasExplicitPlus = upperAmt.contains("(+)") || upperAmt.hasPrefix("+") || upperAmt.hasSuffix("+")
+            || upperAmt.range(of: #"\+\s*\d"#, options: .regularExpression) != nil
+        let hasExplicitCR = upperAmt.range(of: #"\bCR\b"#, options: .regularExpression) != nil
+            || upperText.range(of: #"\d+(?:\.\d+)?\s*CR\b"#, options: .regularExpression) != nil
+        if hasExplicitCR || hasExplicitPlus { return true }
+
+        // Generic fallback heuristics based on transaction narrative
+        if upperText.contains("PAYMENT RECEIVED") || upperText.contains("SALARY") || upperText.contains("PAYROLL")
+            || upperText.contains("DEPOSIT") || upperText.contains("REFUND") || upperText.contains("REVERSAL")
+            || upperText.contains("CASHBACK") || upperText.contains("DIVIDEND") || upperText.contains("INWARD TRANSFER")
+            || upperText.contains("TRANSFER IN") || upperText.contains("FAWRI+ PAYMENT FROM") || upperText.contains("FAWRI+ RECEIVED")
+            || (upperText.contains("CREDIT") && !upperText.contains("CREDIT CARD"))
+            || upperText.contains("إيداع") || upperText.contains("راتب") || upperText.contains("تحويل وارد") {
             return true
         }
-        if upperAmt.contains("(-)") || upperAmt.contains("(") || upperAmt.hasPrefix("-") || upperAmt.contains("DR") || upperText.contains("DEBIT") || upperText.contains("PURCHASE") || upperText.contains("WITHDRAWAL") {
+        if upperText.contains("DEBIT") || upperText.contains("PURCHASE") || upperText.contains("WITHDRAWAL")
+            || upperText.contains("FAWRI+ PAYMENT TO") || upperText.contains("TRANSFER OUT") {
             return false
         }
 
@@ -996,7 +1169,54 @@ enum StatementService {
 
     // MARK: - CSV & Delimited Rows Parsing
 
-    static func parseCSVRows(_ csvText: String, profile: BankProfileRule? = nil) -> [ParsedStatementItem] {
+    static func extractDetectedHeaders(from csvText: String) -> [String] {
+        var normalized = ""
+        var insideQuotes = false
+        for character in csvText {
+            if character == "\"" { insideQuotes.toggle() }
+            normalized.append(insideQuotes && (character == "\n" || character == "\r") ? " " : character)
+        }
+        let lines = normalized.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: " \r")) }
+            .filter { !$0.isEmpty }
+        guard !lines.isEmpty else { return [] }
+        let separators: [Character] = ["\t", ";", "|", ","]
+        let sep = separators.max { left, right in
+            let lMax = lines.prefix(30).map { splitCSVLine($0, separator: left).count }.max() ?? 0
+            let rMax = lines.prefix(30).map { splitCSVLine($0, separator: right).count }.max() ?? 0
+            return lMax < rMax
+        } ?? ","
+
+        for line in lines.prefix(50) {
+            let cells = splitCSVLine(line, separator: sep)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            let lowerCells = cells.map { $0.lowercased() }
+            if lowerCells.contains(where: { $0.contains("date") || $0.contains("time") || $0.contains("التاريخ") }) &&
+               lowerCells.contains(where: {
+                   $0.contains("amount") || $0.contains("amt") || $0.contains("debit") || $0.contains("credit")
+                   || $0.contains("description") || $0.contains("particular") || $0.contains("narrative")
+                   || $0.contains("details") || $0.contains("withdrawal") || $0.contains("deposit")
+                   || $0.contains("merchant") || $0.contains("payee") || $0.contains("memo")
+                   || $0.contains("remarks") || $0.contains("transaction") || $0.contains("الوصف") || $0.contains("المبلغ")
+               }) {
+                return cells.filter { !$0.isEmpty }
+            }
+        }
+        // Fallback: return first multi-column row
+        for line in lines.prefix(20) {
+            let cells = splitCSVLine(line, separator: sep).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            if cells.filter({ !$0.isEmpty }).count >= 3 {
+                return cells
+            }
+        }
+        return []
+    }
+
+    static func parseCSVRows(
+        _ csvText: String,
+        profile: BankProfileRule? = nil,
+        customMapping: StatementColumnMapping? = nil
+    ) -> [ParsedStatementItem] {
         var items: [ParsedStatementItem] = []
         // Quoted descriptions may contain line breaks. Keep them within the same record.
         var normalized = ""
@@ -1015,13 +1235,18 @@ enum StatementService {
         func headerScore(_ separator: Character) -> Int {
             lines.prefix(100).map { line in
                 let cells = splitCSVLine(line, separator: separator).map { $0.lowercased() }
-                guard cells.contains(where: { $0.contains("date") || $0.contains("time") || $0.contains("التاريخ") }),
+                if let matchedLearned = BankProfileRegistry.matchLearnedColumnProfile(forHeaders: cells),
+                   matchedLearned.columnMapping != nil {
+                    return cells.count + 10
+                }
+                guard cells.contains(where: { $0.contains("date") || $0.contains("time") || $0.contains("التاريخ") || $0.contains("تاريخ") }),
                       cells.contains(where: {
                           $0.contains("description") || $0.contains("amount") || $0.contains("debit")
                           || $0.contains("credit") || $0.contains("details") || $0.contains("narrative")
                           || $0.contains("particular") || $0.contains("withdrawal") || $0.contains("deposit")
                           || $0.contains("merchant") || $0.contains("payee") || $0.contains("memo")
-                          || $0.contains("remarks") || $0.contains("transaction") || $0.contains("الوصف") || $0.contains("المبلغ")
+                          || $0.contains("remarks") || $0.contains("transaction") || $0.contains("الوصف")
+                          || $0.contains("المبلغ") || $0.contains("البيان") || $0.contains("مدين") || $0.contains("دائن")
                       }) else { return 0 }
                 return cells.count
             }.max() ?? 0
@@ -1040,22 +1265,49 @@ enum StatementService {
 
         var headers: [String] = []
         var headerIndex = -1
+        var matchedLearnedProfile: BankProfileRule? = nil
 
         for (idx, line) in lines.enumerated() {
             let cells = splitCSVLine(line, separator: sep)
-            let lowerCells = cells.map { $0.lowercased().trimmingCharacters(in: .whitespacesAndNewlines) }
-            if lowerCells.contains(where: { $0.contains("date") || $0.contains("time") || $0.contains("التاريخ") }) &&
+            let lowerCells = cells.map { $0.lowercased().replacingOccurrences(of: "\u{00A0}", with: " ").trimmingCharacters(in: .whitespacesAndNewlines) }
+            if let learned = BankProfileRegistry.matchLearnedColumnProfile(forHeaders: lowerCells) {
+                headers = lowerCells
+                headerIndex = idx
+                matchedLearnedProfile = learned
+                break
+            }
+            if let custom = customMapping, custom.hasAnyMapping {
+                let targetCols = [custom.dateColumnHeader, custom.descriptionColumnHeader, custom.amountColumnHeader, custom.debitColumnHeader, custom.creditColumnHeader]
+                    .compactMap { $0?.lowercased().trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+                if targetCols.count >= 2 && targetCols.allSatisfy({ t in lowerCells.contains(where: { $0 == t || $0.contains(t) }) }) {
+                    headers = lowerCells
+                    headerIndex = idx
+                    break
+                }
+            }
+            if lowerCells.contains(where: { $0.contains("date") || $0.contains("time") || $0.contains("التاريخ") || $0.contains("تاريخ") }) &&
                lowerCells.contains(where: {
                    $0.contains("amount") || $0.contains("amt") || $0.contains("debit") || $0.contains("credit")
                    || $0.contains("description") || $0.contains("particular") || $0.contains("narrative")
                    || $0.contains("details") || $0.contains("withdrawal") || $0.contains("deposit")
                    || $0.contains("merchant") || $0.contains("payee") || $0.contains("memo")
-                   || $0.contains("remarks") || $0.contains("transaction") || $0.contains("الوصف") || $0.contains("المبلغ")
+                   || $0.contains("remarks") || $0.contains("transaction") || $0.contains("الوصف")
+                   || $0.contains("المبلغ") || $0.contains("البيان") || $0.contains("مدين") || $0.contains("دائن")
                }) {
                 headers = lowerCells
                 headerIndex = idx
                 break
             }
+        }
+
+        let effectiveProfile = matchedLearnedProfile ?? profile
+        let effectiveMapping = customMapping ?? effectiveProfile?.columnMapping
+
+        func matchMappedHeader(_ name: String?, in headers: [String]) -> Int? {
+            guard let raw = name?.lowercased().trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else { return nil }
+            if let exact = headers.firstIndex(where: { $0 == raw }) { return exact }
+            return headers.firstIndex(where: { !$0.isEmpty && ($0.contains(raw) || raw.contains($0)) })
         }
 
         let dateCol: Int
@@ -1064,30 +1316,43 @@ enum StatementService {
         let debitCol: Int?
         let creditCol: Int?
         let refCol: Int?
+        let typeCol: Int?
         let startRow: Int
 
         if headerIndex != -1 && !headers.isEmpty {
-            dateCol = headers.firstIndex(where: { $0.contains("date") || $0.contains("time") || $0.contains("التاريخ") }) ?? 0
-            descCol = headers.firstIndex(where: {
-                $0.contains("description") || $0.contains("narrative") || $0.contains("narration")
-                || $0.contains("particular") || $0.contains("merchant") || $0.contains("details")
-                || $0.contains("payee") || $0.contains("remarks") || $0.contains("memo")
-                || $0.contains("activity") || $0.contains("summary") || $0.contains("title")
-                || $0.contains("الوصف") || $0.contains("البيان") || $0.contains("التفاصيل")
-                || ($0.contains("transaction") && !$0.contains("date") && !$0.contains("amount") && !$0.contains("ref"))
-            }) ?? 1
-            amountCol = headers.firstIndex(where: { $0.contains("amount in ") })
-                ?? headers.firstIndex(where: { $0 == "amount" || $0.contains("transaction amount") || $0.contains("net amount") })
-                ?? headers.firstIndex(where: { ($0.contains("amount") || $0 == "amt" || $0.contains("المبلغ")) && !$0.contains("balance") && !$0.contains("foreign") })
-            debitCol = headers.firstIndex(where: {
-                ($0.contains("debit") || $0.contains("withdrawal") || $0.contains("paid out") || $0.contains("outflow") || $0.contains("money out") || $0 == "dr" || $0.hasPrefix("dr ") || $0.hasSuffix(" dr") || $0.contains("مدين"))
-                && !$0.contains("card")
+            dateCol = matchMappedHeader(effectiveMapping?.dateColumnHeader, in: headers)
+                ?? headers.firstIndex(where: { $0.contains("transaction date") || $0.contains("txn date") || $0.contains("posting date") })
+                ?? headers.firstIndex(where: { $0.contains("date") || $0.contains("time") || $0.contains("التاريخ") || $0.contains("تاريخ") }) ?? 0
+            descCol = matchMappedHeader(effectiveMapping?.descriptionColumnHeader, in: headers)
+                ?? headers.firstIndex(where: {
+                    $0.contains("description") || $0.contains("narrative") || $0.contains("narration")
+                    || $0.contains("particular") || $0.contains("merchant") || $0.contains("details")
+                    || $0.contains("payee") || $0.contains("remarks") || $0.contains("memo")
+                    || $0.contains("activity") || $0.contains("summary") || $0.contains("title")
+                    || $0.contains("الوصف") || $0.contains("البيان") || $0.contains("التفاصيل")
+                    || ($0.contains("transaction") && !$0.contains("date") && !$0.contains("amount") && !$0.contains("ref") && !$0.contains("type"))
+                }) ?? 1
+            amountCol = matchMappedHeader(effectiveMapping?.amountColumnHeader, in: headers)
+                ?? headers.firstIndex(where: { $0.contains("amount in ") })
+                ?? headers.firstIndex(where: { $0 == "amount" || $0.contains("transaction amount") || $0.contains("net amount") || $0.contains("billing amount") })
+                ?? headers.firstIndex(where: { ($0.contains("amount") || $0 == "amt" || $0.contains("المبلغ") || $0.contains("القيمة")) && !$0.contains("balance") && !$0.contains("foreign") })
+            debitCol = matchMappedHeader(effectiveMapping?.debitColumnHeader, in: headers)
+                ?? headers.firstIndex(where: {
+                    ($0.contains("debit") || $0.contains("withdrawal") || $0.contains("paid out") || $0.contains("outflow") || $0.contains("money out") || $0 == "dr" || $0.hasPrefix("dr ") || $0.hasSuffix(" dr") || $0.contains("مدين") || $0.contains("سحب"))
+                    && !$0.contains("card") && !$0.contains("cr") && !$0.contains("credit")
+                })
+            creditCol = matchMappedHeader(effectiveMapping?.creditColumnHeader, in: headers)
+                ?? headers.firstIndex(where: {
+                    ($0.contains("credit") || $0.contains("deposit") || $0.contains("paid in") || $0.contains("inflow") || $0.contains("money in") || $0 == "cr" || $0.hasPrefix("cr ") || $0.hasSuffix(" cr") || $0.contains("دائن") || $0.contains("إيداع"))
+                    && !$0.contains("card") && !$0.contains("dr") && !$0.contains("debit")
+                })
+            refCol = matchMappedHeader(effectiveMapping?.referenceColumnHeader, in: headers)
+                ?? headers.firstIndex(where: { $0.contains("ref") || $0.contains("cheque") || $0.contains("reference") || $0.contains("doc") || $0.contains("المرجع") })
+            typeCol = headers.firstIndex(where: {
+                $0 == "type" || $0 == "dr/cr" || $0 == "cr/dr" || $0 == "d/c"
+                || $0.contains("transaction type") || $0.contains("txn type") || $0.contains("direction")
+                || $0.contains("indicator") || $0.contains("النوع")
             })
-            creditCol = headers.firstIndex(where: {
-                ($0.contains("credit") || $0.contains("deposit") || $0.contains("paid in") || $0.contains("inflow") || $0.contains("money in") || $0 == "cr" || $0.hasPrefix("cr ") || $0.hasSuffix(" cr") || $0.contains("دائن"))
-                && !$0.contains("card")
-            })
-            refCol = headers.firstIndex(where: { $0.contains("ref") || $0.contains("cheque") || $0.contains("reference") || $0.contains("doc") })
             startRow = headerIndex + 1
         } else {
             // Headless table: scan lines to find the first actual transaction-like row instead of assuming lines[0]
@@ -1129,16 +1394,18 @@ enum StatementService {
             debitCol = nil
             creditCol = nil
             refCol = nil
+            typeCol = nil
         }
 
-        let docType = profile?.docType ?? .bankAccount
+        let docType = effectiveProfile?.docType ?? .bankAccount
 
         for i in startRow..<lines.count {
             let line = lines[i]
             let lowerLine = line.lowercased()
 
             // Skip opening/closing balance summary rows e.g. ",Opening Balance,,,BHD 431.841"
-            if lowerLine.contains("opening balance") || lowerLine.contains("closing balance") {
+            if lowerLine.contains("opening balance") || lowerLine.contains("closing balance")
+                || lowerLine.contains("الرصيد الافتتاحي") || lowerLine.contains("الرصيد الختامي") {
                 continue
             }
             if isHeaderOrFooterLine(line) { continue }
@@ -1151,7 +1418,7 @@ enum StatementService {
 
             var descRaw = cells.indices.contains(descCol) ? cells[descCol].trimmingCharacters(in: .whitespacesAndNewlines) : ""
             if descRaw.isEmpty {
-                let excluded: Set<Int> = Set([dateCol, amountCol, debitCol, creditCol, refCol].compactMap { $0 })
+                let excluded: Set<Int> = Set([dateCol, amountCol, debitCol, creditCol, refCol, typeCol].compactMap { $0 })
                 descRaw = cells.enumerated()
                     .filter { !excluded.contains($0.offset) }
                     .map { $0.element.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -1159,6 +1426,11 @@ enum StatementService {
                     .max(by: { $0.count < $1.count }) ?? ""
             }
             guard !descRaw.isEmpty else { continue }
+
+            let typeHint: String? = {
+                guard let tIdx = typeCol, cells.indices.contains(tIdx) else { return nil }
+                return cells[tIdx]
+            }()
 
             var amount: Double = 0
             var isIncome = false
@@ -1174,15 +1446,16 @@ enum StatementService {
                     amount = debitVal
                     isIncome = false
                 }
-            } else if let debitIdx = debitCol, cells.indices.contains(debitIdx) {
+            } else if let debitIdx = debitCol, cells.indices.contains(debitIdx), parseAmount(cells[debitIdx]) > 0 {
                 amount = parseAmount(cells[debitIdx])
-            } else if let creditIdx = creditCol, cells.indices.contains(creditIdx) {
+                isIncome = false
+            } else if let creditIdx = creditCol, cells.indices.contains(creditIdx), parseAmount(cells[creditIdx]) > 0 {
                 amount = parseAmount(cells[creditIdx])
                 isIncome = true
             } else if let amtIdx = amountCol, cells.indices.contains(amtIdx) {
                 let cellVal = cells[amtIdx]
                 amount = parseAmount(cellVal)
-                isIncome = determineIsIncome(amountString: cellVal, lineText: line, profile: profile)
+                isIncome = determineIsIncome(amountString: cellVal, lineText: line, profile: effectiveProfile, typeIndicator: typeHint)
             } else {
                 continue
             }
@@ -1210,7 +1483,7 @@ enum StatementService {
                 reference: refVal,
                 category: cat,
                 rawDescription: line,
-                isSelected: headerIndex >= 0 && !(profile?.docType == .generic && isAmbiguousNumericDate(dateRaw))
+                isSelected: true
             ))
         }
 
@@ -1418,8 +1691,32 @@ enum StatementService {
 
     // MARK: - Date & Amount Helpers
 
+    static func normalizeNumerals(_ string: String) -> String {
+        var result = ""
+        result.reserveCapacity(string.count)
+        for scalar in string.unicodeScalars {
+            switch scalar.value {
+            case 0x0660...0x0669: // Eastern Arabic ٠-٩
+                if let ascii = UnicodeScalar(0x0030 + (scalar.value - 0x0660)) {
+                    result.unicodeScalars.append(ascii)
+                }
+            case 0x06F0...0x06F9: // Persian ۰-۹
+                if let ascii = UnicodeScalar(0x0030 + (scalar.value - 0x06F0)) {
+                    result.unicodeScalars.append(ascii)
+                }
+            case 0x066B: // Arabic decimal separator ٫
+                result.append(".")
+            case 0x066C: // Arabic thousands separator ٬
+                result.append(",")
+            default:
+                result.unicodeScalars.append(scalar)
+            }
+        }
+        return result
+    }
+
     static func parseDate(_ string: String) -> Date? {
-        var clean = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        var clean = normalizeNumerals(string).trimmingCharacters(in: .whitespacesAndNewlines)
         clean = clean.trimmingCharacters(in: CharacterSet(charactersIn: ",;:.()[]{}|"))
         guard !clean.isEmpty else { return nil }
 
@@ -1486,6 +1783,18 @@ enum StatementService {
             }
         }
 
+        // Strip trailing ISO or clock timestamp if present (e.g. "2026-11-10 14:32:00" or "2026-11-10T14:32:00Z")
+        let timeSuffixPattern = #"[T\s]+\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:\s*(?:AM|PM|Z|[+-]\d{2}:?\d{2}))?$"#
+        if let timeRange = clean.range(of: timeSuffixPattern, options: [.regularExpression, .caseInsensitive]) {
+            let dateOnly = String(clean[..<timeRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+            for fmt in formats {
+                df.dateFormat = fmt
+                if let d = df.date(from: dateOnly), Calendar.current.component(.year, from: d) >= 1900 {
+                    return d
+                }
+            }
+        }
+
         // Strip day of week prefix if present (e.g. "Wed May 13 2026" or "Wed, May 13 2026")
         let dayPrefixPattern = #"^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*,?\s+"#
         if let dayRange = clean.range(of: dayPrefixPattern, options: [.regularExpression, .caseInsensitive]) {
@@ -1514,17 +1823,17 @@ enum StatementService {
     }
 
     static func parseAmount(_ string: String) -> Double {
-        var s = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        var s = normalizeNumerals(string).trimmingCharacters(in: .whitespacesAndNewlines)
         s = s.replacingOccurrences(of: #"[^0-9\.\,\-]"#, with: "", options: .regularExpression)
         guard !s.isEmpty else { return 0.0 }
 
         if s.contains(",") && s.contains(".") {
             if let commaIdx = s.lastIndex(of: ","), let dotIdx = s.lastIndex(of: ".") {
                 if commaIdx > dotIdx {
-                    // European format 1.250,50
+                    // European format 1.250,50 or 1.250,500
                     s = s.replacingOccurrences(of: ".", with: "").replacingOccurrences(of: ",", with: ".")
                 } else {
-                    // Standard format 1,250.50
+                    // Standard format 1,250.50 or 1,250.500
                     s = s.replacingOccurrences(of: ",", with: "")
                 }
             }
@@ -1549,6 +1858,167 @@ enum StatementService {
         return String(decoding: data, as: UTF8.self)
     }
 
+    // MARK: - Re-parse With Confirmed Column Mapping & Save to Knowledge Base
+
+    /// Re-parses a statement using user-confirmed or AI-suggested column/field mappings
+    /// and optionally saves the learned format to BankProfileRegistry for future automatic recognition.
+    static func applyConfirmedFieldMapping(
+        to currentResult: StatementParseResult,
+        bankName: String,
+        docType: StatementDocType,
+        signNotation: AmountSignNotation,
+        currency: String,
+        dateFormat: String?,
+        columnMapping: StatementColumnMapping,
+        saveToKnowledgeBase: Bool,
+        existingAccounts: [Account],
+        existingTransactions: [MoneyTransaction]
+    ) -> StatementParseResult {
+        let learnedProfile: BankProfileRule
+        if saveToKnowledgeBase {
+            learnedProfile = BankProfileRegistry.learnFromConfirmedStatement(
+                bankName: bankName,
+                docType: docType,
+                signNotation: signNotation,
+                primaryCurrency: currency,
+                dateFormat: dateFormat,
+                columnMapping: columnMapping,
+                headerKeywords: currentResult.detectedHeaders
+            )
+        } else {
+            learnedProfile = BankProfileRule(
+                id: "temp_confirmed_profile",
+                bankName: bankName.isEmpty ? (currentResult.detectedBank ?? "Bank Statement") : bankName,
+                docType: docType,
+                headerKeywords: currentResult.detectedHeaders,
+                signNotation: signNotation,
+                datePatterns: dateFormat.map { [$0] } ?? ["dd/MM/yyyy", "yyyy-MM-dd"],
+                primaryCurrency: currency.isEmpty ? "BHD" : currency,
+                columnMapping: columnMapping,
+                isAILearned: true
+            )
+        }
+
+        var updated = currentResult
+        updated.detectedBank = learnedProfile.bankName
+        updated.detectedCurrency = learnedProfile.primaryCurrency
+        updated.detectedColumnMapping = columnMapping
+        updated.profileName = "\(learnedProfile.bankName) (\(learnedProfile.docType.rawValue))"
+        updated.aiFieldMappingNeedsConfirmation = false
+
+        if !currentResult.rawFullText.isEmpty && columnMapping.hasAnyMapping {
+            let remappedItems = parseCSVRows(currentResult.rawFullText, profile: learnedProfile, customMapping: columnMapping)
+            if !remappedItems.isEmpty {
+                updated.items = remappedItems
+                updated.inconsistencies.removeAll()
+                updated.confidenceScore = max(updated.confidenceScore, 0.90)
+            }
+        }
+        if updated.matchedAccountID == nil {
+            updated.matchedAccountID = matchAccount(
+                ibanOrAcc: updated.detectedAccountIBAN,
+                cardLast4: updated.detectedCardLast4,
+                bank: updated.detectedBank,
+                in: existingAccounts
+            )?.id
+        }
+        return flagDuplicates(in: updated, against: existingTransactions)
+    }
+
+    // MARK: - Option 2: AI-Assisted Statement Recognition (Fallback Mechanism)
+
+    /// Uses AI to analyze an unrecognized, incomplete, or low-confidence bank statement,
+    /// identify column mappings and transaction values, and return structured results for user confirmation.
+    static func analyzeWithAIFallback(
+        fileData: Data,
+        filename: String,
+        existingResult: StatementParseResult? = nil,
+        existingAccounts: [Account],
+        existingTransactions: [MoneyTransaction]
+    ) async throws -> (parseResult: StatementParseResult, recognition: AIStatementRecognitionResult) {
+        let baseResult = existingResult ?? parse(
+            fileData: fileData,
+            filename: filename,
+            existingAccounts: existingAccounts,
+            existingTransactions: existingTransactions
+        )
+
+        var rawText = baseResult.rawFullText
+        if rawText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let ext = (filename as NSString).pathExtension.lowercased()
+            let isPDF = ext == "pdf" || (fileData.count >= 4 && fileData[0] == 0x25 && fileData[1] == 0x50 && fileData[2] == 0x44 && fileData[3] == 0x46)
+            if isPDF, let doc = PDFDocument(data: fileData) {
+                for i in 0..<doc.pageCount {
+                    if let page = doc.page(at: i), let s = page.string { rawText += s + "\n" }
+                }
+                if rawText.trimmingCharacters(in: .whitespacesAndNewlines).count < 20 {
+                    rawText = extractTextViaOCR(from: doc)
+                }
+            } else {
+                rawText = decodeString(from: fileData)
+            }
+        }
+
+        let aiRecognition = try await AIService.analyzeBankStatement(
+            rawText: rawText,
+            filename: filename,
+            detectedHeaders: baseResult.detectedHeaders
+        )
+
+        let tempProfile = BankProfileRule(
+            id: "ai_fallback_temp",
+            bankName: aiRecognition.detectedBank ?? baseResult.detectedBank ?? "Bank Statement",
+            docType: aiRecognition.docType,
+            headerKeywords: baseResult.detectedHeaders,
+            signNotation: aiRecognition.signNotation,
+            datePatterns: aiRecognition.dateFormat.map { [$0] } ?? ["dd/MM/yyyy", "yyyy-MM-dd"],
+            primaryCurrency: aiRecognition.currency,
+            columnMapping: aiRecognition.columnMapping,
+            isAILearned: true
+        )
+
+        // If the statement is tabular and AI mapped the column headers, also test full-table extraction with those headers
+        // so statements with many rows beyond the AI token window are extracted completely.
+        var finalItems = aiRecognition.items
+        if aiRecognition.columnMapping.hasAnyMapping && !rawText.isEmpty {
+            let mappedRows = parseCSVRows(rawText, profile: tempProfile, customMapping: aiRecognition.columnMapping)
+            if mappedRows.count > finalItems.count {
+                finalItems = mappedRows
+            }
+        }
+
+        let finalBank = aiRecognition.detectedBank ?? baseResult.detectedBank
+        let finalIBAN = aiRecognition.accountIBAN ?? baseResult.detectedAccountIBAN
+        let finalCard = aiRecognition.cardLast4 ?? baseResult.detectedCardLast4
+        let matchedAcc = matchAccount(ibanOrAcc: finalIBAN, cardLast4: finalCard, bank: finalBank, in: existingAccounts)
+
+        var mergedResult = StatementParseResult(
+            items: finalItems,
+            detectedBank: finalBank,
+            detectedAccountIBAN: finalIBAN,
+            detectedCardLast4: finalCard,
+            matchedAccountID: matchedAcc?.id ?? baseResult.matchedAccountID,
+            format: baseResult.format,
+            statementPeriodStart: baseResult.statementPeriodStart,
+            statementPeriodEnd: baseResult.statementPeriodEnd,
+            rawTextSnippet: String(rawText.prefix(400)),
+            rawFullText: rawText,
+            profileName: "\(tempProfile.bankName) (\(tempProfile.docType.rawValue) • AI Assisted)",
+            confidenceScore: aiRecognition.confidence,
+            openingBalance: aiRecognition.openingBalance ?? baseResult.openingBalance,
+            closingBalance: aiRecognition.closingBalance ?? baseResult.closingBalance,
+            inconsistencies: aiRecognition.uncertaintyNotes,
+            detectedCurrency: aiRecognition.currency,
+            detectedHeaders: baseResult.detectedHeaders,
+            detectedColumnMapping: aiRecognition.columnMapping,
+            isAIFallbackResult: true,
+            aiFieldMappingNeedsConfirmation: true
+        )
+
+        mergedResult = flagDuplicates(in: mergedResult, against: existingTransactions)
+        return (mergedResult, aiRecognition)
+    }
+
     // MARK: - Safe Import Execution (Never Modifies Account Balances)
 
     /// Imports confirmed transactions into SwiftData.
@@ -1564,7 +2034,7 @@ enum StatementService {
         var skipped = 0
 
         for item in items {
-            guard item.isSelected && !item.isDuplicate else {
+            guard item.isSelected else {
                 skipped += 1
                 continue
             }
