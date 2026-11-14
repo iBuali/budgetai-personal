@@ -651,25 +651,19 @@ final class MoneyTransaction {
             reasons.append("Unmatched account")
         }
 
-        // Unknown transaction type
-        if smsTransactionType == .unknown {
-            reasons.append("Unknown transaction type")
-        }
-
         if reasons.isEmpty && isPending {
             reasons.append("Waiting for approval")
         }
         return reasons
     }
 
-    /// True if this transaction meets the quarantine criteria (unknown bank, unmatched account/balance, or uncertain).
+    /// True if this transaction meets the quarantine criteria (unknown bank or unmatched account).
     var isUnmatchedOrUncertain: Bool {
         guard source == .sms else { return isPending }
         let bankClean = smsBank?.trimmingCharacters(in: .whitespacesAndNewlines)
         let bankUnknown = accountID == nil && (bankClean == nil || bankClean?.isEmpty == true || bankClean?.lowercased().contains("unknown") == true)
         let accountUnmatched = accountID == nil
-        let uncertain = smsTransactionType == .unknown
-        return bankUnknown || accountUnmatched || uncertain || isPending
+        return bankUnknown || accountUnmatched || isPending
     }
 }
 
