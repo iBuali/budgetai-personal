@@ -36,9 +36,10 @@ struct BudgetsView: View {
                     Button { showNewBudget = true } label: {
                         Label("New budget", systemImage: "plus").font(.headline).frame(maxWidth: .infinity).padding(.vertical, 8)
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.glassProminent)
+                    .tint(Theme.cobalt)
                     .controlSize(.large)
-                    .buttonBorderShape(.roundedRectangle(radius: 18))
+                    .buttonBorderShape(.capsule)
                 }
                 .padding(.horizontal, 16)
                 .padding(.bottom, 24)

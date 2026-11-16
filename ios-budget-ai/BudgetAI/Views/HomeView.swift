@@ -286,34 +286,33 @@ struct HomeView: View {
 
                 Spacer()
 
-                HStack(spacing: 2) {
-                    ForEach(SpendingChartStyle.allCases) { style in
-                        Button {
-                            withAnimation(.snappy(duration: 0.25)) {
-                                chartStyle = style
-                            }
-                        } label: {
-                            HStack(spacing: 4) {
-                                Image(systemName: style.symbol)
-                                    .font(.caption.weight(.semibold))
-                                Text(style.rawValue)
-                                    .font(.caption.weight(.semibold))
-                            }
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .foregroundStyle(chartStyle == style ? .white : Theme.secondaryInk)
-                            .background {
-                                if chartStyle == style {
-                                    Capsule().fill(Theme.cobalt)
+                GlassEffectContainer(spacing: 2) {
+                    HStack(spacing: 2) {
+                        ForEach(SpendingChartStyle.allCases) { style in
+                            Button {
+                                withAnimation(.snappy(duration: 0.25)) {
+                                    chartStyle = style
                                 }
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: style.symbol)
+                                        .font(.caption.weight(.semibold))
+                                    Text(style.rawValue)
+                                        .font(.caption.weight(.semibold))
+                                }
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .foregroundStyle(chartStyle == style ? .white : Theme.secondaryInk)
+                                .glassEffect(
+                                    chartStyle == style ? .regular.tint(Theme.cobalt).interactive() : .regular.interactive(),
+                                    in: Capsule()
+                                )
                             }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("\(style.rawValue) chart")
                         }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("\(style.rawValue) chart")
                     }
                 }
-                .padding(3)
-                .background(Theme.track.opacity(0.85), in: Capsule())
             }
 
             Picker("Range", selection: $range) {

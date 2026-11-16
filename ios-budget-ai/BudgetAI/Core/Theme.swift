@@ -15,7 +15,7 @@ enum Theme {
     static let expense = Color(hex: 0xF05252)
     static let warning = Color(hex: 0xE9A23B)
     static let track = Color(hex: 0xE6E9F0)
-    static let cardRadius: CGFloat = 22
+    static let cardRadius: CGFloat = 24
     static let corner: CGFloat = 16
 }
 
@@ -35,8 +35,7 @@ struct CardModifier: ViewModifier {
         content
             .padding(padding)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous))
-            .shadow(color: Theme.ink.opacity(0.04), radius: 14, y: 4)
+            .glassEffect(.regular, in: .rect(cornerRadius: Theme.cardRadius))
     }
 }
 

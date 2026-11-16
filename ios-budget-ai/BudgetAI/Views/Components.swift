@@ -201,9 +201,9 @@ struct AIBadge: View {
         Label("AI", systemImage: "sparkles")
             .font(.caption2.weight(.semibold))
             .foregroundStyle(Theme.cobalt)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(Theme.cobaltSoft, in: Capsule())
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .glassEffect(.regular.tint(Theme.cobalt), in: Capsule())
     }
 }
 
@@ -295,8 +295,7 @@ struct Toast: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
-        .background(.regularMaterial, in: Capsule())
-        .shadow(color: .black.opacity(0.1), radius: 16, y: 6)
+        .glassEffect(.regular, in: Capsule())
         .padding(.horizontal, 24)
     }
 }

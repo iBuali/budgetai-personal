@@ -2,7 +2,7 @@ import SwiftUI
 import SwiftData
 
 enum TxFilter: String, CaseIterable, Identifiable {
-    case all = "All", income = "Income", expenses = "Expenses", transfers = "Transfers", review = "Needs Review"
+    case all = "All", income = "Income", expenses = "Expenses", transfers = "Transfers", review = "Review"
     var id: String { rawValue }
 }
 
