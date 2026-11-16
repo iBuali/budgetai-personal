@@ -266,6 +266,41 @@ struct HomeView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    @ViewBuilder
+    private func chartStyleToggleButtons(useGlass: Bool) -> some View {
+        HStack(spacing: 2) {
+            ForEach(SpendingChartStyle.allCases) { style in
+                let isSelected = chartStyle == style
+                let pill = HStack(spacing: 4) {
+                    Image(systemName: style.symbol)
+                        .font(.caption.weight(.semibold))
+                    Text(style.rawValue)
+                        .font(.caption.weight(.semibold))
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .foregroundStyle(isSelected ? .white : Theme.secondaryInk)
+
+                Button {
+                    withAnimation(.snappy(duration: 0.25)) {
+                        chartStyle = style
+                    }
+                } label: {
+                    if useGlass, #available(iOS 26.0, *) {
+                        pill.glassEffect(
+                            isSelected ? .regular.tint(Theme.cobalt).interactive() : .regular.interactive(),
+                            in: Capsule()
+                        )
+                    } else {
+                        pill.background(isSelected ? Theme.cobalt : Theme.track, in: Capsule())
+                    }
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("\(style.rawValue) chart")
+            }
+        }
+    }
+
     private func spendingCard(_ f: Finance) -> some View {
         let breakdown = f.categoryBreakdown(range)
         let totalSpent = breakdown.reduce(0) { $0 + $1.amount }
@@ -286,32 +321,12 @@ struct HomeView: View {
 
                 Spacer()
 
-                GlassEffectContainer(spacing: 2) {
-                    HStack(spacing: 2) {
-                        ForEach(SpendingChartStyle.allCases) { style in
-                            Button {
-                                withAnimation(.snappy(duration: 0.25)) {
-                                    chartStyle = style
-                                }
-                            } label: {
-                                HStack(spacing: 4) {
-                                    Image(systemName: style.symbol)
-                                        .font(.caption.weight(.semibold))
-                                    Text(style.rawValue)
-                                        .font(.caption.weight(.semibold))
-                                }
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 6)
-                                .foregroundStyle(chartStyle == style ? .white : Theme.secondaryInk)
-                                .glassEffect(
-                                    chartStyle == style ? .regular.tint(Theme.cobalt).interactive() : .regular.interactive(),
-                                    in: Capsule()
-                                )
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("\(style.rawValue) chart")
-                        }
+                if #available(iOS 26.0, *) {
+                    GlassEffectContainer(spacing: 2) {
+                        chartStyleToggleButtons(useGlass: true)
                     }
+                } else {
+                    chartStyleToggleButtons(useGlass: false)
                 }
             }
 

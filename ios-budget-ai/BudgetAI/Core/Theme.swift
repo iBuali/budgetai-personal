@@ -31,11 +31,16 @@ extension Color {
 struct CardModifier: ViewModifier {
     var padding: CGFloat
 
+    @ViewBuilder
     func body(content: Content) -> some View {
-        content
+        let base = content
             .padding(padding)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .glassEffect(.regular, in: .rect(cornerRadius: Theme.cardRadius))
+        if #available(iOS 26.0, *) {
+            base.glassEffect(.regular, in: .rect(cornerRadius: Theme.cardRadius))
+        } else {
+            base.background(Theme.card, in: RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous))
+        }
     }
 }
 

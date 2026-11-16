@@ -33,13 +33,17 @@ struct BudgetsView: View {
                     overview(f, interval: interval)
                     categorySection(f, interval: interval)
                     goalsSection
-                    Button { showNewBudget = true } label: {
+                    let newBudgetBtn = Button { showNewBudget = true } label: {
                         Label("New budget", systemImage: "plus").font(.headline).frame(maxWidth: .infinity).padding(.vertical, 8)
                     }
-                    .buttonStyle(.glassProminent)
                     .tint(Theme.cobalt)
                     .controlSize(.large)
                     .buttonBorderShape(.capsule)
+                    if #available(iOS 26.0, *) {
+                        newBudgetBtn.buttonStyle(.glassProminent)
+                    } else {
+                        newBudgetBtn.buttonStyle(.borderedProminent)
+                    }
                 }
                 .padding(.horizontal, 16)
                 .padding(.bottom, 24)

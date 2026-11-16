@@ -198,12 +198,16 @@ extension SectionTitle where Trailing == EmptyView {
 
 struct AIBadge: View {
     var body: some View {
-        Label("AI", systemImage: "sparkles")
+        let label = Label("AI", systemImage: "sparkles")
             .font(.caption2.weight(.semibold))
             .foregroundStyle(Theme.cobalt)
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
-            .glassEffect(.regular.tint(Theme.cobalt), in: Capsule())
+        if #available(iOS 26.0, *) {
+            label.glassEffect(.regular.tint(Theme.cobalt), in: Capsule())
+        } else {
+            label.background(Theme.cobaltSoft, in: Capsule())
+        }
     }
 }
 
@@ -289,14 +293,22 @@ struct Toast: View {
     var color: Color = Theme.positive
 
     var body: some View {
-        HStack(spacing: 10) {
+        let pill = HStack(spacing: 10) {
             Image(systemName: symbol).foregroundStyle(color)
             Text(text).font(.subheadline.weight(.medium)).foregroundStyle(Theme.ink).lineLimit(2)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
-        .glassEffect(.regular, in: Capsule())
-        .padding(.horizontal, 24)
+        if #available(iOS 26.0, *) {
+            pill
+                .glassEffect(.regular, in: Capsule())
+                .padding(.horizontal, 24)
+        } else {
+            pill
+                .background(.regularMaterial, in: Capsule())
+                .shadow(color: .black.opacity(0.08), radius: 12, y: 4)
+                .padding(.horizontal, 24)
+        }
     }
 }
 
