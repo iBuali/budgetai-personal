@@ -1627,7 +1627,7 @@ enum SMSImporter {
                 modified = true
             }
             if tx.smsTransactionType == .unknown {
-                if tx.category != .internalTransfer {
+                if tx.category != .internalTransfer && !tx.aiCategorized && tx.categoryRaw.isEmpty {
                     tx.category = .other
                 }
                 if tx.isPending,

@@ -686,10 +686,6 @@ struct TransactionDetailRulesSection: View {
                             rule: item.rule,
                             accounts: accounts,
                             isHighlighted: true,
-                            canMoveUp: item.originalIndex > 0,
-                            canMoveDown: item.originalIndex < store.rules.count - 1,
-                            onMoveUp: { store.moveRuleUp(id: item.rule.id) },
-                            onMoveDown: { store.moveRuleDown(id: item.rule.id) },
                             onToggle: { store.toggleRule(id: item.rule.id) },
                             onEdit: { editingRule = item.rule },
                             onDelete: { store.deleteRule(id: item.rule.id) }
@@ -731,10 +727,6 @@ struct TransactionRuleRowCard: View {
     let rule: TransactionRule
     let accounts: [Account]
     var isHighlighted: Bool = false
-    let canMoveUp: Bool
-    let canMoveDown: Bool
-    let onMoveUp: () -> Void
-    let onMoveDown: () -> Void
     let onToggle: () -> Void
     let onEdit: () -> Void
     let onDelete: () -> Void
@@ -744,158 +736,125 @@ struct TransactionRuleRowCard: View {
         return accounts.first(where: { $0.id == id })?.name
     }
 
+    private var actionSummaryText: String {
+        var parts: [String] = []
+        if let cat = rule.actions.category {
+            parts.append("Category: \(cat.title)")
+        }
+        if let overrideID = rule.actions.overrideAccountID, let acc = accountName(overrideID) {
+            parts.append("Route to \(acc)")
+        }
+        if let fromName = accountName(rule.actions.fromAccountID),
+           let toName = accountName(rule.actions.toAccountID) {
+            parts.append("\(fromName) → \(toName)")
+        } else if let fromName = accountName(rule.actions.fromAccountID), rule.actions.overrideAccountID == nil {
+            parts.append(fromName)
+        }
+        if let merchant = rule.actions.setMerchant {
+            parts.append("Merchant: \"\(merchant)\"")
+        }
+        if let loc = rule.actions.setLocationName {
+            parts.append("Location: \(loc)")
+        }
+        if let goalID = rule.actions.setGoalID {
+            parts.append("Goal (\(goalID.uuidString.prefix(4)))")
+        }
+        return parts.isEmpty ? "Apply rule actions" : parts.joined(separator: " · ")
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
+            // Row 1: #Priority + Rule Name + Toggle
             HStack(spacing: 8) {
-                Text("Rule \(priorityNumber)")
-                    .font(.caption2.weight(.bold))
+                Text("#\(priorityNumber)")
+                    .font(.caption.weight(.bold))
                     .padding(.horizontal, 8)
                     .padding(.vertical, 3)
-                    .background(rule.isEnabled ? Theme.brand : Color.secondary, in: Capsule())
-                    .foregroundStyle(.white)
+                    .background(Theme.cobaltSoft, in: Capsule())
+                    .foregroundStyle(Theme.cobalt)
 
-                if isHighlighted {
-                    HStack(spacing: 5) {
-                        ZStack {
-                            Circle()
-                                .fill(Theme.income)
-                                .frame(width: 13, height: 13)
-                            Image(systemName: "checkmark")
-                                .font(.system(size: 7, weight: .black))
-                                .foregroundStyle(.white)
-                        }
-                        Text("Matches Transaction")
-                            .font(.caption2.weight(.bold))
-                            .foregroundStyle(Theme.income)
-                    }
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 3)
-                    .background(Theme.income.opacity(0.12), in: Capsule())
-                    .overlay(Capsule().stroke(Theme.income.opacity(0.35), lineWidth: 1))
-                }
+                Text(rule.name.isEmpty ? "Rule \(priorityNumber)" : rule.name)
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(Theme.ink)
+                    .lineLimit(1)
 
-                Spacer()
-
-                // Reorder priority buttons (drag & drop is supported in list, arrow controls here)
-                HStack(spacing: 4) {
-                    Button(action: onMoveUp) {
-                        Image(systemName: "arrow.up")
-                            .font(.caption2.weight(.bold))
-                            .frame(width: 24, height: 24)
-                            .background(Theme.track, in: Circle())
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(!canMoveUp)
-                    .opacity(canMoveUp ? 1 : 0.35)
-
-                    Button(action: onMoveDown) {
-                        Image(systemName: "arrow.down")
-                            .font(.caption2.weight(.bold))
-                            .frame(width: 24, height: 24)
-                            .background(Theme.track, in: Circle())
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(!canMoveDown)
-                    .opacity(canMoveDown ? 1 : 0.35)
-                }
+                Spacer(minLength: 8)
 
                 Toggle("", isOn: Binding(
                     get: { rule.isEnabled },
                     set: { _ in onToggle() }
                 ))
                 .labelsHidden()
-                .scaleEffect(0.8)
+                .tint(Theme.positive)
             }
 
-            // IF Conditions summary
-            let joiner = " \(rule.logic.rawValue) "
-            let condText = rule.conditions.map { "\($0.field.label): \($0.displayValue)" }.joined(separator: joiner)
-            Text("IF \(condText)")
-                .font(.caption)
-                .foregroundStyle(Theme.ink)
-                .lineLimit(2)
+            // Row 2: IF (AND/OR) + condition pills
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    Text("IF (\(rule.logic.rawValue))")
+                        .font(.caption2.weight(.bold))
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 4)
+                        .background(Theme.track, in: Capsule())
+                        .foregroundStyle(Theme.secondaryInk)
 
-            // THEN Actions summary
+                    ForEach(Array(rule.conditions.enumerated()), id: \.offset) { _, cond in
+                        Text("\(cond.field.label): \(cond.displayValue)")
+                            .font(.caption2.weight(.medium))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Theme.track.opacity(0.7), in: Capsule())
+                            .foregroundStyle(Theme.ink)
+                            .lineLimit(1)
+                    }
+                }
+            }
+
+            // Row 3: THEN + action summary + Edit/Delete buttons
             HStack(spacing: 8) {
                 Text("THEN")
                     .font(.caption2.weight(.bold))
-                    .foregroundStyle(Theme.secondaryInk)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 4)
+                    .background(Theme.cobaltSoft, in: Capsule())
+                    .foregroundStyle(Theme.cobalt)
 
-                if let cat = rule.actions.category {
-                    Label(cat.rawValue, systemImage: cat.symbol)
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(cat.color)
-                }
+                Text(actionSummaryText)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(Theme.ink)
+                    .lineLimit(1)
 
-                if let overrideID = rule.actions.overrideAccountID, let acc = accountName(overrideID) {
-                    Text("• Route to \(acc)")
-                        .font(.caption2)
-                        .foregroundStyle(Theme.secondaryInk)
-                        .lineLimit(1)
-                }
+                Spacer(minLength: 8)
 
-                if let fromName = accountName(rule.actions.fromAccountID),
-                   let toName = accountName(rule.actions.toAccountID) {
-                    Text("• \(fromName) → \(toName)")
-                        .font(.caption2)
-                        .foregroundStyle(Theme.secondaryInk)
-                        .lineLimit(1)
-                } else if let fromName = accountName(rule.actions.fromAccountID), rule.actions.overrideAccountID == nil {
-                    Text("• \(fromName)")
-                        .font(.caption2)
-                        .foregroundStyle(Theme.secondaryInk)
-                        .lineLimit(1)
-                }
-
-                if let merchant = rule.actions.setMerchant {
-                    Text("• \"\(merchant)\"")
-                        .font(.caption2)
-                        .foregroundStyle(Theme.secondaryInk)
-                        .lineLimit(1)
-                }
-
-                if let loc = rule.actions.setLocationName {
-                    Label(loc, systemImage: "mappin.and.ellipse")
-                        .font(.caption2)
-                        .foregroundStyle(Theme.secondaryInk)
-                        .lineLimit(1)
-                }
-
-                Spacer()
-
-                // Enhanced Edit & Delete Buttons
                 Button(action: onEdit) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "pencil")
-                            .font(.caption2.weight(.bold))
-                        Text("Edit")
-                            .font(.caption2.weight(.semibold))
-                    }
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 5)
-                    .background(Theme.brand.opacity(0.12), in: Capsule())
-                    .foregroundStyle(Theme.brand)
+                    Image(systemName: "pencil")
+                        .font(.caption.weight(.semibold))
+                        .frame(width: 28, height: 28)
+                        .background(Theme.cobaltSoft, in: Circle())
+                        .foregroundStyle(Theme.cobalt)
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Edit rule")
 
                 Button(role: .destructive, action: onDelete) {
                     Image(systemName: "trash")
-                        .font(.caption2.weight(.semibold))
-                        .padding(6)
+                        .font(.caption.weight(.semibold))
+                        .frame(width: 28, height: 28)
                         .background(Theme.expense.opacity(0.12), in: Circle())
                         .foregroundStyle(Theme.expense)
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Delete rule")
             }
         }
-        .padding(12)
+        .padding(14)
         .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Theme.track.opacity(rule.isEnabled ? 0.45 : 0.22))
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Theme.card)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(isHighlighted ? Theme.income.opacity(0.45) : Color.clear, lineWidth: 1)
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(isHighlighted ? Theme.income.opacity(0.45) : Theme.track.opacity(0.6), lineWidth: 1)
         )
     }
 }
@@ -935,10 +894,6 @@ struct TransactionRulesListView: View {
                             rule: rule,
                             accounts: accounts,
                             isHighlighted: false,
-                            canMoveUp: index > 0,
-                            canMoveDown: index < store.rules.count - 1,
-                            onMoveUp: { store.moveRuleUp(id: rule.id) },
-                            onMoveDown: { store.moveRuleDown(id: rule.id) },
                             onToggle: { store.toggleRule(id: rule.id) },
                             onEdit: { editingRule = rule },
                             onDelete: { store.deleteRule(id: rule.id) }
@@ -978,8 +933,8 @@ struct TransactionRulesListView: View {
                 }
             }
         }
-        .navigationTitle("")
-        .navigationBarTitleDisplayMode(.inline)
+        .navigationTitle("Transaction Rules")
+        .navigationBarTitleDisplayMode(.large)
         .toolbar {
             if !store.rules.isEmpty {
                 ToolbarItem(placement: .topBarTrailing) {

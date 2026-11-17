@@ -339,7 +339,7 @@ struct TransactionsView: View {
                 }
                 ToolbarItemGroup(placement: .topBarTrailing) {
                     Button {
-                        withAnimation(.snappy) { mode = mode == .list ? .calendar : .list }
+                        mode = mode == .list ? .calendar : .list
                     } label: {
                         Image(systemName: mode == .list ? "calendar" : "list.bullet")
                     }
@@ -673,12 +673,28 @@ struct TransactionCalendar: View {
 
             let symbols = cal.veryShortWeekdaySymbols
             let ordered = Array(symbols[(cal.firstWeekday - 1)...] + symbols[..<(cal.firstWeekday - 1)])
-            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 4), count: 7), spacing: 6) {
-                ForEach(Array(ordered.enumerated()), id: \.offset) { _, s in
-                    Text(s).font(.caption2.weight(.semibold)).foregroundStyle(Theme.secondaryInk)
+            let allDays = days
+            let weekCount = (allDays.count + 6) / 7
+            VStack(spacing: 6) {
+                HStack(spacing: 4) {
+                    ForEach(Array(ordered.enumerated()), id: \.offset) { _, s in
+                        Text(s)
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(Theme.secondaryInk)
+                            .frame(maxWidth: .infinity)
+                    }
                 }
-                ForEach(Array(days.enumerated()), id: \.offset) { _, day in
-                    if let day { cell(day) } else { Color.clear.frame(height: 48) }
+                ForEach(0..<weekCount, id: \.self) { week in
+                    HStack(spacing: 4) {
+                        ForEach(0..<7, id: \.self) { col in
+                            let idx = week * 7 + col
+                            if idx < allDays.count, let day = allDays[idx] {
+                                cell(day)
+                            } else {
+                                Color.clear.frame(maxWidth: .infinity).frame(height: 48)
+                            }
+                        }
+                    }
                 }
             }
         }
