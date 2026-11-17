@@ -1246,14 +1246,16 @@ struct TransactionDetailView: View {
                 )
             }
 
-            Picker("Account", selection: Binding(get: { tx.accountID }, set: { newID in
-                Ledger.edit(tx, context: context) { target in
-                    target.accountID = newID
-                }
-            })) {
-                Text(isSMSTransaction ? "Unknown" : "None").tag(UUID?.none)
-                ForEach(accounts) { a in Text(a.menuTitle).tag(UUID?.some(a.id)) }
-            }
+            AccountPickerRow(
+                title: "Account",
+                selection: Binding(get: { tx.accountID }, set: { newID in
+                    Ledger.edit(tx, context: context) { target in
+                        target.accountID = newID
+                    }
+                }),
+                accounts: accounts,
+                noneLabel: isSMSTransaction ? "Unknown" : "None"
+            )
 
             transferAccountPickers
 

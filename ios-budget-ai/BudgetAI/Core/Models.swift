@@ -68,6 +68,7 @@ struct SpendCategory: Hashable, Identifiable {
         var color: Color
         var isEssential: Bool
         var isIncome: Bool
+        var isTransfer: Bool = false
         var parentKey: String
     }
 
@@ -102,9 +103,9 @@ struct SpendCategory: Hashable, Identifiable {
         "subscriptions": Info(title: "Subscriptions", shortTitle: "Subscriptions", symbol: "play.rectangle.fill", emoji: "", color: Color(hex: 0xF05252), isEssential: false, isIncome: false, parentKey: ""),
         "education": Info(title: "Education", shortTitle: "Education", symbol: "graduationcap.fill", emoji: "", color: Color(hex: 0x0891B2), isEssential: true, isIncome: false, parentKey: ""),
         "travel": Info(title: "Travel", shortTitle: "Travel", symbol: "airplane", emoji: "", color: Color(hex: 0x0EA5E9), isEssential: false, isIncome: false, parentKey: ""),
-        "visa_transfer": Info(title: "Transfer to Visa Card", shortTitle: "Visa Card", symbol: "creditcard.fill", emoji: "", color: Color(hex: 0xF08A24), isEssential: false, isIncome: false, parentKey: ""),
-        "internal_transfer": Info(title: "Internal Transfer", shortTitle: "Internal", symbol: "arrow.left.arrow.right.circle.fill", emoji: "", color: Theme.cobalt, isEssential: false, isIncome: false, parentKey: ""),
-        "transfers": Info(title: "Transfers", shortTitle: "Transfers", symbol: "arrow.left.arrow.right", emoji: "", color: Color(hex: 0x6B7385), isEssential: false, isIncome: false, parentKey: ""),
+        "visa_transfer": Info(title: "Transfer to Visa Card", shortTitle: "Visa Card", symbol: "creditcard.fill", emoji: "", color: Color(hex: 0xF08A24), isEssential: false, isIncome: false, isTransfer: true, parentKey: ""),
+        "internal_transfer": Info(title: "Internal Transfer", shortTitle: "Internal", symbol: "arrow.left.arrow.right.circle.fill", emoji: "", color: Theme.cobalt, isEssential: false, isIncome: false, isTransfer: true, parentKey: ""),
+        "transfers": Info(title: "Transfers", shortTitle: "Transfers", symbol: "arrow.left.arrow.right", emoji: "", color: Color(hex: 0x6B7385), isEssential: false, isIncome: false, isTransfer: true, parentKey: ""),
         "income": Info(title: "Income", shortTitle: "Income", symbol: "arrow.down", emoji: "", color: Color(hex: 0x2BB673), isEssential: false, isIncome: true, parentKey: ""),
         "other": Info(title: "Other", shortTitle: "Other", symbol: "square.grid.2x2.fill", emoji: "", color: Color(hex: 0x8A93A6), isEssential: false, isIncome: false, parentKey: ""),
     ]
@@ -122,6 +123,7 @@ struct SpendCategory: Hashable, Identifiable {
     /// Essential spending is protected when calculating Safe to Spend.
     var isEssential: Bool { info.isEssential }
     var isIncomeCategory: Bool { info.isIncome }
+    var isTransferCategory: Bool { info.isTransfer }
     var isBuiltIn: Bool { SpendCategory.builtInInfo[rawValue] != nil }
     var isSubcategory: Bool { false }
     var parent: SpendCategory? { nil }
@@ -131,8 +133,9 @@ struct SpendCategory: Hashable, Identifiable {
     static var allCases: [SpendCategory] {
         builtIns + CategoryRegistry.shared.topLevel.filter { c in SpendCategory.builtInInfo[c.rawValue] == nil && !c.isIncomeCategory } + CategoryRegistry.shared.topLevel.filter { c in SpendCategory.builtInInfo[c.rawValue] == nil && c.isIncomeCategory }
     }
-    static var expenseCases: [SpendCategory] { allCases.filter { !$0.isIncomeCategory } }
-    static var incomeCases: [SpendCategory] { allCases.filter(\.isIncomeCategory) }
+    static var expenseCases: [SpendCategory] { allCases.filter { !$0.isIncomeCategory && !$0.isTransferCategory } }
+    static var incomeCases: [SpendCategory] { allCases.filter { $0.isIncomeCategory && !$0.isTransferCategory } }
+    static var transferCases: [SpendCategory] { allCases.filter(\.isTransferCategory) }
 }
 
 /// User-created category or sub-category (parentKey set).
@@ -145,10 +148,11 @@ final class CustomCategory {
     var colorHex: Int = 0x1E3FAE
     var parentKey: String = ""
     var isIncome: Bool = false
+    var isTransfer: Bool = false
     var isEssential: Bool = false
     var createdAt: Date = Date()
 
-    init(name: String, emoji: String, colorHex: Int, parentKey: String = "", isIncome: Bool = false, isEssential: Bool = false, key: String? = nil) {
+    init(name: String, emoji: String, colorHex: Int, parentKey: String = "", isIncome: Bool = false, isTransfer: Bool = false, isEssential: Bool = false, key: String? = nil) {
         let id = UUID()
         self.id = id
         self.key = key ?? ("c-" + id.uuidString.prefix(8).lowercased())
@@ -157,6 +161,7 @@ final class CustomCategory {
         self.colorHex = colorHex
         self.parentKey = parentKey
         self.isIncome = isIncome
+        self.isTransfer = isTransfer
         self.isEssential = isEssential
         self.createdAt = Date()
     }
@@ -192,6 +197,7 @@ final class CategoryRegistry {
                 color: Color(hex: UInt32(c.colorHex)),
                 isEssential: c.isEssential,
                 isIncome: c.isIncome,
+                isTransfer: c.isTransfer,
                 parentKey: "")
             topKeys.append(c.key)
         }
@@ -595,7 +601,7 @@ final class MoneyTransaction {
     var effectiveTransactionType: SMSTransactionType {
         if category == .internalTransfer || category == .visaTransfer { return .internalTransfer }
         if let t = smsTransactionType { return t }
-        if category == .transfers {
+        if category.isTransferCategory {
             if toAccountID != nil { return .internalTransfer }
             return isIncome ? .transferIn : .transferOut
         }
@@ -610,7 +616,7 @@ final class MoneyTransaction {
     }
 
     var isTransfer: Bool {
-        if category == .internalTransfer || category == .visaTransfer || category == .transfers { return true }
+        if category.isTransferCategory { return true }
         if let t = smsTransactionType { return t.isTransferType }
         return false
     }
@@ -623,13 +629,13 @@ final class MoneyTransaction {
     var signedAmount: Double { isIncome ? amount : -amount }
 
     var isSpending: Bool {
-        if category == .internalTransfer || category == .visaTransfer || category == .transfers { return false }
+        if category.isTransferCategory { return false }
         if let t = smsTransactionType { return t.countsAsExpense }
         return !isIncome
     }
 
     var isOrdinaryIncome: Bool {
-        if category == .internalTransfer || category == .visaTransfer || category == .transfers { return false }
+        if category.isTransferCategory { return false }
         if let t = smsTransactionType { return t.countsAsIncome }
         return isIncome
     }

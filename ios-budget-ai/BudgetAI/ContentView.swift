@@ -2,7 +2,7 @@ import SwiftUI
 import SwiftData
 import LocalAuthentication
 
-enum AppTab: Hashable { case home, transactions, budgets, insights, profile }
+enum AppTab: Hashable { case home, transactions, budgets, insights, accounts }
 
 @Observable
 final class AppState {
@@ -12,6 +12,9 @@ final class AppState {
     var toastIsWarning = false
     var showAddTransaction = false
     var showPasteSMS = false
+    var showDrawer = false
+    var showNotifications = false
+    var showSettings = false
 
     func openTransactions(filter: TxFilter) {
         requestedTransactionsFilter = filter
@@ -122,9 +125,10 @@ struct MainTabs: View {
             Tab("Transactions", systemImage: "list.bullet", value: AppTab.transactions) { TransactionsView() }
             Tab("Budgets", systemImage: "chart.bar.fill", value: AppTab.budgets) { BudgetsView() }
             Tab("Insights", systemImage: "lightbulb.fill", value: AppTab.insights) { InsightsView() }
-            Tab("Profile", systemImage: "person.fill", value: AppTab.profile) { ProfileView() }
+            Tab("Accounts", systemImage: "square.3.layers.3d", value: AppTab.accounts) { NetWorthView() }
         }
         .sensoryFeedback(.selection, trigger: appState.tab)
+        .sheet(isPresented: $state.showSettings) { ProfileView() }
     }
 }
 

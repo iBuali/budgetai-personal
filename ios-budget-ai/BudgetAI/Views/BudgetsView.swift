@@ -15,6 +15,7 @@ struct BudgetsView: View {
     @State private var editingGoal: SavingsGoal?
     @State private var showNewGoal = false
     @State private var expandedBudgets: Set<UUID> = []
+    @State private var showMonthStrip = false
 
     private var finance: Finance {
         Finance(transactions: transactions, accounts: accounts, budgets: budgets, goals: goals, bills: bills)
@@ -153,7 +154,7 @@ struct BudgetsView: View {
                                     HStack(alignment: .top) {
                                         VStack(alignment: .leading, spacing: 2) {
                                             Text(budget.displayName)
-                                                .font(.body.weight(.semibold))
+                                                .font(.subheadline.weight(.semibold))
                                                 .foregroundStyle(Theme.ink)
                                                 .lineLimit(1)
                                                 .minimumScaleFactor(0.85)
@@ -278,7 +279,7 @@ struct BudgetsView: View {
                                 VStack(alignment: .leading, spacing: 2) {
                                     HStack(spacing: 6) {
                                         Text(goal.name)
-                                            .font(.body.weight(.semibold))
+                                            .font(.subheadline.weight(.semibold))
                                             .foregroundStyle(Theme.ink)
                                             .lineLimit(1)
                                             .minimumScaleFactor(0.85)

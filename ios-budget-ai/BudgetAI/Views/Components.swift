@@ -3,20 +3,20 @@ import SwiftUI
 struct IconBadge: View {
     let symbol: String
     let color: Color
-    var size: CGFloat = 44
+    var size: CGFloat = 32
 
     var body: some View {
         Image(systemName: symbol)
-            .font(.system(size: size * 0.4, weight: .semibold))
+            .font(.system(size: size * 0.45, weight: .semibold))
             .foregroundStyle(color)
             .frame(width: size, height: size)
-            .background(color.opacity(0.13), in: RoundedRectangle(cornerRadius: size * 0.3, style: .continuous))
+            .background(color.opacity(0.13), in: RoundedRectangle(cornerRadius: size * 0.28, style: .continuous))
     }
 }
 
 struct CategoryIcon: View {
     let category: SpendCategory
-    var size: CGFloat = 44
+    var size: CGFloat = 32
     var body: some View {
         if category.emoji.isEmpty {
             IconBadge(symbol: category.symbol, color: category.color, size: size)
@@ -29,19 +29,19 @@ struct CategoryIcon: View {
 struct EmojiBadge: View {
     let emoji: String
     let color: Color
-    var size: CGFloat = 44
+    var size: CGFloat = 32
 
     var body: some View {
         Text(emoji)
             .font(.system(size: size * 0.5))
             .frame(width: size, height: size)
-            .background(color.opacity(0.13), in: RoundedRectangle(cornerRadius: size * 0.3, style: .continuous))
+            .background(color.opacity(0.13), in: RoundedRectangle(cornerRadius: size * 0.28, style: .continuous))
     }
 }
 
 struct AccountIcon: View {
     let account: Account
-    var size: CGFloat = 40
+    var size: CGFloat = 32
     var body: some View {
         if account.emoji.isEmpty {
             IconBadge(symbol: account.kind.symbol, color: account.kind.color, size: size)
@@ -198,16 +198,17 @@ extension SectionTitle where Trailing == EmptyView {
 
 struct AIBadge: View {
     var body: some View {
-        let label = Label("AI", systemImage: "sparkles")
-            .font(.caption2.weight(.semibold))
-            .foregroundStyle(Theme.cobalt)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 3)
-        if #available(iOS 26.0, *) {
-            label.glassEffect(.regular.tint(Theme.cobalt), in: Capsule())
-        } else {
-            label.background(Theme.cobaltSoft, in: Capsule())
+        HStack(spacing: 3) {
+            Image(systemName: "sparkles")
+                .font(.system(size: 10, weight: .semibold))
+            Text("AI")
+                .font(.caption2.weight(.bold))
         }
+        .foregroundStyle(Theme.cobalt)
+        .padding(.horizontal, 7)
+        .padding(.vertical, 3)
+        .background(Theme.cobaltSoft, in: Capsule())
+        .fixedSize()
     }
 }
 
@@ -224,7 +225,7 @@ struct TransactionRow: View {
             }
             VStack(alignment: .leading, spacing: 3) {
                 Text(tx.merchant.isEmpty ? tx.displayCategory.title : tx.merchant)
-                    .font(.body.weight(.medium))
+                    .font(.subheadline.weight(.medium))
                     .foregroundStyle(Theme.ink)
                     .lineLimit(2)
                     .minimumScaleFactor(0.85)
@@ -255,17 +256,22 @@ struct TransactionRow: View {
                     .padding(.vertical, 2.5)
                     .background(Theme.warning.opacity(0.14), in: Capsule())
                 } else if tx.isPossibleDuplicate {
-                    Label("Possible duplicate", systemImage: "exclamationmark.circle.fill")
-                        .font(.subheadline)
-                        .foregroundStyle(Theme.negative)
-                } else {
-                    HStack(spacing: 4) {
-                        Text(subtitle).lineLimit(1)
-                        if tx.source == .sms { Image(systemName: "message.fill").font(.caption2) }
-                        if tx.balanceAdjustment != 0 { Image(systemName: "equal.circle.fill").font(.caption2).foregroundStyle(Theme.cobalt) }
+                    HStack(spacing: 5) {
+                        Image(systemName: "exclamationmark.circle.fill")
+                            .font(.caption2.weight(.bold))
+                        Text("Possible duplicate")
+                            .font(.caption.weight(.semibold))
+                            .lineLimit(1)
                     }
-                    .font(.subheadline)
-                    .foregroundStyle(Theme.secondaryInk)
+                    .foregroundStyle(Theme.negative)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2.5)
+                    .background(Theme.negative.opacity(0.14), in: Capsule())
+                } else {
+                    Text("\(subtitle) • \(tx.date.formatted(date: .omitted, time: .shortened))")
+                        .lineLimit(1)
+                        .font(.subheadline)
+                        .foregroundStyle(Theme.secondaryInk)
                 }
             }
             Spacer(minLength: 8)
@@ -331,5 +337,93 @@ struct GeminiConnectCard: View {
             .card()
         }
         .buttonStyle(PressableStyle())
+    }
+}
+
+struct AccountPickerRow: View {
+    let title: String
+    @Binding var selection: UUID?
+    let accounts: [Account]
+    var noneLabel: String = "None"
+    @State private var showSheet = false
+
+    private var selectedAccount: Account? {
+        accounts.first { $0.id == selection }
+    }
+
+    var body: some View {
+        HStack {
+            Text(title)
+                .foregroundStyle(Theme.ink)
+            Spacer()
+            Button {
+                showSheet = true
+            } label: {
+                HStack(spacing: 6) {
+                    if let acc = selectedAccount {
+                        AccountIcon(account: acc, size: 22)
+                        Text(acc.name)
+                            .lineLimit(1)
+                    } else {
+                        Text(noneLabel)
+                    }
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(Theme.secondaryInk)
+                }
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(Theme.ink)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Theme.track.opacity(0.65), in: Capsule())
+            }
+            .buttonStyle(.plain)
+        }
+        .sheet(isPresented: $showSheet) {
+            NavigationStack {
+                List {
+                    Button {
+                        selection = nil
+                        showSheet = false
+                    } label: {
+                        HStack(spacing: 12) {
+                            IconBadge(symbol: "questionmark.circle", color: Theme.secondaryInk, size: 32)
+                            Text(noneLabel).foregroundStyle(Theme.ink)
+                            Spacer()
+                            if selection == nil {
+                                Image(systemName: "checkmark").font(.subheadline.weight(.semibold)).foregroundStyle(Theme.cobalt)
+                            }
+                        }
+                    }
+                    ForEach(accounts) { acc in
+                        Button {
+                            selection = acc.id
+                            showSheet = false
+                        } label: {
+                            HStack(spacing: 12) {
+                                AccountIcon(account: acc, size: 32)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(acc.name).foregroundStyle(Theme.ink)
+                                    Text(acc.kind.title).font(.caption).foregroundStyle(Theme.secondaryInk)
+                                }
+                                Spacer()
+                                if selection == acc.id {
+                                    Image(systemName: "checkmark").font(.subheadline.weight(.semibold)).foregroundStyle(Theme.cobalt)
+                                }
+                            }
+                        }
+                    }
+                }
+                .navigationTitle(title)
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Done") { showSheet = false }
+                    }
+                }
+            }
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+        }
     }
 }

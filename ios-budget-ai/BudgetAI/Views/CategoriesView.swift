@@ -1,37 +1,79 @@
 import SwiftUI
 import SwiftData
 
+enum CategoryTab: String, CaseIterable, Identifiable {
+    case income = "Income", expenses = "Expenses", transfers = "Transfers"
+    var id: String { rawValue }
+}
+
 /// Manage built-in and custom categories.
 struct CategoriesView: View {
     @Environment(\.modelContext) private var context
     @Query(sort: \CustomCategory.createdAt) private var custom: [CustomCategory]
     @State private var editorTarget: CategoryEditorTarget?
+    @State private var selectedTab: CategoryTab = .expenses
+    @State private var searchText = ""
+
+    private var filteredCategories: [SpendCategory] {
+        let base: [SpendCategory]
+        switch selectedTab {
+        case .income:
+            base = SpendCategory.incomeCases
+        case .expenses:
+            base = SpendCategory.expenseCases
+        case .transfers:
+            base = SpendCategory.transferCases
+        }
+        guard !searchText.trimmingCharacters(in: .whitespaces).isEmpty else { return base }
+        return base.filter { $0.title.localizedCaseInsensitiveContains(searchText) }
+    }
 
     var body: some View {
         let registry = CategoryRegistry.shared
-        List {
-            Section {
-                ForEach(SpendCategory.expenseCases.filter { $0 != .transfers }) { categoryBlock($0) }
-            } header: {
-                Text("Expenses")
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 6) {
+                    ForEach(CategoryTab.allCases) { tab in
+                        Button {
+                            withAnimation(.snappy) { selectedTab = tab }
+                        } label: {
+                            Text(tab.rawValue)
+                                .font(.subheadline.weight(selectedTab == tab ? .semibold : .medium))
+                                .foregroundStyle(selectedTab == tab ? Theme.ink : Theme.secondaryInk)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 8)
+                                .background(selectedTab == tab ? Theme.track : Color.clear, in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+
+                Text(selectedTab.rawValue)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Theme.ink)
+                    .padding(.horizontal, 4)
+                    .padding(.top, 4)
+
+                VStack(spacing: 8) {
+                    ForEach(filteredCategories) { category in
+                        categoryBlock(category)
+                    }
+                }
             }
-            Section("Income") {
-                ForEach(SpendCategory.incomeCases) { categoryBlock($0) }
-            }
-            Section {
-                Button("New category", systemImage: "plus.circle.fill") { editorTarget = .new(parent: nil, income: false) }
-                Button("New income category", systemImage: "plus.circle") { editorTarget = .new(parent: nil, income: true) }
-            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 24)
         }
         .id(registry.order)
-        .scrollContentBackground(.hidden)
         .canvasBackground()
+        .searchable(text: $searchText, prompt: "Search")
         .navigationTitle("Categories")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.hidden, for: .tabBar)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                Button("New category", systemImage: "plus") { editorTarget = .new(parent: nil, income: false) }
+                Button("New category", systemImage: "plus") {
+                    editorTarget = .new(parent: nil, income: selectedTab == .income, transfer: selectedTab == .transfers)
+                }
             }
         }
         .sheet(item: $editorTarget) { CategoryEditor(target: $0) }
@@ -42,13 +84,15 @@ struct CategoriesView: View {
     private func categoryBlock(_ category: SpendCategory) -> some View {
         let customModel = model(category)
         HStack(spacing: 12) {
-            CategoryIcon(category: category, size: 36)
+            CategoryIcon(category: category, size: 32)
             VStack(alignment: .leading, spacing: 1) {
-                Text(category.title).foregroundStyle(Theme.ink)
+                Text(category.title)
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(Theme.ink)
                 if !category.isBuiltIn {
-                    Text("Custom").font(.caption).foregroundStyle(Theme.secondaryInk)
+                    Text("Custom").font(.caption2).foregroundStyle(Theme.secondaryInk)
                 } else if customModel != nil {
-                    Text("Modified").font(.caption).foregroundStyle(Theme.cobalt)
+                    Text("Modified").font(.caption2).foregroundStyle(Theme.cobalt)
                 }
             }
             Spacer()
@@ -56,6 +100,9 @@ struct CategoriesView: View {
                 .font(.caption2.weight(.semibold))
                 .foregroundStyle(Color(uiColor: .tertiaryLabel))
         }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 13)
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .contentShape(Rectangle())
         .onTapGesture {
             if let customModel {
@@ -72,13 +119,13 @@ struct CategoriesView: View {
 }
 
 enum CategoryEditorTarget: Identifiable {
-    case new(parent: String?, income: Bool)
+    case new(parent: String?, income: Bool, transfer: Bool = false)
     case edit(UUID)
     case editBuiltIn(String)
 
     var id: String {
         switch self {
-        case .new(let parent, let income): "new-\(parent ?? "root")-\(income)"
+        case .new(let parent, let income, let transfer): "new-\(parent ?? "root")-\(income)-\(transfer)"
         case .edit(let id): id.uuidString
         case .editBuiltIn(let key): "builtin-\(key)"
         }
@@ -96,6 +143,7 @@ struct CategoryEditor: View {
     @State private var colorHex = 0x1E3FAE
     @State private var parentKey = ""
     @State private var isIncome = false
+    @State private var isTransfer = false
     @State private var isEssential = false
     @State private var confirmDelete = false
     @State private var confirmReset = false
@@ -155,13 +203,21 @@ struct CategoryEditor: View {
 
                 Section {
                     if existing == nil && !isEditingBuiltIn {
-                        Picker("Type", selection: $isIncome) {
-                            Text("Expense").tag(false)
-                            Text("Income").tag(true)
+                        Picker("Type", selection: Binding(
+                            get: { isTransfer ? CategoryTab.transfers : (isIncome ? .income : .expenses) },
+                            set: { newTab in
+                                isIncome = (newTab == .income)
+                                isTransfer = (newTab == .transfers)
+                                if isIncome || isTransfer { isEssential = false }
+                            }
+                        )) {
+                            Text("Expense").tag(CategoryTab.expenses)
+                            Text("Income").tag(CategoryTab.income)
+                            Text("Transfer").tag(CategoryTab.transfers)
                         }
                         .pickerStyle(.segmented)
                     }
-                    if !isIncome {
+                    if !isIncome && !isTransfer {
                         Toggle("Essential spending", isOn: $isEssential)
                     }
                 }
@@ -235,9 +291,10 @@ struct CategoryEditor: View {
         guard !loaded else { return }
         loaded = true
         switch target {
-        case .new(let parent, let income):
+        case .new(let parent, let income, let transfer):
             parentKey = parent ?? ""
             isIncome = income
+            isTransfer = transfer
         case .edit:
             guard let c = existing else { return }
             name = c.name
@@ -245,6 +302,7 @@ struct CategoryEditor: View {
             colorHex = c.colorHex
             parentKey = c.parentKey
             isIncome = c.isIncome
+            isTransfer = c.isTransfer
             isEssential = c.isEssential
         case .editBuiltIn(let key):
             if let c = existing {
@@ -253,6 +311,7 @@ struct CategoryEditor: View {
                 colorHex = c.colorHex
                 parentKey = c.parentKey
                 isIncome = c.isIncome
+                isTransfer = c.isTransfer
                 isEssential = c.isEssential
             } else if let b = SpendCategory.builtInInfo[key] {
                 name = b.title
@@ -260,6 +319,7 @@ struct CategoryEditor: View {
                 colorHex = SpendCategory.builtInHex[key] ?? 0x1E3FAE
                 parentKey = b.parentKey
                 isIncome = b.isIncome
+                isTransfer = b.isTransfer
                 isEssential = b.isEssential
             }
         }
@@ -274,15 +334,17 @@ struct CategoryEditor: View {
             model.emoji = emoji
             model.colorHex = colorHex
             model.parentKey = parentKey
+            model.isTransfer = isTransfer
             model.isEssential = isEssential
         } else if let key = builtInKey {
             model = CustomCategory(name: trimmed, emoji: emoji, colorHex: colorHex, parentKey: parentKey,
-                                   isIncome: isIncome, isEssential: isEssential, key: key)
+                                   isIncome: isIncome, isTransfer: isTransfer, isEssential: isEssential, key: key)
             context.insert(model)
         } else {
             let parentIncome = parentKey.isEmpty ? isIncome : SpendCategory.unchecked(parentKey).isIncomeCategory
+            let parentTransfer = parentKey.isEmpty ? isTransfer : SpendCategory.unchecked(parentKey).isTransferCategory
             model = CustomCategory(name: trimmed, emoji: emoji, colorHex: colorHex, parentKey: parentKey,
-                                   isIncome: parentIncome, isEssential: isEssential)
+                                   isIncome: parentIncome, isTransfer: parentTransfer, isEssential: isEssential)
             context.insert(model)
         }
         try? context.save()
@@ -303,7 +365,9 @@ struct CategoryEditor: View {
     private func delete() {
         guard let c = existing else { return }
         let key = c.key
-        let fallback = c.parentKey.isEmpty ? (c.isIncome ? SpendCategory.income.rawValue : SpendCategory.other.rawValue) : c.parentKey
+        let fallback = c.parentKey.isEmpty
+            ? (c.isTransfer ? SpendCategory.transfers.rawValue : (c.isIncome ? SpendCategory.income.rawValue : SpendCategory.other.rawValue))
+            : c.parentKey
         let subKeys = Set(children(of: key).map(\.key))
         let txs = (try? context.fetch(FetchDescriptor<MoneyTransaction>())) ?? []
         for tx in txs {

@@ -242,17 +242,9 @@ struct HomeView: View {
                     .buttonStyle(.plain)
                 }
                 Spacer()
-                Button { appState.tab = .profile } label: {
-                    Text(initials)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(Theme.cobalt)
-                        .frame(width: 44, height: 44)
-                        .background(Theme.cobaltSoft, in: Circle())
-                }
-                .accessibilityLabel("Profile")
             }
             Text(Money.format(f.netWorth, currency))
-                .font(.system(size: 42, weight: .bold).monospacedDigit())
+                .font(.system(size: 32, weight: .bold).monospacedDigit())
                 .foregroundStyle(f.netWorth < 0 ? Theme.negative : Theme.ink)
                 .minimumScaleFactor(0.6)
                 .lineLimit(1)
@@ -934,37 +926,23 @@ struct BillRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            ZStack {
-                CategoryIcon(category: bill.category)
-                if isPaid {
-                    Circle()
-                        .strokeBorder(Theme.positive, lineWidth: 2)
-                        .background(Circle().fill(Theme.positive.opacity(0.12)))
-                }
+            if isPaid {
+                IconBadge(symbol: "checkmark", color: Theme.positive, size: 32)
+            } else {
+                CategoryIcon(category: bill.category, size: 32)
             }
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(bill.name)
-                    .font(.body.weight(.medium))
+                    .font(.subheadline.weight(.medium))
                     .foregroundStyle(isPaid ? Theme.secondaryInk : Theme.ink)
+                    .strikethrough(isPaid, color: Theme.secondaryInk)
                     .lineLimit(1)
 
                 if isPaid {
-                    HStack(spacing: 4) {
-                        Image(systemName: bill.lastPaidMethod == .autoSMS ? "sparkles" : "checkmark.circle.fill")
-                            .font(.caption2.weight(.bold))
-                            .foregroundStyle(bill.lastPaidMethod == .autoSMS ? Theme.cobalt : Theme.positive)
-
-                        Text("Paid for this month")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(Theme.positive)
-
-                        if let method = bill.lastPaidMethod {
-                            Text("· \(method.title)")
-                                .font(.caption2)
-                                .foregroundStyle(Theme.secondaryInk)
-                        }
-                    }
+                    Text("Paid · \(bill.lastPaidMethod == .autoSMS ? "Auto" : "Manual")")
+                        .font(.caption)
+                        .foregroundStyle(Theme.secondaryInk)
                 } else {
                     Text(dueText)
                         .font(.subheadline)
@@ -974,32 +952,16 @@ struct BillRow: View {
 
             Spacer()
 
-            VStack(alignment: .trailing, spacing: 2) {
-                Text(Money.format(isPaid ? (bill.lastPaidAmount ?? bill.amount) : bill.amount, currency))
-                    .font(.body.weight(.semibold).monospacedDigit())
-                    .foregroundStyle(isPaid ? Theme.secondaryInk : Theme.ink)
-                    .animatedNumber(bill.amount)
-
-                if isPaid {
-                    HStack(spacing: 3) {
-                        Image(systemName: "checkmark")
-                            .font(.system(size: 9, weight: .bold))
-                        Text(bill.lastPaidMethod == .autoSMS ? "Auto" : "Manual")
-                            .font(.system(size: 9, weight: .semibold))
-                    }
-                    .foregroundStyle(bill.lastPaidMethod == .autoSMS ? Theme.cobalt : Theme.positive)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background((bill.lastPaidMethod == .autoSMS ? Theme.cobalt : Theme.positive).opacity(0.12), in: Capsule())
-                    .scaleEffect(animateCheck ? 1.0 : 0.6)
-                    .animation(.spring(response: 0.45, dampingFraction: 0.6), value: animateCheck)
-                }
-            }
+            Text(Money.format(isPaid ? (bill.lastPaidAmount ?? bill.amount) : bill.amount, currency))
+                .font(.subheadline.weight(.semibold).monospacedDigit())
+                .foregroundStyle(isPaid ? Theme.secondaryInk : Theme.ink)
+                .animatedNumber(bill.amount)
 
             if !isPaid {
                 Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(.tertiary)
             }
         }
+        .opacity(isPaid ? 0.72 : 1)
         .contentShape(Rectangle())
         .onAppear {
             if isPaid {
