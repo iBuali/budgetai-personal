@@ -505,7 +505,7 @@ struct DrawerMenuToolbarButtons: View {
         var parts: [String] = []
         let cal = Calendar.current
         let soon = cal.date(byAdding: .day, value: 7, to: .now) ?? .now
-        for bill in bills where !bill.isPaidThisCycle && bill.nextDueDate <= soon {
+        for bill in bills where !bill.isPaidForCurrentCycle() && bill.nextDueDate <= soon {
             parts.append("bill-\(bill.id.uuidString)")
         }
         let reviewCount = transactions.filter { $0.isPending || $0.isPossibleDuplicate }.count
@@ -518,9 +518,11 @@ struct DrawerMenuToolbarButtons: View {
                 if pct >= 80 { parts.append("budget-\(b.id.uuidString)-\(pct)") }
             }
         }
-        let today = cal.component(.day, from: .now)
-        for acc in accounts where acc.kind.isLiability && acc.balance > 0 && acc.paymentDueDay > 0 && abs(acc.paymentDueDay - today) <= 5 {
-            parts.append("card-\(acc.id.uuidString)-\(acc.paymentDueDay)")
+        for acc in accounts where acc.kind.isLiability && acc.balance > 0 && acc.paymentDueReminder {
+            let days = acc.daysUntilDue()
+            if days <= 5 {
+                parts.append("card-\(acc.id.uuidString)-\(days)")
+            }
         }
         return parts.joined(separator: "|")
     }

@@ -385,7 +385,7 @@ private struct NotificationsPopoverCard: View {
         let todayStart = cal.startOfDay(for: .now)
         let soon = cal.date(byAdding: .day, value: 7, to: .now) ?? .now
 
-        for bill in bills where !bill.isPaidThisCycle && bill.nextDueDate <= soon {
+        for bill in bills where !bill.isPaidForCurrentCycle() && bill.nextDueDate <= soon {
             let days = cal.dateComponents([.day], from: todayStart, to: cal.startOfDay(for: bill.nextDueDate)).day ?? 0
             let dueTitle: String = {
                 if days < 0 { return "\(bill.name) is overdue" }
@@ -439,18 +439,21 @@ private struct NotificationsPopoverCard: View {
             }
         }
 
-        let todayDay = cal.component(.day, from: .now)
-        for acc in accounts where acc.kind.isLiability && acc.balance > 0 && acc.paymentDueDay > 0 && abs(acc.paymentDueDay - todayDay) <= 5 {
-            list.append(NotificationCardItem(
-                id: "card-\(acc.id.uuidString)-\(acc.paymentDueDay)",
-                title: "\(acc.name) payment due",
-                subtitle: "Due on day \(acc.paymentDueDay) · \(Money.format(acc.balance, currency))",
-                timeText: "Soon",
-                action: {
-                    onClose()
-                    appState.tab = .accounts
-                }
-            ))
+        for acc in accounts where acc.kind.isLiability && acc.balance > 0 && acc.paymentDueReminder {
+            let days = acc.daysUntilDue()
+            if days <= 5 {
+                let dueStr = acc.nextUpcomingDueDate().formatted(.dateTime.day().month(.abbreviated))
+                list.append(NotificationCardItem(
+                    id: "card-\(acc.id.uuidString)-\(days)",
+                    title: "\(acc.name) payment due",
+                    subtitle: "Due \(dueStr) · \(Money.format(acc.balance, currency))",
+                    timeText: days <= 0 ? "Today" : "In \(days)d",
+                    action: {
+                        onClose()
+                        appState.tab = .accounts
+                    }
+                ))
+            }
         }
 
         return list
