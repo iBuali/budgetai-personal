@@ -150,22 +150,20 @@ struct TransactionsView: View {
         let currentTotals = showSummary ? computeTotals(from: currentFiltered) : (0.0, 0.0)
 
         NavigationStack {
-            List {
-                Section {
+            VStack(spacing: 0) {
+                VStack(spacing: 8) {
                     searchPill
-                        .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 6, trailing: 16))
-                        .listRowBackground(Color.clear)
-                        .listRowSeparator(.hidden)
                     chips(needsReviewCount: currentNeedsReview.count)
-                        .listRowInsets(EdgeInsets(top: 2, leading: 16, bottom: 6, trailing: 16))
-                        .listRowBackground(Color.clear)
-                        .listRowSeparator(.hidden)
-                    if filters.activeCount > 0 {
-                        activeChips
-                            .listRowInsets(EdgeInsets())
-                            .listRowBackground(Color.clear)
-                    }
                 }
+                .padding(.horizontal, 16)
+                .padding(.top, 6)
+                .padding(.bottom, filters.activeCount > 0 ? 4 : 6)
+
+                if filters.activeCount > 0 {
+                    activeChips
+                }
+
+                List {
 
                 if filters.kind == .review {
                     if currentFiltered.isEmpty {
@@ -288,6 +286,7 @@ struct TransactionsView: View {
                     calendarSections(filtered: currentFiltered)
                 }
             }
+            }
             .listStyle(.insetGrouped)
             .scrollContentBackground(.hidden)
             .canvasBackground()
@@ -356,17 +355,6 @@ struct TransactionsView: View {
                         Image(systemName: filters.activeCount > 0 ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
                     }
                     .accessibilityLabel("Filters")
-
-                    Menu {
-                        Button("Add manually", systemImage: "doc.text") { appState.showAddTransaction = true }
-                        Button("Paste bank SMS", systemImage: "message") { appState.showPasteSMS = true }
-                        Divider()
-                        Button("Import Bank Statement", systemImage: "doc.badge.arrow.up") { showStatementImport = true }
-                        Button("Export Statement (Excel)", systemImage: "square.and.arrow.up") { showStatementExport = true }
-                    } label: {
-                        Image(systemName: "plus")
-                    }
-                    .accessibilityLabel("Add or Import")
                 }
             }
             .sheet(isPresented: $showFilters) {
@@ -553,40 +541,44 @@ struct TransactionsView: View {
     }
 
     private func chips(needsReviewCount: Int) -> some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 2) {
-                ForEach(TxFilter.allCases) { f in
-                    let isSelected = filters.kind == f
-                    Button {
-                        withAnimation(.snappy) { filters.kind = f }
-                    } label: {
-                        HStack(spacing: 5) {
-                            Text(f.rawValue)
-                            if f == .review && needsReviewCount > 0 {
-                                Text("\(needsReviewCount)")
-                                    .font(.caption2.bold().monospacedDigit())
-                                    .padding(.horizontal, 5)
-                                    .padding(.vertical, 1)
-                                    .background(isSelected ? .white.opacity(0.28) : Theme.warning, in: Capsule())
-                                    .foregroundStyle(.white)
-                            }
+        HStack(spacing: 2) {
+            ForEach(TxFilter.allCases) { f in
+                let isSelected = filters.kind == f
+                Button {
+                    withAnimation(.snappy) { filters.kind = f }
+                } label: {
+                    HStack(spacing: 3) {
+                        Text(f.rawValue)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
+                        if f == .review && needsReviewCount > 0 {
+                            Text("\(needsReviewCount)")
+                                .font(.caption2.bold().monospacedDigit())
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 1)
+                                .background(isSelected ? .white.opacity(0.28) : Theme.warning, in: Capsule())
+                                .foregroundStyle(.white)
+                                .fixedSize()
                         }
-                        .font(.subheadline.weight(isSelected ? .semibold : .medium))
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 7)
-                        .foregroundStyle(isSelected ? .white : Theme.secondaryInk)
-                        .background(
-                            isSelected ? (f == .review ? Theme.warning : Theme.cobalt) : Color.clear,
-                            in: Capsule()
-                        )
                     }
-                    .buttonStyle(PressableStyle())
+                    .font(.caption.weight(isSelected ? .semibold : .medium))
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 8)
+                    .foregroundStyle(isSelected ? .white : Theme.secondaryInk)
+                    .background(
+                        isSelected ? (f == .review ? Theme.warning : Theme.cobalt) : Color.clear,
+                        in: Capsule()
+                    )
+                    .contentShape(Capsule())
                 }
+                .buttonStyle(PressableStyle())
             }
-            .padding(4)
-            .background(Theme.surface, in: Capsule())
-            .shadow(color: .black.opacity(0.03), radius: 6, y: 2)
         }
+        .padding(4)
+        .frame(maxWidth: .infinity)
+        .background(Theme.surface, in: Capsule())
+        .shadow(color: .black.opacity(0.03), radius: 6, y: 2)
         .sensoryFeedback(.selection, trigger: filters.kind)
     }
 
@@ -801,6 +793,15 @@ struct TransactionFilterSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var draft = TxFilterState()
 
+    private var displayedCategories: [SpendCategory] {
+        switch draft.kind {
+        case .all, .review: return SpendCategory.allCases
+        case .income: return SpendCategory.incomeCases
+        case .expenses: return SpendCategory.expenseCases
+        case .transfers: return SpendCategory.transferCases
+        }
+    }
+
     var body: some View {
         NavigationStack {
             Form {
@@ -820,14 +821,24 @@ struct TransactionFilterSheet: View {
                     .pickerStyle(.segmented)
                 }
                 Section {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 104), spacing: 8)], spacing: 8) {
-                        ForEach(SpendCategory.allCases) { c in
-                            toggleChip(c.menuTitle, on: draft.categories.contains(c.rawValue)) {
-                                toggle(c.rawValue, in: &draft.categories)
+                    ForEach(displayedCategories) { c in
+                        let isSelected = draft.categories.contains(c.rawValue)
+                        Button {
+                            toggle(c.rawValue, in: &draft.categories)
+                        } label: {
+                            HStack(spacing: 12) {
+                                CategoryIcon(category: c, size: 32)
+                                Text(c.title)
+                                    .foregroundStyle(Theme.ink)
+                                Spacer()
+                                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                                    .foregroundStyle(isSelected ? Theme.cobalt : Color(hex: 0xC7CCD6))
+                                    .font(.title3)
                             }
+                            .contentShape(Rectangle())
                         }
+                        .buttonStyle(.plain)
                     }
-                    .padding(.vertical, 4)
                 } header: {
                     Text("Categories")
                 }
@@ -872,6 +883,10 @@ struct TransactionFilterSheet: View {
                 }
             }
             .onAppear { draft = filters }
+            .onChange(of: draft.kind) { _, _ in
+                let valid = Set(displayedCategories.map(\.rawValue))
+                draft.categories = draft.categories.intersection(valid)
+            }
             .sensoryFeedback(.selection, trigger: draft)
         }
         .presentationDetents([.large])
@@ -880,21 +895,6 @@ struct TransactionFilterSheet: View {
 
     private func toggle(_ key: String, in set: inout Set<String>) {
         if set.contains(key) { set.remove(key) } else { set.insert(key) }
-    }
-
-    private func toggleChip(_ title: String, on: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(title)
-                .font(.subheadline.weight(.medium))
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 9)
-                .padding(.horizontal, 8)
-                .foregroundStyle(on ? .white : Theme.ink)
-                .background(on ? Theme.cobalt : Theme.track.opacity(0.8), in: Capsule())
-        }
-        .buttonStyle(.plain)
     }
 }
 
@@ -1491,7 +1491,7 @@ struct TransactionDetailView: View {
 
     @ViewBuilder
     private var rulesSection: some View {
-        Section {
+        Section("Transaction Rules") {
             TransactionDetailRulesSection(tx: tx, accounts: accounts)
                 .listRowInsets(EdgeInsets())
                 .listRowBackground(Color.clear)
@@ -1526,31 +1526,23 @@ struct TransactionDetailView: View {
                         appState.show(clean.map { "Bank set to \($0)" } ?? "Cleared SMS bank")
                     }
                 ),
-                options: bankOptions
-            )
-
-            Button {
-                newSenderBankName = ""
-                showAddSenderBankAlert = true
-            } label: {
-                Label("Create Sender Bank...", systemImage: "plus.circle")
-            }
-            .alert("Create Sender Bank", isPresented: $showAddSenderBankAlert) {
-                TextField("Bank or sender name (e.g. HSBC)", text: $newSenderBankName)
-                Button("Add") {
-                    if let created = BahrainBankCatalog.addCustomBank(newSenderBankName) {
-                        commitPendingEdits(silent: true)
-                        Ledger.edit(tx, context: context) { target in
-                            target.smsBank = created
+                options: bankOptions,
+                addConfig: SheetPickerAddConfig(
+                    title: "Create Sender Bank",
+                    placeholder: "Bank or sender name",
+                    message: "Enter a bank or SMS sender name to add it to your sender bank list.",
+                    onAdd: { name in
+                        if let created = BahrainBankCatalog.addCustomBank(name) {
+                            commitPendingEdits(silent: true)
+                            Ledger.edit(tx, context: context) { target in
+                                target.smsBank = created
+                            }
+                            try? context.save()
+                            appState.show("Created & set bank to \(created)")
                         }
-                        try? context.save()
-                        appState.show("Created & set bank to \(created)")
                     }
-                }
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text("Enter a bank or SMS sender name to add it to your sender bank list.")
-            }
+                )
+            )
 
             LabeledContent("Reference") {
                 Text((tx.smsReference?.isEmpty == false) ? tx.smsReference! : "—")

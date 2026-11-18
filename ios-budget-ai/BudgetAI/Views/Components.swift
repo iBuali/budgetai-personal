@@ -665,6 +665,8 @@ struct AccountPickerRow: View {
                         }
                     }
                 }
+                .scrollContentBackground(.hidden)
+                .canvasBackground()
                 .navigationTitle(title)
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
@@ -687,11 +689,21 @@ struct SheetPickerOption<Value: Hashable>: Identifiable {
     var color: Color = Theme.cobalt
 }
 
+struct SheetPickerAddConfig {
+    let title: String
+    let placeholder: String
+    let message: String
+    let onAdd: (String) -> Void
+}
+
 struct SheetPickerRow<Value: Hashable>: View {
     let title: String
     @Binding var selection: Value
     let options: [SheetPickerOption<Value>]
+    var addConfig: SheetPickerAddConfig? = nil
     @State private var showSheet = false
+    @State private var showAddAlert = false
+    @State private var newItemText = ""
 
     private var selectedOption: SheetPickerOption<Value>? {
         options.first { $0.id == selection }
@@ -753,11 +765,33 @@ struct SheetPickerRow<Value: Hashable>: View {
                         }
                     }
                 }
+                .scrollContentBackground(.hidden)
+                .canvasBackground()
                 .navigationTitle(title)
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
                         Button("Done") { showSheet = false }
+                    }
+                    if addConfig != nil {
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Button("Add", systemImage: "plus") {
+                                newItemText = ""
+                                showAddAlert = true
+                            }
+                        }
+                    }
+                }
+                .alert(addConfig?.title ?? "Add", isPresented: $showAddAlert) {
+                    TextField(addConfig?.placeholder ?? "", text: $newItemText)
+                    Button("Add") {
+                        addConfig?.onAdd(newItemText)
+                        showSheet = false
+                    }
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    if let msg = addConfig?.message {
+                        Text(msg)
                     }
                 }
             }

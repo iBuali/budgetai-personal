@@ -54,6 +54,8 @@ struct StatementImportSheet: View {
                     emptyUploadPromptView
                 }
             }
+            .scrollContentBackground(.hidden)
+            .canvasBackground()
             .navigationTitle("Import Statement")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -852,6 +854,8 @@ struct StatementFieldMappingSheet: View {
                     Text("Once saved, future statements matching this bank and column structure will be recognized automatically on-device.")
                 }
             }
+            .scrollContentBackground(.hidden)
+            .canvasBackground()
             .navigationTitle("Field & Column Mapping")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -986,6 +990,8 @@ struct EditStatementItemSheet: View {
                     ))
                 }
             }
+            .scrollContentBackground(.hidden)
+            .canvasBackground()
             .navigationTitle("Edit Transaction")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

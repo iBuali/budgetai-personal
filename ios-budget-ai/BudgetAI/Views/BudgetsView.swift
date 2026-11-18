@@ -84,17 +84,6 @@ struct BudgetsView: View {
                     overview(f, interval: interval)
                     categorySection(f, interval: interval)
                     goalsSection
-                    let newBudgetBtn = Button { showNewBudget = true } label: {
-                        Label("New budget", systemImage: "plus").font(.headline).frame(maxWidth: .infinity).padding(.vertical, 8)
-                    }
-                    .tint(Theme.cobalt)
-                    .controlSize(.large)
-                    .buttonBorderShape(.capsule)
-                    if #available(iOS 26.0, *) {
-                        newBudgetBtn.buttonStyle(.glassProminent)
-                    } else {
-                        newBudgetBtn.buttonStyle(.borderedProminent)
-                    }
                 }
                 .padding(.horizontal, 16)
                 .padding(.bottom, 24)
@@ -549,6 +538,8 @@ struct BudgetEditor: View {
                     }
                 }
             }
+            .scrollContentBackground(.hidden)
+            .canvasBackground()
             .navigationTitle(budget == nil ? "New budget" : "Edit budget")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -710,7 +701,7 @@ struct GoalSheet: View {
                 } header: {
                     Text("Auto-save from SMS / Transfers")
                 } footer: {
-                    Text("Whenever an SMS transfer (such as Fawri+ to your savings IBAN ending in these digits) or transfer to the linked account is imported, its amount is automatically added to this goal.")
+                    Text("Matching SMS or account transfers are automatically added to this goal.")
                 }
                 Section("Icon") {
                     LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 5), spacing: 12) {
@@ -734,6 +725,8 @@ struct GoalSheet: View {
                     }
                 }
             }
+            .scrollContentBackground(.hidden)
+            .canvasBackground()
             .navigationTitle(goal == nil ? "New goal" : goal!.name)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -863,7 +856,7 @@ struct SafeToSpendView: View {
                      : "Divided evenly across the \(s.daysLeft) days left this month. Spend less today and tomorrow's amount grows.")
             }
 
-            let assets = accounts.filter { !$0.kind.isLiability }
+            let assets = accounts.filter { !$0.kind.isLiability && $0.includeInNetWorth }
             if !assets.isEmpty {
                 Section("Assets") {
                     ForEach(assets) { acc in
@@ -947,17 +940,10 @@ struct SafeToSpendView: View {
     private func row(_ title: String, _ subtitle: String, _ value: Double, symbol: String, color: Color, sign: Double) -> some View {
         HStack(spacing: 12) {
             IconBadge(symbol: symbol, color: color, size: 38)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .foregroundStyle(Theme.ink)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.85)
-                Text(subtitle)
-                    .font(.caption)
-                    .foregroundStyle(Theme.secondaryInk)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
-            }
+            Text(title)
+                .foregroundStyle(Theme.ink)
+                .lineLimit(1)
+                .minimumScaleFactor(0.85)
             Spacer(minLength: 8)
             Text(Money.format(value * sign, currency, signed: sign > 0))
                 .font(.body.weight(.medium).monospacedDigit())

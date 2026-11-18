@@ -164,6 +164,8 @@ struct StatementExportSheet: View {
                     .disabled(targetTransactions.isEmpty || isExporting)
                 }
             }
+            .scrollContentBackground(.hidden)
+            .canvasBackground()
             .navigationTitle("Export Statement")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

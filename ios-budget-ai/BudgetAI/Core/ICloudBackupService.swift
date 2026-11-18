@@ -593,8 +593,8 @@ final class ICloudBackupService {
                 faceID: UserDefaults.standard.bool(forKey: Keys.faceID),
                 billReminders: UserDefaults.standard.bool(forKey: Keys.billReminders),
                 budgetAlerts: UserDefaults.standard.bool(forKey: Keys.budgetAlerts),
-                smsAutoApprove: UserDefaults.standard.bool(forKey: Keys.smsAutoApprove),
-                smsSyncBalance: UserDefaults.standard.bool(forKey: Keys.smsSyncBalance)
+                smsAutoApprove: AppSettings.smsAutoApprove,
+                smsSyncBalance: AppSettings.smsSyncBalance
             )
 
             let backupID = UUID()

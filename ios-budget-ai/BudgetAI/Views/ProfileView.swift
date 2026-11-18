@@ -83,13 +83,10 @@ struct ProfileView: View {
                         row("Import Bank Statement", "doc.badge.arrow.up.fill", Theme.cobalt)
                     }
                     Button { showStatementExport = true } label: {
-                        row("Export Statement (Excel)", "square.and.arrow.up.fill", SpendCategory.shopping.color)
-                    }
-                    NavigationLink { SMSSetupGuideView() } label: {
-                        row("Automatic SMS import", "message.badge.filled.fill", Theme.positive)
+                        row("Export Statement (Excel)", "square.and.arrow.up.fill", Theme.cobalt)
                     }
                     Button { appState.showPasteSMS = true } label: {
-                        row("Paste bank SMS", "doc.on.clipboard.fill", SpendCategory.transport.color)
+                        row("Paste bank SMS", "doc.on.clipboard.fill", Theme.cobalt)
                     }
                     NavigationLink { TransactionRulesListView() } label: {
                         let count = TransactionRuleStore.shared.rules.count
@@ -194,7 +191,7 @@ struct ProfileView: View {
 
     private func row(_ title: String, _ symbol: String, _ color: Color, value: String? = nil) -> some View {
         HStack(spacing: 12) {
-            IconBadge(symbol: symbol, color: color, size: 32)
+            IconBadge(symbol: symbol, color: Theme.cobalt, size: 32)
             Text(title).foregroundStyle(Theme.ink)
             Spacer()
             if let value {

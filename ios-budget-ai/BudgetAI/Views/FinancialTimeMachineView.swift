@@ -665,6 +665,8 @@ struct AssumptionsEditor: View {
                     Text("Changes update the projection instantly. Your real transactions and balances are never changed.")
                 }
             }
+            .scrollContentBackground(.hidden)
+            .canvasBackground()
             .navigationTitle("Assumptions")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
@@ -838,6 +840,8 @@ struct OneTimeEventSheet: View {
                 }
                 DatePicker("Date", selection: $date, in: Date.now..., displayedComponents: .date)
             }
+            .scrollContentBackground(.hidden)
+            .canvasBackground()
             .navigationTitle(isIncome ? "One-time income" : "One-time expense")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

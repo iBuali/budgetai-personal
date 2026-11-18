@@ -253,6 +253,8 @@ struct CategoryEditor: View {
                     }
                 }
             }
+            .scrollContentBackground(.hidden)
+            .canvasBackground()
             .navigationTitle(existing == nil && !isEditingBuiltIn ? "New category" : "Edit category")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

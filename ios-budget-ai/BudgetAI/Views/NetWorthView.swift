@@ -162,18 +162,10 @@ struct NetWorthView: View {
                                 dueBadge(for: account)
                             }
                         }
-                        let baseSubtitle = account.institution.isEmpty ? account.kind.title : "\(account.kind.title) · \(account.institution)"
-                        let extraSubtitle: String = {
-                            if account.kind == .loan && account.loanMonthlyInstallment > 0 {
-                                return "\(baseSubtitle) · \(Money.format(account.loanMonthlyInstallment, currency))/mo"
-                            }
-                            return baseSubtitle
-                        }()
-                        Text(account.includeInNetWorth ? extraSubtitle : "\(extraSubtitle) · Excluded from net worth")
+                        Text(account.kind.title)
                             .font(.caption)
                             .foregroundStyle(Theme.secondaryInk)
                             .lineLimit(1)
-                            .minimumScaleFactor(0.8)
                     }
                     Spacer(minLength: 8)
                     let signedBalance = account.kind.isLiability ? -account.balance : account.balance
@@ -198,7 +190,9 @@ struct NetWorthView: View {
                         progress: account.loanPaidProgress,
                         tint: Theme.positive,
                         leadingText: "Paid \(Money.format(account.loanPaidAmount, currency))",
-                        trailingText: "Remaining \(Money.format(account.loanRemainingBalance, currency))"
+                        trailingText: account.loanMonthlyInstallment > 0
+                            ? "\(Money.format(account.loanMonthlyInstallment, currency))/mo"
+                            : "Remaining \(Money.format(account.loanRemainingBalance, currency))"
                     )
                 }
             }
@@ -242,7 +236,10 @@ struct NetWorthView: View {
             }
             Text(label)
                 .font(.caption2.weight(.semibold))
+                .lineLimit(1)
         }
+        .fixedSize(horizontal: true, vertical: false)
+        .layoutPriority(1)
         .foregroundStyle(tint)
         .padding(.horizontal, 6)
         .padding(.vertical, 2)
@@ -309,7 +306,7 @@ struct AccountEditor: View {
                     EmojiPicker(emoji: $emoji, suggestions: EmojiPicker.accountSuggestions)
                 }
                 Section {
-                    TextField("Name (e.g. NBB Current)", text: $name)
+                    TextField("Name (e.g. Checking Account)", text: $name)
                     SheetPickerRow(
                         title: "Type",
                         selection: $kind,
@@ -468,6 +465,8 @@ struct AccountEditor: View {
                     }
                 }
             }
+            .scrollContentBackground(.hidden)
+            .canvasBackground()
             .navigationTitle(account == nil ? "New account" : "Edit account")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

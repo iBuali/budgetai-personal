@@ -70,7 +70,7 @@ struct AddTransactionSheet: View {
                     transferSections
                 } else {
                     Section {
-                        TextField(isIncome ? "From (e.g. Salary)" : "Merchant (e.g. Lulu Hypermarket)", text: $merchant)
+                        TextField(isIncome ? "From (e.g. Salary)" : "Merchant (e.g. Grocery Store)", text: $merchant)
                             .textInputAutocapitalization(.words)
                             .onChange(of: merchant) { _, value in
                                 guard !userPickedCategory else { return }
@@ -314,7 +314,7 @@ struct PasteSMSSheet: View {
                         .frame(minHeight: 140)
                         .overlay(alignment: .topLeading) {
                             if text.isEmpty {
-                                Text("Paste one or more bank SMS alerts (English or Arabic), e.g. \"Your NBB card ending 1234 was used for BHD 6.750 at TALABAT on 24-Oct.\"")
+                                Text("Paste one or more bank SMS alerts (English or Arabic) to import.")
                                     .foregroundStyle(.tertiary)
                                     .padding(.top, 8)
                                     .padding(.leading, 4)
@@ -324,60 +324,25 @@ struct PasteSMSSheet: View {
                     Button("Paste from clipboard", systemImage: "doc.on.clipboard") {
                         if let s = UIPasteboard.general.string { text = s }
                     }
-                    Menu {
-                        Button("BisB · Fawri+ Outgoing (EN)") {
-                            sender = "BisB"
-                            text = "Fawri+ payment BHD3.000, ref: BIB103KAK000KZUM was credited to IBAN ending 0846 on 2026/10/27 15:26. Balance BHD263.195. Tel: 17515151"
-                        }
-                        Button("NBB Card · Talabat (EN)") {
-                            sender = "NBB"
-                            text = "Your NBB card ending 1234 was used for BHD 6.750 at TALABAT BH on 24-Oct. Avl Bal: BHD 412.300"
-                        }
-                        Button("BenefitPay · Fawri+ Transfer (EN)") {
-                            sender = "BenefitPay"
-                            text = "BenefitPay: Fawri+ transfer of BHD 15.000 to COLD STORE from IBAN xx4821 completed. Available Balance: BHD 397.300"
-                        }
-                        Button("ila Bank · Lulu Hypermarket (AR)") {
-                            sender = "ila"
-                            text = "بنك إلى: تم خصم مبلغ ١٨.٤٥٠ د.ب باستخدام البطاقة رقم 9921 لدى اللولو هايبرماركت. الرصيد المتاح: ٣٧٨.٨٥٠ د.ب"
-                        }
-                        Button("Salary Credit · BBK (EN)") {
-                            sender = "BBK"
-                            text = "BBK: Salary of BHD 1,250.000 has been credited to your account ending 8801. Avl Bal: BHD 1,628.850"
-                        }
-                        Button("BisB · Visa Card Payment (EN)") {
-                            sender = "BisB"
-                            text = "Dear ISA, Thank you for paying BHD 457.558 on 24/10 for your VISA INFINITE card. Available Bal BHD 5000. Tel 17515151"
-                        }
-                    } label: {
-                        Label("Try sample SMS (EN / عربي)", systemImage: "text.bubble")
-                    }
-                    TextField("Sender ID / phone (optional, e.g. BisB)", text: $sender)
+                    TextField("Sender ID / phone (optional, e.g. MyBank)", text: $sender)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                     SheetPickerRow(
                         title: "SMS sender bank",
                         selection: $manualBank,
                         options: [SheetPickerOption(id: "", title: "Detect automatically", symbol: "sparkles", color: Theme.cobalt)]
-                            + BahrainBankCatalog.allBanks.map { SheetPickerOption(id: $0, title: $0, symbol: "building.columns", color: Theme.secondaryInk) }
-                    )
-                    Button {
-                        newSenderBankName = ""
-                        showAddSenderBankAlert = true
-                    } label: {
-                        Label("Create Sender Bank...", systemImage: "plus.circle")
-                    }
-                    .alert("Create Sender Bank", isPresented: $showAddSenderBankAlert) {
-                        TextField("Bank or sender name (e.g. HSBC)", text: $newSenderBankName)
-                        Button("Add") {
-                            if let created = BahrainBankCatalog.addCustomBank(newSenderBankName) {
-                                manualBank = created
+                            + BahrainBankCatalog.allBanks.map { SheetPickerOption(id: $0, title: $0, symbol: "building.columns", color: Theme.secondaryInk) },
+                        addConfig: SheetPickerAddConfig(
+                            title: "Create Sender Bank",
+                            placeholder: "Bank or sender name",
+                            message: "Enter a bank or SMS sender name to add it to your sender bank list.",
+                            onAdd: { name in
+                                if let created = BahrainBankCatalog.addCustomBank(name) {
+                                    manualBank = created
+                                }
                             }
-                        }
-                        Button("Cancel", role: .cancel) {}
-                    } message: {
-                        Text("Enter a bank or SMS sender name to add it to your sender bank list.")
-                    }
+                        )
+                    )
                     AccountPickerRow(
                         title: "Account",
                         selection: $accountID,
@@ -388,9 +353,9 @@ struct PasteSMSSheet: View {
                     HStack(spacing: 4) {
                         if GeminiAccount.isConfigured {
                             Image(systemName: "sparkles")
-                            Text("Deterministic Bahrain bank rules run first; Gemini is used only for uncertain messages.")
+                            Text("On-device bank rules run first; Gemini handles uncertain messages.")
                         } else {
-                            Text("Deterministic on-device Bahrain & GCC bank rules with Fawri+ direction and duplicate checks.")
+                            Text("On-device bank rules with transfer direction and duplicate checks.")
                         }
                     }
                 }

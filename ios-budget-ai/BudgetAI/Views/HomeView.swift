@@ -164,6 +164,7 @@ struct HomeView: View {
     @State private var showAllCategories = false
     @State private var showCustomizeItems = false
     @State private var billToPay: Bill?
+    @State private var showStatementImport = false
 
     private var finance: Finance {
         Finance(transactions: transactions, accounts: accounts, budgets: budgets, goals: goals, bills: bills)
@@ -196,6 +197,7 @@ struct HomeView: View {
                     Menu {
                         Button("Add transaction", systemImage: "plus") { appState.showAddTransaction = true }
                         Button("Paste bank SMS", systemImage: "message") { appState.showPasteSMS = true }
+                        Button("Import bank statement", systemImage: "doc.badge.arrow.up") { showStatementImport = true }
                     } label: {
                         Image(systemName: "plus")
                     }
@@ -217,6 +219,9 @@ struct HomeView: View {
                     orderRaw: $homeAccountOrder,
                     hiddenRaw: $homeHiddenAccounts
                 )
+            }
+            .sheet(isPresented: $showStatementImport) {
+                StatementImportSheet()
             }
             .confirmationDialog("Mark \(billToPay?.name ?? "bill") as paid?", isPresented: Binding(get: { billToPay != nil }, set: { if !$0 { billToPay = nil } }), titleVisibility: .visible) {
                 Button("Paid \(Money.format(billToPay?.amount ?? 0, currency))") {
@@ -631,7 +636,7 @@ struct HomeView: View {
                         .minimumScaleFactor(0.75)
                         .layoutPriority(1)
                         .animatedNumber(safe.daily)
-                    Text("\(Money.format(safe.monthly, currency)) safe of \(Money.format(safe.spendable, currency)) · \(safe.daysLeft)d left")
+                    Text("\(Money.format(safe.monthly, currency)) for the next \(safe.daysLeft) day\(safe.daysLeft == 1 ? "" : "s")")
                         .font(.subheadline.monospacedDigit())
                         .foregroundStyle(Theme.secondaryInk)
                         .lineLimit(1)
@@ -901,6 +906,8 @@ private struct HomeFinancialItemsCustomizeSheet: View {
                 }
             }
             .environment(\.editMode, .constant(.active))
+            .scrollContentBackground(.hidden)
+            .canvasBackground()
             .navigationTitle("Customize Items")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

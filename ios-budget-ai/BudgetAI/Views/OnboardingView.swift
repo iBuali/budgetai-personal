@@ -157,6 +157,8 @@ struct CurrencyPickerView: View {
             Section("All currencies") { ForEach(all, id: \.self, content: row) }
         }
         .searchable(text: $query, prompt: "Search currency")
+        .scrollContentBackground(.hidden)
+        .canvasBackground()
         .navigationTitle("Currency")
         .navigationBarTitleDisplayMode(.inline)
     }

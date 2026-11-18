@@ -62,9 +62,9 @@ struct BillsView: View {
                     }
                 } header: {
                     HStack {
-                        Label("Paid this month · \(paidThisMonth.count)", systemImage: "checkmark.seal.fill")
+                        Text("Paid this month · \(paidThisMonth.count)")
                             .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(Theme.positive)
+                            .foregroundStyle(Theme.ink)
                         Spacer()
                     }
                     .textCase(nil)
@@ -155,13 +155,13 @@ struct BillEditor: View {
         NavigationStack {
             Form {
                 Section {
-                    TextField("Name (e.g. Batelco Fiber)", text: $name)
+                    TextField("Name (e.g. Internet Bill)", text: $name)
                         .onChange(of: name) { _, v in
                             guard bill == nil, let g = Categorizer.guess(v), g != .income else { return }
                             category = g
                             isSubscription = g == .subscriptions
                         }
-                    TextField("SMS keywords (e.g. Batelco, SADAD)", text: $keywordsText)
+                    TextField("SMS keywords (e.g. Internet, Fiber)", text: $keywordsText)
                     HStack {
                         Text("Amount")
                         Spacer()
@@ -201,6 +201,8 @@ struct BillEditor: View {
                     }
                 }
             }
+            .scrollContentBackground(.hidden)
+            .canvasBackground()
             .navigationTitle(bill == nil ? "New bill" : "Edit bill")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

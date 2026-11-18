@@ -18,14 +18,25 @@ private let regionalBanksList: [String] = [
 
 // MARK: - Create / Edit Rule Sheet (from Transaction Details or Rule List)
 
+private enum RuleEditorTab: String, CaseIterable {
+    case settings = "SETTINGS"
+    case preview = "PREVIEW"
+}
+
 struct TransactionRuleBuilderSheet: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.modelContext) private var modelContext
     @Query(sort: \Account.createdAt) private var accounts: [Account]
     @Query(sort: \SavingsGoal.createdAt) private var goals: [SavingsGoal]
+    @Query(sort: \MoneyTransaction.date, order: .reverse) private var allTransactions: [MoneyTransaction]
+    @AppStorage(Keys.currency) private var currency = "BHD"
 
     let sourceTransaction: MoneyTransaction?
     let existingRule: TransactionRule?
     var onSaved: ((TransactionRule) -> Void)? = nil
+
+    @State private var selectedTab: RuleEditorTab = .settings
+    @State private var applyToExisting: Bool = true
 
     @State private var ruleName: String = ""
     @State private var isEnabled: Bool = true
@@ -76,26 +87,56 @@ struct TransactionRuleBuilderSheet: View {
         !selectedConditionsList.isEmpty
     }
 
-    var body: some View {
-        NavigationStack {
-            Form {
-                conditionsSection
-                logicSection
-                thenActionsSection
-                ruleInfoSection
+    private var affectedTransactions: [(tx: MoneyTransaction, changes: [(label: String, before: String, after: String)])] {
+        guard canSave else { return [] }
+        let candidate = buildRule()
+        return allTransactions.compactMap { tx in
+            guard store.matches(rule: candidate, context: RuleEvaluationContext(from: tx), ignoreEnabledState: true) else {
+                return nil
             }
-            .navigationTitle(existingRule == nil ? "Create Rule" : "Edit Rule")
+            let changes = previewChanges(for: tx, rule: candidate)
+            guard !changes.isEmpty else { return nil }
+            return (tx: tx, changes: changes)
+        }
+    }
+
+    var body: some View {
+        let affected = affectedTransactions
+        NavigationStack {
+            VStack(spacing: 0) {
+                tabHeader(previewCount: affected.count)
+
+                Group {
+                    switch selectedTab {
+                    case .settings:
+                        Form {
+                            conditionsSection
+                            logicSection
+                            thenActionsSection
+                            ruleInfoSection
+                        }
+                        .scrollContentBackground(.hidden)
+                        .canvasBackground()
+                    case .preview:
+                        previewTabView(affected: affected)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                bottomActionFooter(affectedCount: affected.count)
+            }
+            .navigationTitle(existingRule == nil ? "Create rule" : "Edit rule")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Save Rule") {
-                        attemptSave()
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        dismiss()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.body.weight(.semibold))
+                            .foregroundStyle(Theme.ink)
                     }
-                    .fontWeight(.semibold)
-                    .disabled(!canSave)
+                    .accessibilityLabel("Close")
                 }
             }
             .onAppear(perform: loadInitialState)
@@ -419,9 +460,7 @@ struct TransactionRuleBuilderSheet: View {
     private var ruleInfoSection: some View {
         Section("Rule Info") {
             TextField("Rule Name (optional)", text: $ruleName)
-            if existingRule == nil {
-                Toggle("Enable Rule for Future Transactions", isOn: $isEnabled)
-            }
+            Toggle("Enable Rule for Future Transactions", isOn: $isEnabled)
         }
     }
 
@@ -617,14 +656,260 @@ struct TransactionRuleBuilderSheet: View {
 
     private func commitSave() {
         let candidate = buildRule()
+        let savedRule: TransactionRule
         if existingRule != nil {
             store.updateRule(candidate)
-            onSaved?(candidate)
+            savedRule = candidate
         } else {
-            let saved = store.addRule(candidate)
-            onSaved?(saved)
+            savedRule = store.addRule(candidate)
         }
+
+        if applyToExisting {
+            let affected = affectedTransactions
+            if !affected.isEmpty {
+                let priority = store.priorityNumber(for: savedRule.id) ?? 1
+                for item in affected {
+                    store.apply(rule: savedRule, to: item.tx, priorityNumber: priority)
+                }
+                try? modelContext.save()
+            }
+        }
+
+        onSaved?(savedRule)
         dismiss()
+    }
+
+    // MARK: - Tab Header, Preview & Footer
+
+    @ViewBuilder
+    private func tabHeader(previewCount: Int) -> some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 0) {
+                ForEach(RuleEditorTab.allCases, id: \.self) { tab in
+                    let isSelected = selectedTab == tab
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            selectedTab = tab
+                        }
+                    } label: {
+                        VStack(spacing: 10) {
+                            HStack(spacing: 6) {
+                                Text(tab.rawValue)
+                                    .font(.caption.weight(.bold))
+                                    .tracking(0.6)
+                                    .foregroundStyle(isSelected ? Theme.cobalt : Theme.secondaryInk)
+
+                                if tab == .preview {
+                                    Text("\(previewCount)")
+                                        .font(.caption2.weight(.bold))
+                                        .foregroundStyle(isSelected ? Theme.cobalt : Theme.secondaryInk)
+                                        .padding(.horizontal, 7)
+                                        .padding(.vertical, 2)
+                                        .background(
+                                            Capsule()
+                                                .fill(isSelected ? Theme.cobalt.opacity(0.16) : Theme.track)
+                                        )
+                                }
+                            }
+                            .padding(.top, 12)
+
+                            Rectangle()
+                                .fill(isSelected ? Theme.cobalt : Color.clear)
+                                .frame(height: 2.5)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            Divider()
+        }
+        .background(Theme.card)
+    }
+
+    @ViewBuilder
+    private func previewTabView(affected: [(tx: MoneyTransaction, changes: [(label: String, before: String, after: String)])]) -> some View {
+        if affected.isEmpty {
+            VStack(spacing: 12) {
+                Spacer()
+                Image(systemName: "chevron.right.2")
+                    .font(.system(size: 28, weight: .semibold))
+                    .foregroundStyle(Theme.secondaryInk)
+                Text("No changes")
+                    .font(.headline.weight(.semibold))
+                    .foregroundStyle(Theme.ink)
+                Text("This rule will not change any\nexisting transactions.")
+                    .font(.subheadline)
+                    .foregroundStyle(Theme.secondaryInk)
+                    .multilineTextAlignment(.center)
+                Spacer()
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Theme.canvas.ignoresSafeArea())
+        } else {
+            ScrollView {
+                LazyVStack(spacing: 10) {
+                    ForEach(affected, id: \.tx.id) { item in
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack(alignment: .top) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(item.tx.merchant)
+                                        .font(.subheadline.weight(.semibold))
+                                        .foregroundStyle(Theme.ink)
+                                    Text(item.tx.date.formatted(date: .abbreviated, time: .omitted))
+                                        .font(.caption)
+                                        .foregroundStyle(Theme.secondaryInk)
+                                }
+                                Spacer()
+                                Text("\(item.tx.isIncome ? "+" : "−")\(Money.format(item.tx.amount, currency))")
+                                    .font(.subheadline.weight(.semibold).monospacedDigit())
+                                    .foregroundStyle(item.tx.isIncome ? Theme.positive : Theme.ink)
+                            }
+
+                            VStack(alignment: .leading, spacing: 4) {
+                                ForEach(Array(item.changes.enumerated()), id: \.offset) { _, change in
+                                    HStack(spacing: 6) {
+                                        Text(change.label)
+                                            .font(.caption2.weight(.semibold))
+                                            .foregroundStyle(Theme.secondaryInk)
+                                        Text(change.before)
+                                            .font(.caption)
+                                            .foregroundStyle(Theme.secondaryInk)
+                                            .strikethrough()
+                                            .lineLimit(1)
+                                        Image(systemName: "arrow.right")
+                                            .font(.caption2.weight(.semibold))
+                                            .foregroundStyle(Theme.cobalt)
+                                        Text(change.after)
+                                            .font(.caption.weight(.medium))
+                                            .foregroundStyle(Theme.ink)
+                                            .lineLimit(1)
+                                    }
+                                }
+                            }
+                        }
+                        .card(padding: 14)
+                    }
+                }
+                .padding(16)
+            }
+            .background(Theme.canvas.ignoresSafeArea())
+        }
+    }
+
+    @ViewBuilder
+    private func bottomActionFooter(affectedCount: Int) -> some View {
+        VStack(spacing: 14) {
+            Divider()
+
+            Button {
+                applyToExisting.toggle()
+            } label: {
+                HStack {
+                    Text("Apply to \(affectedCount) existing transaction\(affectedCount == 1 ? "" : "s")")
+                        .font(.subheadline)
+                        .foregroundStyle(Theme.ink)
+                    Spacer()
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(applyToExisting ? Theme.cobalt : Color.clear)
+                        .frame(width: 22, height: 22)
+                        .overlay {
+                            if applyToExisting {
+                                Image(systemName: "checkmark")
+                                    .font(.caption.weight(.bold))
+                                    .foregroundStyle(.white)
+                            } else {
+                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    .stroke(Theme.secondaryInk.opacity(0.45), lineWidth: 1.5)
+                            }
+                        }
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                attemptSave()
+            } label: {
+                Text("Save rule")
+                    .font(.headline.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 50)
+                    .background(Capsule().fill(Theme.cobalt))
+                    .opacity(canSave ? 1 : 0.45)
+            }
+            .buttonStyle(PressableStyle())
+            .disabled(!canSave)
+        }
+        .padding(.horizontal, 16)
+        .padding(.bottom, 12)
+        .background(Theme.card)
+    }
+
+    private func previewChanges(for tx: MoneyTransaction, rule: TransactionRule) -> [(label: String, before: String, after: String)] {
+        let actions = rule.actions
+        var changes: [(label: String, before: String, after: String)] = []
+
+        func accountName(for id: UUID?) -> String {
+            guard let id else { return "None" }
+            return accounts.first(where: { $0.id == id })?.name ?? "Account"
+        }
+
+        func goalName(for id: UUID?) -> String {
+            guard let id else { return "None" }
+            return goals.first(where: { $0.id == id })?.name ?? "Goal"
+        }
+
+        if let transferKind = actions.effectiveTransferKind {
+            let targetCat: SpendCategory = (transferKind == .internalTransfer) ? .internalTransfer : .transfers
+            if tx.category != targetCat {
+                changes.append(("Category", tx.category.rawValue, targetCat.rawValue))
+            }
+            if let fromID = actions.fromAccountID ?? actions.overrideAccountID, tx.accountID != fromID {
+                changes.append(("Account", accountName(for: tx.accountID), accountName(for: fromID)))
+            }
+            if transferKind == .internalTransfer,
+               let toID = actions.toAccountID,
+               toID != (actions.fromAccountID ?? actions.overrideAccountID ?? tx.accountID),
+               tx.toAccountID != toID {
+                changes.append(("To Account", accountName(for: tx.toAccountID), accountName(for: toID)))
+            }
+        } else {
+            if let overrideID = actions.overrideAccountID ?? actions.fromAccountID, tx.accountID != overrideID {
+                changes.append(("Account", accountName(for: tx.accountID), accountName(for: overrideID)))
+            }
+            if let cat = actions.category, tx.category != cat {
+                changes.append(("Category", tx.category.rawValue, cat.rawValue))
+            }
+        }
+
+        if let merchant = actions.setMerchant?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !merchant.isEmpty,
+           tx.merchant != merchant {
+            changes.append(("Merchant", tx.merchant, merchant))
+        }
+        if let bank = actions.setBank?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !bank.isEmpty,
+           tx.smsBank != bank {
+            changes.append(("Bank", tx.smsBank ?? "None", bank))
+        }
+        if let locName = actions.setLocationName?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !locName.isEmpty,
+           tx.locationName != locName {
+            changes.append(("Location", tx.locationName ?? "None", locName))
+        }
+        if let note = actions.setNote?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !note.isEmpty,
+           tx.note != note {
+            changes.append(("Note", tx.note.isEmpty ? "None" : tx.note, note))
+        }
+        if let goalID = actions.setGoalID, tx.goalID != goalID {
+            changes.append(("Goal", goalName(for: tx.goalID), goalName(for: goalID)))
+        }
+
+        return changes
     }
 }
 
@@ -649,47 +934,61 @@ struct TransactionDetailRulesSection: View {
         }
 
         VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Label("Transaction Rules", systemImage: "slider.horizontal.3")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(Theme.ink)
-                Spacer()
-                Button {
-                    showCreateSheet = true
-                } label: {
-                    Label("Create Rule", systemImage: "plus.circle.fill")
-                        .font(.caption.weight(.semibold))
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .background(Theme.brand.opacity(0.14), in: Capsule())
-                        .foregroundStyle(Theme.brand)
-                }
-                .buttonStyle(.plain)
-            }
-
             if matchedRulesWithIndex.isEmpty {
                 HStack(spacing: 10) {
                     Image(systemName: "checkmark.seal")
                         .foregroundStyle(Theme.brand)
-                    Text("No matching rules for this transaction. Tap \"Create Rule\" to create one.")
+                    Text("No matching rules for this transaction.")
                         .font(.caption)
                         .foregroundStyle(Theme.secondaryInk)
+                    Spacer()
+                    Button {
+                        showCreateSheet = true
+                    } label: {
+                        Image(systemName: "plus")
+                            .font(.caption.weight(.bold))
+                            .frame(width: 28, height: 28)
+                            .background(Theme.track.opacity(0.75), in: Circle())
+                            .foregroundStyle(Theme.ink)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Create rule")
                 }
                 .padding(10)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(Theme.track.opacity(0.5), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             } else {
+                HStack {
+                    Spacer()
+                    Button {
+                        showCreateSheet = true
+                    } label: {
+                        Image(systemName: "plus")
+                            .font(.caption.weight(.bold))
+                            .frame(width: 28, height: 28)
+                            .background(Theme.track.opacity(0.75), in: Circle())
+                            .foregroundStyle(Theme.ink)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Create rule")
+                }
                 VStack(spacing: 8) {
                     ForEach(matchedRulesWithIndex, id: \.rule.id) { item in
-                        TransactionRuleRowCard(
-                            priorityNumber: item.originalIndex + 1,
-                            rule: item.rule,
-                            accounts: accounts,
-                            isHighlighted: true,
-                            onToggle: { store.toggleRule(id: item.rule.id) },
-                            onEdit: { editingRule = item.rule },
-                            onDelete: { store.deleteRule(id: item.rule.id) }
-                        )
+                        Button {
+                            editingRule = item.rule
+                        } label: {
+                            TransactionRuleRowCard(
+                                priorityNumber: item.originalIndex + 1,
+                                rule: item.rule,
+                                accounts: accounts,
+                                isHighlighted: false,
+                                showControls: false,
+                                onToggle: {},
+                                onEdit: {},
+                                onDelete: {}
+                            )
+                        }
+                        .buttonStyle(.plain)
                     }
                 }
             }
@@ -698,15 +997,10 @@ struct TransactionDetailRulesSection: View {
                 NavigationLink {
                     TransactionRulesListView()
                 } label: {
-                    HStack {
-                        Text("Manage All Transaction Rules (\(store.rules.count))")
-                            .font(.caption.weight(.semibold))
-                        Spacer()
-                        Image(systemName: "chevron.right")
-                            .font(.caption2.weight(.semibold))
-                    }
-                    .foregroundStyle(Theme.brand)
-                    .padding(.top, 4)
+                    Text("Manage All Transaction Rules (\(store.rules.count))")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Theme.brand)
+                        .padding(.top, 4)
                 }
             }
         }
@@ -727,6 +1021,7 @@ struct TransactionRuleRowCard: View {
     let rule: TransactionRule
     let accounts: [Account]
     var isHighlighted: Bool = false
+    var showControls: Bool = true
     let onToggle: () -> Void
     let onEdit: () -> Void
     let onDelete: () -> Void
@@ -780,12 +1075,14 @@ struct TransactionRuleRowCard: View {
 
                 Spacer(minLength: 8)
 
-                Toggle("", isOn: Binding(
-                    get: { rule.isEnabled },
-                    set: { _ in onToggle() }
-                ))
-                .labelsHidden()
-                .tint(Theme.positive)
+                if showControls {
+                    Toggle("", isOn: Binding(
+                        get: { rule.isEnabled },
+                        set: { _ in onToggle() }
+                    ))
+                    .labelsHidden()
+                    .tint(Theme.positive)
+                }
             }
 
             // Row 2: IF (AND/OR) + condition pills
@@ -826,25 +1123,27 @@ struct TransactionRuleRowCard: View {
 
                 Spacer(minLength: 8)
 
-                Button(action: onEdit) {
-                    Image(systemName: "pencil")
-                        .font(.caption.weight(.semibold))
-                        .frame(width: 28, height: 28)
-                        .background(Theme.cobaltSoft, in: Circle())
-                        .foregroundStyle(Theme.cobalt)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Edit rule")
+                if showControls {
+                    Button(action: onEdit) {
+                        Image(systemName: "pencil")
+                            .font(.caption.weight(.semibold))
+                            .frame(width: 28, height: 28)
+                            .background(Theme.cobaltSoft, in: Circle())
+                            .foregroundStyle(Theme.cobalt)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Edit rule")
 
-                Button(role: .destructive, action: onDelete) {
-                    Image(systemName: "trash")
-                        .font(.caption.weight(.semibold))
-                        .frame(width: 28, height: 28)
-                        .background(Theme.expense.opacity(0.12), in: Circle())
-                        .foregroundStyle(Theme.expense)
+                    Button(role: .destructive, action: onDelete) {
+                        Image(systemName: "trash")
+                            .font(.caption.weight(.semibold))
+                            .frame(width: 28, height: 28)
+                            .background(Theme.expense.opacity(0.12), in: Circle())
+                            .foregroundStyle(Theme.expense)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Delete rule")
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Delete rule")
             }
         }
         .padding(14)
@@ -854,7 +1153,7 @@ struct TransactionRuleRowCard: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(isHighlighted ? Theme.income.opacity(0.45) : Theme.track.opacity(0.6), lineWidth: 1)
+                .stroke(Theme.track.opacity(0.6), lineWidth: 1)
         )
     }
 }
@@ -889,17 +1188,24 @@ struct TransactionRulesListView: View {
             } else {
                 Section {
                     ForEach(Array(store.rules.enumerated()), id: \.element.id) { index, rule in
-                        TransactionRuleRowCard(
-                            priorityNumber: index + 1,
-                            rule: rule,
-                            accounts: accounts,
-                            isHighlighted: false,
-                            onToggle: { store.toggleRule(id: rule.id) },
-                            onEdit: { editingRule = rule },
-                            onDelete: { store.deleteRule(id: rule.id) }
-                        )
+                        Button {
+                            editingRule = rule
+                        } label: {
+                            TransactionRuleRowCard(
+                                priorityNumber: index + 1,
+                                rule: rule,
+                                accounts: accounts,
+                                isHighlighted: false,
+                                showControls: false,
+                                onToggle: {},
+                                onEdit: {},
+                                onDelete: {}
+                            )
+                        }
+                        .buttonStyle(.plain)
                         .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
                         .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
                     }
                     .onMove { source, destination in
                         store.moveRules(from: source, to: destination)
@@ -918,6 +1224,7 @@ struct TransactionRulesListView: View {
                 } footer: {
                     Text("Rules have the highest priority in the app and apply only to future matching transactions. Existing transactions are never modified when creating or editing rules.")
                 }
+                .listSectionSeparator(.hidden)
 
                 Section {
                     Button(role: .destructive) {
@@ -930,9 +1237,13 @@ struct TransactionRulesListView: View {
                             Spacer()
                         }
                     }
+                    .listRowBackground(Theme.surface)
                 }
             }
         }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .canvasBackground()
         .navigationTitle("Transaction Rules")
         .navigationBarTitleDisplayMode(.large)
         .toolbar {
