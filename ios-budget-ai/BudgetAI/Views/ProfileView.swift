@@ -4,6 +4,7 @@ import SwiftData
 struct ProfileView: View {
     @Environment(AppState.self) private var appState
     @Environment(\.modelContext) private var context
+    @Environment(\.dismiss) private var dismiss
     @Query private var accounts: [Account]
     @Query private var bills: [Bill]
     @AppStorage(Keys.currency) private var currency = "BHD"
@@ -145,7 +146,12 @@ struct ProfileView: View {
             }
             .scrollContentBackground(.hidden)
             .canvasBackground()
-            .navigationTitle("Profile")
+            .navigationTitle("Settings")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
             .onAppear { geminiOn = GeminiAccount.isConfigured }
             .confirmationDialog("Replace your data with sample data?", isPresented: $confirmSample, titleVisibility: .visible) {
                 Button("Load sample data", role: .destructive) {

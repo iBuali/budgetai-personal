@@ -186,7 +186,12 @@ struct HomeView: View {
                 .padding(.bottom, 24)
             }
             .canvasBackground()
+            .navigationTitle("Home")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    DrawerMenuToolbarButtons()
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
                         Button("Add transaction", systemImage: "plus") { appState.showAddTransaction = true }

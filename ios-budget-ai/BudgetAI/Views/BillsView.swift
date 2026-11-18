@@ -168,17 +168,25 @@ struct BillEditor: View {
                         TextField(Money.format(0, currency), text: $amountText)
                             .keyboardType(.decimalPad).multilineTextAlignment(.trailing).monospacedDigit()
                     }
-                    Picker("Category", selection: $category) {
-                        ForEach(SpendCategory.expenseCases) { Label($0.title, systemImage: $0.symbol).tag($0) }
-                    }
+                    SheetPickerRow(
+                        title: "Category",
+                        selection: $category,
+                        options: SpendCategory.expenseCases.map {
+                            SheetPickerOption(id: $0, title: $0.title, symbol: $0.symbol, color: $0.color)
+                        }
+                    )
                 } footer: {
                     Text("Add keywords from your bank SMS (separated by commas). When an SMS arrives matching these keywords and the amount, the bill is automatically marked as paid.")
                 }
                 Section {
                     DatePicker("Next due", selection: $due, displayedComponents: .date)
-                    Picker("Repeats", selection: $frequency) {
-                        ForEach(BillFrequency.allCases) { Text($0.title).tag($0) }
-                    }
+                    SheetPickerRow(
+                        title: "Repeats",
+                        selection: $frequency,
+                        options: BillFrequency.allCases.map {
+                            SheetPickerOption(id: $0, title: $0.title, symbol: "repeat", color: Theme.cobalt)
+                        }
+                    )
                     Toggle("Subscription", isOn: $isSubscription)
                     Toggle("Remind me the day before", isOn: $reminders)
                 }

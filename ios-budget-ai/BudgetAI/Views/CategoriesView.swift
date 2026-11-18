@@ -203,19 +203,22 @@ struct CategoryEditor: View {
 
                 Section {
                     if existing == nil && !isEditingBuiltIn {
-                        Picker("Type", selection: Binding(
-                            get: { isTransfer ? CategoryTab.transfers : (isIncome ? .income : .expenses) },
-                            set: { newTab in
-                                isIncome = (newTab == .income)
-                                isTransfer = (newTab == .transfers)
-                                if isIncome || isTransfer { isEssential = false }
-                            }
-                        )) {
-                            Text("Expense").tag(CategoryTab.expenses)
-                            Text("Income").tag(CategoryTab.income)
-                            Text("Transfer").tag(CategoryTab.transfers)
-                        }
-                        .pickerStyle(.segmented)
+                        SheetPickerRow(
+                            title: "Type of category",
+                            selection: Binding(
+                                get: { isTransfer ? CategoryTab.transfers : (isIncome ? .income : .expenses) },
+                                set: { newTab in
+                                    isIncome = (newTab == .income)
+                                    isTransfer = (newTab == .transfers)
+                                    if isIncome || isTransfer { isEssential = false }
+                                }
+                            ),
+                            options: [
+                                SheetPickerOption(id: CategoryTab.expenses, title: "Expense", symbol: "arrow.up.right", color: Theme.negative),
+                                SheetPickerOption(id: CategoryTab.income, title: "Income", symbol: "arrow.down.left", color: Theme.positive),
+                                SheetPickerOption(id: CategoryTab.transfers, title: "Transfer", symbol: "arrow.left.arrow.right", color: Theme.cobalt)
+                            ]
+                        )
                     }
                     if !isIncome && !isTransfer {
                         Toggle("Essential spending", isOn: $isEssential)

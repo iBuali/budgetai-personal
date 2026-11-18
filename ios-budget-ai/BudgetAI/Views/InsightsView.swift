@@ -38,6 +38,11 @@ struct InsightsView: View {
             }
             .canvasBackground()
             .navigationTitle("Insights")
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    DrawerMenuToolbarButtons()
+                }
+            }
             .navigationDestination(for: InsightRoute.self) { route in
                 switch route {
                 case .timeMachine: FinancialTimeMachineView()

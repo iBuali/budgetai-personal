@@ -21,6 +21,52 @@ struct BudgetsView: View {
         Finance(transactions: transactions, accounts: accounts, budgets: budgets, goals: goals, bills: bills)
     }
 
+    private var monthStrip: some View {
+        let offsets = Array((-2...5).reversed()) // e.g. 5 months back through 2 months ahead
+        return ScrollViewReader { proxy in
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(offsets, id: \.self) { offset in
+                        let date = Calendar.current.date(byAdding: .month, value: -offset, to: .now) ?? .now
+                        let isSelected = offset == monthOffset
+                        Button {
+                            withAnimation(.snappy(duration: 0.22)) {
+                                monthOffset = offset
+                            }
+                        } label: {
+                            VStack(spacing: 2) {
+                                Text(date.formatted(.dateTime.month(.abbreviated)).uppercased())
+                                    .font(.subheadline.weight(.bold))
+                                    .foregroundStyle(isSelected ? .white : Theme.ink)
+                                Text(date.formatted(.dateTime.year()))
+                                    .font(.caption2)
+                                    .foregroundStyle(isSelected ? .white.opacity(0.9) : Theme.secondaryInk)
+                            }
+                            .frame(width: 70, height: 54)
+                            .background(
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .fill(isSelected ? Theme.cobalt : Color.clear)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .id(offset)
+                    }
+                }
+                .padding(.horizontal, 4)
+                .padding(.vertical, 4)
+            }
+            .onAppear {
+                proxy.scrollTo(monthOffset, anchor: .center)
+            }
+            .onChange(of: monthOffset) { _, newValue in
+                withAnimation(.snappy) {
+                    proxy.scrollTo(newValue, anchor: .center)
+                }
+            }
+        }
+        .sensoryFeedback(.selection, trigger: monthOffset)
+    }
+
     private var selectedMonth: Date {
         Calendar.current.date(byAdding: .month, value: -monthOffset, to: .now) ?? .now
     }
@@ -31,6 +77,10 @@ struct BudgetsView: View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 16) {
+                    if showMonthStrip {
+                        monthStrip
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                    }
                     overview(f, interval: interval)
                     categorySection(f, interval: interval)
                     goalsSection
@@ -50,23 +100,23 @@ struct BudgetsView: View {
                 .padding(.bottom, 24)
             }
             .canvasBackground()
-            .navigationTitle("Budgets")
+            .navigationTitle(showMonthStrip || monthOffset != 0 ? selectedMonth.formatted(.dateTime.month(.abbreviated).year()) : "Budgets")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    DrawerMenuToolbarButtons()
+                }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Menu {
-                        Picker("Month", selection: $monthOffset) {
-                            ForEach(0..<6, id: \.self) { i in
-                                let d = Calendar.current.date(byAdding: .month, value: -i, to: .now) ?? .now
-                                Text(Cycle.startDay == 1 ? d.formatted(.dateTime.month(.wide).year()) : Cycle.label(Cycle.interval(containing: d))).tag(i)
-                            }
+                    Button {
+                        withAnimation(.snappy(duration: 0.25)) {
+                            showMonthStrip.toggle()
                         }
                     } label: {
-                        HStack(spacing: 4) {
-                            Text(Cycle.label(Cycle.interval(containing: selectedMonth), short: true))
-                            Image(systemName: "chevron.down").font(.caption.weight(.bold))
-                        }
-                        .font(.subheadline.weight(.medium))
+                        Image(systemName: showMonthStrip ? "calendar.circle.fill" : "calendar")
+                            .font(.body.weight(.medium))
+                            .foregroundStyle(showMonthStrip ? Theme.cobalt : Theme.ink)
                     }
+                    .accessibilityLabel("Select month")
                 }
             }
             .sheet(item: $editingBudget) { BudgetEditor(budget: $0) }
@@ -375,40 +425,37 @@ private struct MiniCategorySpendRow: View {
     var body: some View {
         let targetPct = Int(min(max(ratio, 0), 9.99) * 100)
         let shownPct = Int(min(max(displayedRatio, 0), 9.99) * 100)
-        HStack(spacing: 10) {
-            CategoryIcon(category: category, size: 28)
-            VStack(alignment: .leading, spacing: 5) {
-                HStack(spacing: 6) {
-                    Text(category.title)
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(Theme.ink)
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 6) {
+                Text(category.title)
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(Theme.ink)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
+                Spacer(minLength: 8)
+                if targetPct > 0 || shownPct > 0 {
+                    Text("\(shownPct)%")
+                        .font(.caption2.weight(.medium).monospacedDigit())
+                        .foregroundStyle(Theme.secondaryInk)
+                        .animatedNumber(Double(shownPct))
                         .lineLimit(1)
-                        .minimumScaleFactor(0.85)
-                    Spacer(minLength: 8)
-                    if targetPct > 0 || shownPct > 0 {
-                        Text("\(shownPct)%")
-                            .font(.caption2.weight(.medium).monospacedDigit())
-                            .foregroundStyle(Theme.secondaryInk)
-                            .animatedNumber(Double(shownPct))
-                            .lineLimit(1)
-                            .layoutPriority(1)
-                    }
-                    Text(Money.format(displayedSpent, currency))
-                        .font(.caption.weight(.semibold).monospacedDigit())
-                        .foregroundStyle(Theme.ink)
-                        .animatedNumber(displayedSpent)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.75)
-                        .layoutPriority(2)
+                        .layoutPriority(1)
                 }
-                ProgressBar(
-                    progress: ratio,
-                    color: category.color,
-                    height: 6.5,
-                    delay: 0.06 + Double(index) * 0.055,
-                    trackColor: Theme.surface
-                )
+                Text(Money.format(displayedSpent, currency))
+                    .font(.caption.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(Theme.ink)
+                    .animatedNumber(displayedSpent)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                    .layoutPriority(2)
             }
+            ProgressBar(
+                progress: ratio,
+                color: category.color,
+                height: 6.5,
+                delay: 0.06 + Double(index) * 0.055,
+                trackColor: Theme.surface
+            )
         }
         .opacity(appeared ? 1 : 0)
         .offset(y: appeared ? 0 : 6)
@@ -608,10 +655,12 @@ struct GoalSheet: View {
                                 .buttonStyle(.borderedProminent)
                                 .disabled((Money.parse(contributionText) ?? 0) <= 0)
                         }
-                        Picker("From", selection: $fromAccount) {
-                            Text("Don't move money").tag(UUID?.none)
-                            ForEach(accounts.filter { $0.kind.isLiquid }) { Text($0.name).tag(UUID?.some($0.id)) }
-                        }
+                        AccountPickerRow(
+                            title: "From",
+                            selection: $fromAccount,
+                            accounts: accounts.filter { $0.kind.isLiquid },
+                            noneLabel: "Don't move money"
+                        )
                     }
                 }
                 Section("Goal") {
@@ -636,12 +685,12 @@ struct GoalSheet: View {
                     DatePicker("Target date", selection: $targetDate, in: Date.now..., displayedComponents: .date)
                 }
                 Section {
-                    Picker("Linked savings account", selection: $linkedAccountID) {
-                        Text("None").tag(UUID?.none)
-                        ForEach(accounts.filter { !$0.kind.isLiability }) { a in
-                            Text(a.menuTitle).tag(UUID?.some(a.id))
-                        }
-                    }
+                    AccountPickerRow(
+                        title: "Linked savings account",
+                        selection: $linkedAccountID,
+                        accounts: accounts.filter { !$0.kind.isLiability },
+                        noneLabel: "None"
+                    )
                     .onChange(of: linkedAccountID) { _, newID in
                         if smsMatch.trimmingCharacters(in: .whitespaces).isEmpty,
                            let newID,

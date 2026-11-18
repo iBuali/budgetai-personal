@@ -152,9 +152,14 @@ struct TransactionsView: View {
         NavigationStack {
             List {
                 Section {
-                    chips(needsReviewCount: currentNeedsReview.count)
-                        .listRowInsets(EdgeInsets())
+                    searchPill
+                        .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 6, trailing: 16))
                         .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                    chips(needsReviewCount: currentNeedsReview.count)
+                        .listRowInsets(EdgeInsets(top: 2, leading: 16, bottom: 6, trailing: 16))
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
                     if filters.activeCount > 0 {
                         activeChips
                             .listRowInsets(EdgeInsets())
@@ -287,7 +292,7 @@ struct TransactionsView: View {
             .scrollContentBackground(.hidden)
             .canvasBackground()
             .navigationTitle("Transactions")
-            .searchable(text: $query, prompt: "Search transactions")
+            .navigationBarTitleDisplayMode(.inline)
             .navigationDestination(for: UUID.self) { id in
                 if let tx = transactions.first(where: { $0.id == id }) {
                     TransactionDetailView(tx: tx)
@@ -327,6 +332,9 @@ struct TransactionsView: View {
             }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
+                    DrawerMenuToolbarButtons()
+                }
+                ToolbarItemGroup(placement: .topBarTrailing) {
                     if transactions.contains(where: { $0.category == .other && !$0.isIncome }) && GeminiAccount.isConfigured {
                         Button {
                             Task { await recategorize() }
@@ -336,8 +344,7 @@ struct TransactionsView: View {
                         .accessibilityLabel("Categorize with AI")
                         .disabled(categorizing)
                     }
-                }
-                ToolbarItemGroup(placement: .topBarTrailing) {
+
                     Button {
                         mode = mode == .list ? .calendar : .list
                     } label: {
@@ -517,35 +524,68 @@ struct TransactionsView: View {
 
     // MARK: Chips
 
+    private var searchPill: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(Theme.secondaryInk)
+            TextField("Search transactions", text: $query)
+                .font(.subheadline)
+                .foregroundStyle(Theme.ink)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+            if !query.isEmpty {
+                Button {
+                    query = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.subheadline)
+                        .foregroundStyle(Theme.secondaryInk)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Clear search")
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(Theme.surface, in: Capsule())
+        .shadow(color: .black.opacity(0.03), radius: 6, y: 2)
+    }
+
     private func chips(needsReviewCount: Int) -> some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
+            HStack(spacing: 2) {
                 ForEach(TxFilter.allCases) { f in
+                    let isSelected = filters.kind == f
                     Button {
                         withAnimation(.snappy) { filters.kind = f }
                     } label: {
-                        HStack(spacing: 6) {
+                        HStack(spacing: 5) {
                             Text(f.rawValue)
                             if f == .review && needsReviewCount > 0 {
                                 Text("\(needsReviewCount)")
                                     .font(.caption2.bold().monospacedDigit())
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 2)
-                                    .background(filters.kind == f ? .white.opacity(0.3) : Theme.warning, in: Capsule())
+                                    .padding(.horizontal, 5)
+                                    .padding(.vertical, 1)
+                                    .background(isSelected ? .white.opacity(0.28) : Theme.warning, in: Capsule())
                                     .foregroundStyle(.white)
                             }
                         }
-                        .font(.subheadline.weight(.medium))
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 9)
-                        .foregroundStyle(filters.kind == f ? .white : Theme.ink)
-                        .background(filters.kind == f ? (f == .review ? Theme.warning : Theme.cobalt) : Theme.track.opacity(0.8), in: Capsule())
+                        .font(.subheadline.weight(isSelected ? .semibold : .medium))
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 7)
+                        .foregroundStyle(isSelected ? .white : Theme.secondaryInk)
+                        .background(
+                            isSelected ? (f == .review ? Theme.warning : Theme.cobalt) : Color.clear,
+                            in: Capsule()
+                        )
                     }
                     .buttonStyle(PressableStyle())
                 }
             }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 4)
+            .padding(4)
+            .background(Theme.surface, in: Capsule())
+            .shadow(color: .black.opacity(0.03), radius: 6, y: 2)
         }
         .sensoryFeedback(.selection, trigger: filters.kind)
     }
@@ -1216,34 +1256,39 @@ struct TransactionDetailView: View {
             )
 
             Button {
-                withAnimation(.snappy) { editingCategory.toggle() }
+                editingCategory = true
             } label: {
                 HStack(spacing: 12) {
                     Text("Category").foregroundStyle(Theme.ink)
                     Spacer()
-                    CategoryIcon(category: tx.category, size: 28)
-                    Text(tx.category.title).foregroundStyle(Theme.ink)
-                    if tx.aiCategorized { AIBadge() }
-                    Image(systemName: "chevron.down")
-                        .font(.footnote.weight(.semibold))
-                        .foregroundStyle(.tertiary)
-                        .rotationEffect(.degrees(editingCategory ? 180 : 0))
+                    HStack(spacing: 6) {
+                        CategoryIcon(category: tx.category, size: 22)
+                        Text(tx.category.title)
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(Theme.ink)
+                            .lineLimit(1)
+                        if tx.aiCategorized { AIBadge() }
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(Theme.secondaryInk)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Theme.track.opacity(0.65), in: Capsule())
                 }
             }
             .buttonStyle(.plain)
-
-            if editingCategory {
-                CategoryPickerGrid(
-                    category: Binding(get: { tx.category }, set: { new in
-                        applySelectedCategory(new)
-                    }),
-                    subcategory: Binding(get: { tx.subcategory }, set: { newSub in
-                        tx.subcategory = newSub
+            .sheet(isPresented: $editingCategory) {
+                TransactionCategoryPickerSheet(
+                    selected: tx.category,
+                    initialTab: tx.category.isTransferCategory ? .transfers : ((tx.category.isIncomeCategory || tx.isIncome) ? .income : .expenses),
+                    onSelect: { chosen in
+                        applySelectedCategory(chosen)
+                        tx.subcategory = nil
                         try? context.save()
-                    }),
-                    income: tx.isIncome,
-                    includeAllTypes: true
+                    }
                 )
+                .presentationDetents([.medium, .large])
             }
 
             AccountPickerRow(
@@ -1273,15 +1318,15 @@ struct TransactionDetailView: View {
     @ViewBuilder
     private var transferAccountPickers: some View {
         if tx.category == .visaTransfer {
-            Picker("Visa card", selection: Binding(get: { tx.toAccountID }, set: { newID in
-                guard newID != tx.accountID else { return }
-                Ledger.edit(tx, context: context) { $0.toAccountID = newID }
-            })) {
-                Text("Select card").tag(UUID?.none)
-                ForEach(accounts.filter { $0.kind == .creditCard }) { a in
-                    Text(a.menuTitle).tag(UUID?.some(a.id))
-                }
-            }
+            AccountPickerRow(
+                title: "Visa card",
+                selection: Binding(get: { tx.toAccountID }, set: { newID in
+                    guard newID != tx.accountID else { return }
+                    Ledger.edit(tx, context: context) { $0.toAccountID = newID }
+                }),
+                accounts: accounts.filter { $0.kind == .creditCard },
+                noneLabel: "Select card"
+            )
             if let card = toAccount, card.kind == .creditCard {
                 LabeledContent("Card balance owed") {
                     Text(Money.format(card.balance, currency))
@@ -1296,49 +1341,49 @@ struct TransactionDetailView: View {
                 }
             }
         } else if tx.category == .internalTransfer || tx.effectiveTransactionType == .internalTransfer || tx.toAccountID != nil {
-            Picker("To account", selection: Binding(get: { tx.toAccountID ?? matchedRecipientAccount?.id }, set: { newID in
-                guard newID != tx.accountID else { return }
-                let linkedGoalID = newID.flatMap { id in goals.first(where: { $0.linkedAccountID == id })?.id }
-                Ledger.edit(tx, context: context) { target in
-                    target.toAccountID = newID
-                    if newID != nil {
-                        target.category = .internalTransfer
-                        target.smsTransactionType = .internalTransfer
-                        target.isIncome = false
+            AccountPickerRow(
+                title: "To account",
+                selection: Binding(get: { tx.toAccountID ?? matchedRecipientAccount?.id }, set: { newID in
+                    guard newID != tx.accountID else { return }
+                    let linkedGoalID = newID.flatMap { id in goals.first(where: { $0.linkedAccountID == id })?.id }
+                    Ledger.edit(tx, context: context) { target in
+                        target.toAccountID = newID
+                        if newID != nil {
+                            target.category = .internalTransfer
+                            target.smsTransactionType = .internalTransfer
+                            target.isIncome = false
+                        }
+                        if let linkedGoalID {
+                            target.goalID = linkedGoalID
+                        }
                     }
-                    if let linkedGoalID {
-                        target.goalID = linkedGoalID
-                    }
-                }
-            })) {
-                Text("Select destination").tag(UUID?.none)
-                ForEach(accounts.filter { $0.id != tx.accountID }) { a in
-                    Text(a.menuTitle).tag(UUID?.some(a.id))
-                }
-            }
+                }),
+                accounts: accounts.filter { $0.id != tx.accountID },
+                noneLabel: "Select destination"
+            )
         }
     }
 
     @ViewBuilder
     private var savingsGoalPicker: some View {
-        Picker("Savings goal", selection: Binding(get: { tx.goalID }, set: { newGoalID in
-            let linkedAccountID = newGoalID.flatMap { id in goals.first(where: { $0.id == id })?.linkedAccountID }
-            Ledger.edit(tx, context: context) { target in
-                target.goalID = newGoalID
-                let isInternal = target.category == .internalTransfer || target.smsTransactionType == .internalTransfer
-                if target.toAccountID == nil,
-                   let linkedAcc = linkedAccountID,
-                   linkedAcc != target.accountID,
-                   isInternal {
-                    target.toAccountID = linkedAcc
+        SheetPickerRow(
+            title: "Savings goal",
+            selection: Binding(get: { tx.goalID }, set: { newGoalID in
+                let linkedAccountID = newGoalID.flatMap { id in goals.first(where: { $0.id == id })?.linkedAccountID }
+                Ledger.edit(tx, context: context) { target in
+                    target.goalID = newGoalID
+                    let isInternal = target.category == .internalTransfer || target.smsTransactionType == .internalTransfer
+                    if target.toAccountID == nil,
+                       let linkedAcc = linkedAccountID,
+                       linkedAcc != target.accountID,
+                       isInternal {
+                        target.toAccountID = linkedAcc
+                    }
                 }
-            }
-        })) {
-            Text("None").tag(UUID?.none)
-            ForEach(goals) { g in
-                Text(g.name).tag(UUID?.some(g.id))
-            }
-        }
+            }),
+            options: [SheetPickerOption(id: UUID?.none, title: "None", symbol: "minus.circle", color: Theme.secondaryInk)]
+                + goals.map { SheetPickerOption(id: UUID?.some($0.id), title: $0.name, symbol: "target", color: Theme.cobalt) }
+        )
     }
 
     private func applySelectedCategory(_ new: SpendCategory) {
@@ -1456,27 +1501,33 @@ struct TransactionDetailView: View {
     @ViewBuilder
     private var smsDetailsSection: some View {
         Section("SMS Details") {
-            Picker("SMS sender bank", selection: Binding(
-                get: { tx.smsBank ?? "" },
-                set: { newBank in
-                    commitPendingEdits(silent: true)
-                    let clean = newBank.isEmpty ? nil : newBank
-                    Ledger.edit(tx, context: context) { target in
-                        target.smsBank = clean
-                    }
-                    try? context.save()
-                    appState.show(clean.map { "Bank set to \($0)" } ?? "Cleared SMS bank")
-                }
-            )) {
-                Text("Unknown / Not set").tag("")
+            let bankOptions: [SheetPickerOption<String>] = {
+                var opts = [SheetPickerOption(id: "", title: "Unknown / Not set", symbol: "questionmark.circle", color: Theme.secondaryInk)]
                 if let currentBank = tx.smsBank, !currentBank.isEmpty,
                    !BahrainBankCatalog.allBanks.contains(where: { $0.caseInsensitiveCompare(currentBank) == .orderedSame }) {
-                    Text(currentBank).tag(currentBank)
+                    opts.append(SheetPickerOption(id: currentBank, title: currentBank, symbol: "building.columns", color: Theme.cobalt))
                 }
-                ForEach(BahrainBankCatalog.allBanks, id: \.self) { bank in
-                    Text(bank).tag(bank)
-                }
-            }
+                opts.append(contentsOf: BahrainBankCatalog.allBanks.map {
+                    SheetPickerOption(id: $0, title: $0, symbol: "building.columns", color: Theme.secondaryInk)
+                })
+                return opts
+            }()
+            SheetPickerRow(
+                title: "SMS sender bank",
+                selection: Binding(
+                    get: { tx.smsBank ?? "" },
+                    set: { newBank in
+                        commitPendingEdits(silent: true)
+                        let clean = newBank.isEmpty ? nil : newBank
+                        Ledger.edit(tx, context: context) { target in
+                            target.smsBank = clean
+                        }
+                        try? context.save()
+                        appState.show(clean.map { "Bank set to \($0)" } ?? "Cleared SMS bank")
+                    }
+                ),
+                options: bankOptions
+            )
 
             Button {
                 newSenderBankName = ""
@@ -1723,6 +1774,118 @@ struct TransactionDetailView: View {
             return "Another SMS transaction with the same reference code was already recorded."
         default:
             return "This transaction requires approval before updating account balances and budgets."
+        }
+    }
+}
+
+private struct TransactionCategoryPickerSheet: View {
+    let selected: SpendCategory
+    let initialTab: CategoryTab
+    let onSelect: (SpendCategory) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.modelContext) private var context
+    @State private var selectedTab: CategoryTab
+    @State private var editorTarget: CategoryEditorTarget?
+
+    init(selected: SpendCategory, initialTab: CategoryTab, onSelect: @escaping (SpendCategory) -> Void) {
+        self.selected = selected
+        self.initialTab = initialTab
+        self.onSelect = onSelect
+        self._selectedTab = State(initialValue: initialTab)
+    }
+
+    private var categoriesForTab: [SpendCategory] {
+        switch selectedTab {
+        case .income:
+            return SpendCategory.incomeCases
+        case .expenses:
+            return SpendCategory.expenseCases
+        case .transfers:
+            return SpendCategory.transferCases
+        }
+    }
+
+    var body: some View {
+        let registry = CategoryRegistry.shared
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 6) {
+                        ForEach(CategoryTab.allCases) { tab in
+                            Button {
+                                withAnimation(.snappy) { selectedTab = tab }
+                            } label: {
+                                Text(tab.rawValue)
+                                    .font(.subheadline.weight(selectedTab == tab ? .semibold : .medium))
+                                    .foregroundStyle(selectedTab == tab ? Theme.ink : Theme.secondaryInk)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 8)
+                                    .background(selectedTab == tab ? Theme.track : Color.clear, in: Capsule())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+
+                    Text(selectedTab.rawValue)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Theme.ink)
+                        .padding(.horizontal, 4)
+                        .padding(.top, 2)
+
+                    VStack(spacing: 8) {
+                        ForEach(categoriesForTab) { cat in
+                            Button {
+                                onSelect(cat)
+                                dismiss()
+                            } label: {
+                                HStack(spacing: 12) {
+                                    CategoryIcon(category: cat, size: 32)
+                                    Text(cat.title)
+                                        .font(.subheadline.weight(.medium))
+                                        .foregroundStyle(Theme.ink)
+                                    Spacer()
+                                    if cat == selected {
+                                        Image(systemName: "checkmark")
+                                            .font(.subheadline.weight(.semibold))
+                                            .foregroundStyle(Theme.ink)
+                                    }
+                                }
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 12)
+                                .background(Theme.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+            }
+            .id(registry.order)
+            .canvasBackground()
+            .navigationTitle("Category")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") { dismiss() }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("New", systemImage: "plus") {
+                        editorTarget = .new(parent: nil, income: selectedTab == .income, transfer: selectedTab == .transfers)
+                    }
+                }
+            }
+            .sheet(item: $editorTarget) { target in
+                CategoryEditor(target: target) { created in
+                    onSelect(created)
+                    dismiss()
+                }
+            }
+            .onAppear {
+                registry.reload(context: context)
+            }
         }
     }
 }

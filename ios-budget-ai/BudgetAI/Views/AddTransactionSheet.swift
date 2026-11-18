@@ -91,10 +91,12 @@ struct AddTransactionSheet: View {
                     }
 
                     Section {
-                        Picker("Account", selection: $accountID) {
-                            Text("None").tag(UUID?.none)
-                            ForEach(accounts) { a in Text(a.menuTitle).tag(UUID?.some(a.id)) }
-                        }
+                        AccountPickerRow(
+                            title: "Account",
+                            selection: $accountID,
+                            accounts: accounts,
+                            noneLabel: "None"
+                        )
                         DatePicker("Date", selection: $date, in: ...Date.now.addingTimeInterval(86_400 * 365))
                         TextField("Note", text: $note, axis: .vertical)
                         if !isIncome {
@@ -353,12 +355,12 @@ struct PasteSMSSheet: View {
                     TextField("Sender ID / phone (optional, e.g. BisB)", text: $sender)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
-                    Picker("SMS sender bank", selection: $manualBank) {
-                        Text("Detect automatically").tag("")
-                        ForEach(BahrainBankCatalog.allBanks, id: \.self) { bank in
-                            Text(bank).tag(bank)
-                        }
-                    }
+                    SheetPickerRow(
+                        title: "SMS sender bank",
+                        selection: $manualBank,
+                        options: [SheetPickerOption(id: "", title: "Detect automatically", symbol: "sparkles", color: Theme.cobalt)]
+                            + BahrainBankCatalog.allBanks.map { SheetPickerOption(id: $0, title: $0, symbol: "building.columns", color: Theme.secondaryInk) }
+                    )
                     Button {
                         newSenderBankName = ""
                         showAddSenderBankAlert = true
@@ -376,10 +378,12 @@ struct PasteSMSSheet: View {
                     } message: {
                         Text("Enter a bank or SMS sender name to add it to your sender bank list.")
                     }
-                    Picker("Account", selection: $accountID) {
-                        Text("Detect automatically").tag(UUID?.none)
-                        ForEach(accounts) { a in Text(a.menuTitle).tag(UUID?.some(a.id)) }
-                    }
+                    AccountPickerRow(
+                        title: "Account",
+                        selection: $accountID,
+                        accounts: accounts,
+                        noneLabel: "Detect automatically"
+                    )
                 } footer: {
                     HStack(spacing: 4) {
                         if GeminiAccount.isConfigured {

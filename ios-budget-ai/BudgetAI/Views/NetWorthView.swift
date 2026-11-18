@@ -4,6 +4,7 @@ import Charts
 
 struct NetWorthView: View {
     var initialAccountID: UUID? = nil
+    var isRootTab: Bool = false
     @Environment(\.modelContext) private var context
     @Query(sort: \Account.createdAt) private var accounts: [Account]
     @Query(sort: \NetWorthSnapshot.day) private var snapshots: [NetWorthSnapshot]
@@ -120,9 +121,19 @@ struct NetWorthView: View {
         }
         .scrollContentBackground(.hidden)
         .canvasBackground()
-        .navigationTitle("Net Worth")
+        .navigationTitle(isRootTab ? "Accounts" : "Net Worth")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar(.hidden, for: .tabBar)
+        .toolbar(isRootTab ? .visible : .hidden, for: .tabBar)
+        .toolbar {
+            if isRootTab {
+                ToolbarItem(placement: .topBarLeading) {
+                    DrawerMenuToolbarButtons()
+                }
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("Add", systemImage: "plus") { showNew = true }
+            }
+        }
         .sheet(item: $editing) { AccountEditor(account: $0) }
         .sheet(isPresented: $showNew) { AccountEditor(account: nil) }
         .onAppear {
@@ -299,9 +310,13 @@ struct AccountEditor: View {
                 }
                 Section {
                     TextField("Name (e.g. NBB Current)", text: $name)
-                    Picker("Type", selection: $kind) {
-                        ForEach(AccountKind.allCases) { Label($0.title, systemImage: $0.symbol).tag($0) }
-                    }
+                    SheetPickerRow(
+                        title: "Type",
+                        selection: $kind,
+                        options: AccountKind.allCases.map {
+                            SheetPickerOption(id: $0, title: $0.title, symbol: $0.symbol, color: $0.color)
+                        }
+                    )
                     TextField("Bank or provider (optional)", text: $institution)
                 }
                 Section {

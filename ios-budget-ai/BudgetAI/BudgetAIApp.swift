@@ -20,7 +20,6 @@ struct BudgetAIApp: App {
         WindowGroup {
             RootView()
                 .environment(appState)
-                .preferredColorScheme(.light)
                 .tint(Theme.cobalt)
                 .scrollDismissesKeyboard(.immediately)
         }

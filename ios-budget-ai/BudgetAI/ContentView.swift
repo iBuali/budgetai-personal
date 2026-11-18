@@ -15,6 +15,12 @@ final class AppState {
     var showDrawer = false
     var showNotifications = false
     var showSettings = false
+    var notificationsReadSignature: String = UserDefaults.standard.string(forKey: "notificationsReadSignature") ?? ""
+
+    func markNotificationsRead(signature: String) {
+        notificationsReadSignature = signature
+        UserDefaults.standard.set(signature, forKey: "notificationsReadSignature")
+    }
 
     func openTransactions(filter: TxFilter) {
         requestedTransactionsFilter = filter
@@ -115,20 +121,411 @@ struct RootView: View {
     }
 }
 
+enum DrawerDestination: Identifiable {
+    case bills, categories, rules, importStatement, exportStatement, aiAssistant
+    var id: Self { self }
+}
+
 struct MainTabs: View {
     @Environment(AppState.self) private var appState
+    @State private var drawerDestination: DrawerDestination?
 
     var body: some View {
         @Bindable var state = appState
-        TabView(selection: $state.tab) {
-            Tab("Home", systemImage: "house.fill", value: AppTab.home) { HomeView() }
-            Tab("Transactions", systemImage: "list.bullet", value: AppTab.transactions) { TransactionsView() }
-            Tab("Budgets", systemImage: "chart.bar.fill", value: AppTab.budgets) { BudgetsView() }
-            Tab("Insights", systemImage: "lightbulb.fill", value: AppTab.insights) { InsightsView() }
-            Tab("Accounts", systemImage: "square.3.layers.3d", value: AppTab.accounts) { NetWorthView() }
+        ZStack(alignment: .leading) {
+            TabView(selection: $state.tab) {
+                Tab("Home", systemImage: "house.fill", value: AppTab.home) { HomeView() }
+                Tab("Transactions", systemImage: "list.bullet", value: AppTab.transactions) { TransactionsView() }
+                Tab("Budgets", systemImage: "chart.bar.fill", value: AppTab.budgets) { BudgetsView() }
+                Tab("Insights", systemImage: "lightbulb.fill", value: AppTab.insights) { InsightsView() }
+                Tab("Accounts", systemImage: "square.3.layers.3d", value: AppTab.accounts) {
+                    NavigationStack { NetWorthView(isRootTab: true) }
+                }
+            }
+            .sensoryFeedback(.selection, trigger: appState.tab)
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 24)
+                    .onEnded { value in
+                        if value.startLocation.x < 40 && value.translation.width > 55 && abs(value.translation.height) < 80 {
+                            withAnimation(.snappy(duration: 0.28)) {
+                                appState.showDrawer = true
+                            }
+                        }
+                    }
+            )
+
+            if appState.showDrawer {
+                Color.black.opacity(0.28)
+                    .ignoresSafeArea()
+                    .onTapGesture {
+                        withAnimation(.snappy(duration: 0.25)) {
+                            appState.showDrawer = false
+                        }
+                    }
+                    .transition(.opacity)
+                    .zIndex(10)
+
+                SideMenuDrawer(
+                    onOpenAccounts: {
+                        withAnimation(.snappy(duration: 0.25)) { appState.showDrawer = false }
+                        appState.tab = .accounts
+                    },
+                    onOpenDestination: { dest in
+                        withAnimation(.snappy(duration: 0.25)) { appState.showDrawer = false }
+                        drawerDestination = dest
+                    },
+                    onOpenSettings: {
+                        withAnimation(.snappy(duration: 0.25)) { appState.showDrawer = false }
+                        appState.showSettings = true
+                    }
+                )
+                .gesture(
+                    DragGesture(minimumDistance: 20)
+                        .onEnded { value in
+                            if value.translation.width < -50 {
+                                withAnimation(.snappy(duration: 0.25)) {
+                                    appState.showDrawer = false
+                                }
+                            }
+                        }
+                )
+                .transition(.move(edge: .leading))
+                .zIndex(11)
+            }
+
+            if appState.showNotifications {
+                Color.black.opacity(0.12)
+                    .ignoresSafeArea()
+                    .onTapGesture {
+                        withAnimation(.snappy(duration: 0.22)) {
+                            appState.showNotifications = false
+                        }
+                    }
+                    .transition(.opacity)
+                    .zIndex(12)
+
+                VStack {
+                    NotificationsPopoverCard(
+                        onOpenDestination: { dest in
+                            withAnimation(.snappy(duration: 0.22)) { appState.showNotifications = false }
+                            drawerDestination = dest
+                        },
+                        onClose: {
+                            withAnimation(.snappy(duration: 0.22)) { appState.showNotifications = false }
+                        }
+                    )
+                    .padding(.horizontal, 12)
+                    .padding(.top, 52)
+                    Spacer()
+                }
+                .transition(.move(edge: .top).combined(with: .opacity))
+                .zIndex(13)
+            }
         }
-        .sensoryFeedback(.selection, trigger: appState.tab)
+        .animation(.snappy(duration: 0.28), value: appState.showDrawer)
+        .animation(.snappy(duration: 0.22), value: appState.showNotifications)
         .sheet(isPresented: $state.showSettings) { ProfileView() }
+        .sheet(item: $drawerDestination) { dest in
+            switch dest {
+            case .bills:
+                NavigationStack { BillsView() }
+            case .categories:
+                NavigationStack { CategoriesView() }
+            case .rules:
+                NavigationStack { TransactionRulesListView() }
+            case .importStatement:
+                StatementImportSheet()
+            case .exportStatement:
+                StatementExportSheet()
+            case .aiAssistant:
+                NavigationStack { AdvisorChatView() }
+            }
+        }
+    }
+}
+
+private struct SideMenuDrawer: View {
+    @AppStorage(Keys.userName) private var userName = ""
+    let onOpenAccounts: () -> Void
+    let onOpenDestination: (DrawerDestination) -> Void
+    let onOpenSettings: () -> Void
+
+    private var initials: String {
+        let parts = userName.split(separator: " ").prefix(2)
+        let s = parts.compactMap(\.first).map(String.init).joined().uppercased()
+        return s.isEmpty ? "B" : s
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 10) {
+                Text("B")
+                    .font(.subheadline.bold())
+                    .foregroundStyle(.white)
+                    .frame(width: 28, height: 28)
+                    .background(Color(hex: 0x2F6BFF), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                Text("Budget AI")
+                    .font(.headline.weight(.semibold))
+                    .foregroundStyle(Theme.ink)
+                Spacer()
+                Button(action: onOpenSettings) {
+                    Image(systemName: "gearshape")
+                        .font(.body.weight(.medium))
+                        .foregroundStyle(Theme.ink)
+                        .frame(width: 36, height: 36)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Settings")
+            }
+            .padding(.horizontal, 18)
+            .padding(.top, 16)
+            .padding(.bottom, 18)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Money")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Theme.secondaryInk)
+                            .padding(.horizontal, 18)
+                            .padding(.bottom, 4)
+
+                        drawerRow(title: "Accounts & Net Worth", symbol: "building.columns", action: onOpenAccounts)
+                        drawerRow(title: "Bills & Subscriptions", symbol: "clock") { onOpenDestination(.bills) }
+                        drawerRow(title: "Categories", symbol: "square.grid.2x2") { onOpenDestination(.categories) }
+                        drawerRow(title: "Transaction Rules", symbol: "slider.horizontal.3") { onOpenDestination(.rules) }
+                    }
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Import & AI")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Theme.secondaryInk)
+                            .padding(.horizontal, 18)
+                            .padding(.bottom, 4)
+
+                        drawerRow(title: "Import Bank Statement", symbol: "doc.text") { onOpenDestination(.importStatement) }
+                        drawerRow(title: "Export Statement (Excel)", symbol: "arrow.up") { onOpenDestination(.exportStatement) }
+                        drawerRow(title: "Gemini AI Assistant", symbol: "sparkles") { onOpenDestination(.aiAssistant) }
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+
+            Divider()
+                .padding(.horizontal, 18)
+
+            Button(action: onOpenSettings) {
+                HStack(spacing: 12) {
+                    Text(initials)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Theme.ink)
+                        .frame(width: 32, height: 32)
+                        .background(Theme.track, in: Circle())
+                    Text(userName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Settings" : userName)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Theme.ink)
+                        .lineLimit(1)
+                    Spacer()
+                }
+                .padding(.horizontal, 18)
+                .padding(.vertical, 14)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+        .frame(width: 292)
+        .frame(maxHeight: .infinity)
+        .background(Theme.canvas.ignoresSafeArea())
+        .shadow(color: .black.opacity(0.14), radius: 20, x: 6)
+    }
+
+    private func drawerRow(title: String, symbol: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 14) {
+                Image(systemName: symbol)
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(Theme.ink)
+                    .frame(width: 22)
+                Text(title)
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(Theme.ink)
+                Spacer()
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 10)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct NotificationCardItem: Identifiable {
+    let id: String
+    let title: String
+    let subtitle: String
+    let timeText: String
+    let action: () -> Void
+}
+
+private struct NotificationsPopoverCard: View {
+    @Environment(AppState.self) private var appState
+    @Query(sort: \Bill.nextDueDate) private var bills: [Bill]
+    @Query(sort: \MoneyTransaction.date, order: .reverse) private var transactions: [MoneyTransaction]
+    @Query(sort: \Budget.createdAt) private var budgets: [Budget]
+    @Query(sort: \Account.createdAt) private var accounts: [Account]
+    @AppStorage(Keys.currency) private var currency = "BHD"
+
+    let onOpenDestination: (DrawerDestination) -> Void
+    let onClose: () -> Void
+
+    private var notificationItems: [NotificationCardItem] {
+        var list: [NotificationCardItem] = []
+        let cal = Calendar.current
+        let todayStart = cal.startOfDay(for: .now)
+        let soon = cal.date(byAdding: .day, value: 7, to: .now) ?? .now
+
+        for bill in bills where !bill.isPaidThisCycle && bill.nextDueDate <= soon {
+            let days = cal.dateComponents([.day], from: todayStart, to: cal.startOfDay(for: bill.nextDueDate)).day ?? 0
+            let dueTitle: String = {
+                if days < 0 { return "\(bill.name) is overdue" }
+                if days == 0 { return "\(bill.name) due today" }
+                if days == 1 { return "\(bill.name) due tomorrow" }
+                return "\(bill.name) due in \(days) days"
+            }()
+            let timeLabel = days < 0 ? "\(-days)d ago" : (days == 0 ? "Today" : "In \(days)d")
+            list.append(NotificationCardItem(
+                id: "bill-\(bill.id.uuidString)",
+                title: dueTitle,
+                subtitle: "\(Money.format(bill.amount, currency)) scheduled",
+                timeText: timeLabel,
+                action: { onOpenDestination(.bills) }
+            ))
+        }
+
+        let reviewTxs = transactions.filter { $0.isPending || $0.isPossibleDuplicate }
+        if !reviewTxs.isEmpty {
+            let latest = reviewTxs.first?.date ?? .now
+            let hours = max(1, cal.dateComponents([.hour], from: latest, to: .now).hour ?? 1)
+            let timeLabel = hours < 24 ? "\(hours)h ago" : "\(hours / 24)d ago"
+            list.append(NotificationCardItem(
+                id: "review-\(reviewTxs.count)",
+                title: "\(reviewTxs.count) transaction\(reviewTxs.count == 1 ? "" : "s") to approve",
+                subtitle: "Tap Review in Transactions to confirm",
+                timeText: timeLabel,
+                action: {
+                    onClose()
+                    appState.openTransactions(filter: .review)
+                }
+            ))
+        }
+
+        let f = Finance(transactions: transactions, accounts: accounts, budgets: budgets, bills: bills)
+        let interval = f.monthInterval(.now)
+        for budget in budgets where budget.limit > 0 {
+            let spent = f.spent(for: budget, in: interval)
+            let pct = Int((spent / budget.limit) * 100)
+            if pct >= 80 {
+                list.append(NotificationCardItem(
+                    id: "budget-\(budget.id.uuidString)-\(pct)",
+                    title: "\(budget.name) at \(pct)%",
+                    subtitle: "\(Money.format(spent, currency)) of \(Money.format(budget.limit, currency)) monthly budget used",
+                    timeText: "This month",
+                    action: {
+                        onClose()
+                        appState.tab = .budgets
+                    }
+                ))
+            }
+        }
+
+        let todayDay = cal.component(.day, from: .now)
+        for acc in accounts where acc.kind.isLiability && acc.balance > 0 && acc.paymentDueDay > 0 && abs(acc.paymentDueDay - todayDay) <= 5 {
+            list.append(NotificationCardItem(
+                id: "card-\(acc.id.uuidString)-\(acc.paymentDueDay)",
+                title: "\(acc.name) payment due",
+                subtitle: "Due on day \(acc.paymentDueDay) · \(Money.format(acc.balance, currency))",
+                timeText: "Soon",
+                action: {
+                    onClose()
+                    appState.tab = .accounts
+                }
+            ))
+        }
+
+        return list
+    }
+
+    private var alertSignature: String {
+        notificationItems.map(\.id).joined(separator: "|")
+    }
+
+    var body: some View {
+        let items = notificationItems
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Notifications")
+                    .font(.headline.weight(.bold))
+                    .foregroundStyle(Theme.ink)
+                Spacer()
+                if !items.isEmpty {
+                    Button("Mark all read") {
+                        appState.markNotificationsRead(signature: alertSignature)
+                        onClose()
+                    }
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(Theme.ink)
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 4)
+
+            if items.isEmpty {
+                HStack(spacing: 10) {
+                    Image(systemName: "bell.badge")
+                        .foregroundStyle(Theme.secondaryInk)
+                    Text("You're all caught up")
+                        .font(.subheadline)
+                        .foregroundStyle(Theme.secondaryInk)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(14)
+                .background(Theme.track.opacity(0.6), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            } else {
+                ScrollView {
+                    VStack(spacing: 10) {
+                        ForEach(items) { item in
+                            Button(action: item.action) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                        Text(item.title)
+                                            .font(.subheadline.weight(.semibold))
+                                            .foregroundStyle(Theme.ink)
+                                            .lineLimit(1)
+                                        Spacer()
+                                        Text(item.timeText)
+                                            .font(.caption)
+                                            .foregroundStyle(Theme.secondaryInk)
+                                    }
+                                    Text(item.subtitle)
+                                        .font(.caption)
+                                        .foregroundStyle(Theme.secondaryInk)
+                                        .lineLimit(2)
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(14)
+                                .background(Theme.track.opacity(0.65), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+                .frame(maxHeight: 320)
+            }
+        }
+        .padding(16)
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .shadow(color: .black.opacity(0.12), radius: 22, y: 8)
     }
 }
 
