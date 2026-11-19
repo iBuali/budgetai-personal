@@ -76,6 +76,64 @@ struct TransactionRuleBuilderSheet: View {
 
     @State private var showConflictAlert: Bool = false
     @State private var conflictingRuleName: String = ""
+    @State private var cachedAffected: [(tx: MoneyTransaction, changes: [(label: String, before: String, after: String)])] = []
+    @State private var hasComputedInitialPreview: Bool = false
+
+    private struct RulePreviewKey: Equatable {
+        let logic: RuleConditionLogic
+        let availableConditions: [RuleCondition]
+        let selectedFields: Set<RuleConditionField>
+        let locationRadius: Double
+        let enableSetCategory: Bool
+        let selectedCategoryRaw: String
+        let fromAccountID: UUID?
+        let toAccountID: UUID?
+        let enableOverrideAccount: Bool
+        let overrideAccountID: UUID?
+        let enableSetMerchant: Bool
+        let actionMerchant: String
+        let enableSetBank: Bool
+        let actionBank: String
+        let enableSetLocation: Bool
+        let actionLocationName: String
+        let actionLocationAddress: String?
+        let actionLatitude: Double?
+        let actionLongitude: Double?
+        let enableSetNote: Bool
+        let actionNote: String
+        let enableSetGoal: Bool
+        let actionGoalID: UUID?
+        let transactionCount: Int
+    }
+
+    private var previewKey: RulePreviewKey {
+        RulePreviewKey(
+            logic: logic,
+            availableConditions: availableConditions,
+            selectedFields: selectedFields,
+            locationRadius: locationRadius,
+            enableSetCategory: enableSetCategory,
+            selectedCategoryRaw: selectedCategory.rawValue,
+            fromAccountID: fromAccountID,
+            toAccountID: toAccountID,
+            enableOverrideAccount: enableOverrideAccount,
+            overrideAccountID: overrideAccountID,
+            enableSetMerchant: enableSetMerchant,
+            actionMerchant: actionMerchant,
+            enableSetBank: enableSetBank,
+            actionBank: actionBank,
+            enableSetLocation: enableSetLocation,
+            actionLocationName: actionLocationName,
+            actionLocationAddress: actionLocationAddress,
+            actionLatitude: actionLatitude,
+            actionLongitude: actionLongitude,
+            enableSetNote: enableSetNote,
+            actionNote: actionNote,
+            enableSetGoal: enableSetGoal,
+            actionGoalID: actionGoalID,
+            transactionCount: allTransactions.count
+        )
+    }
 
     private var store: TransactionRuleStore { TransactionRuleStore.shared }
 
@@ -87,7 +145,7 @@ struct TransactionRuleBuilderSheet: View {
         !selectedConditionsList.isEmpty
     }
 
-    private var affectedTransactions: [(tx: MoneyTransaction, changes: [(label: String, before: String, after: String)])] {
+    private func computeAffectedTransactions() -> [(tx: MoneyTransaction, changes: [(label: String, before: String, after: String)])] {
         guard canSave else { return [] }
         let candidate = buildRule()
         return allTransactions.compactMap { tx in
@@ -101,10 +159,9 @@ struct TransactionRuleBuilderSheet: View {
     }
 
     var body: some View {
-        let affected = affectedTransactions
         NavigationStack {
             VStack(spacing: 0) {
-                tabHeader(previewCount: affected.count)
+                tabHeader(previewCount: cachedAffected.count)
 
                 Group {
                     switch selectedTab {
@@ -118,12 +175,12 @@ struct TransactionRuleBuilderSheet: View {
                         .scrollContentBackground(.hidden)
                         .canvasBackground()
                     case .preview:
-                        previewTabView(affected: affected)
+                        previewTabView(affected: cachedAffected)
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                bottomActionFooter(affectedCount: affected.count)
+                bottomActionFooter(affectedCount: cachedAffected.count)
             }
             .navigationTitle(existingRule == nil ? "Create rule" : "Edit rule")
             .navigationBarTitleDisplayMode(.inline)
@@ -140,6 +197,14 @@ struct TransactionRuleBuilderSheet: View {
                 }
             }
             .onAppear(perform: loadInitialState)
+            .task(id: previewKey) {
+                if hasComputedInitialPreview {
+                    try? await Task.sleep(for: .milliseconds(120))
+                    guard !Task.isCancelled else { return }
+                }
+                cachedAffected = computeAffectedTransactions()
+                hasComputedInitialPreview = true
+            }
             .alert("Duplicate Rule Conditions", isPresented: $showConflictAlert) {
                 Button("Update Existing Rule") {
                     commitSave()
@@ -665,13 +730,14 @@ struct TransactionRuleBuilderSheet: View {
         }
 
         if applyToExisting {
-            let affected = affectedTransactions
+            let affected = computeAffectedTransactions()
             if !affected.isEmpty {
                 let priority = store.priorityNumber(for: savedRule.id) ?? 1
                 for item in affected {
                     store.apply(rule: savedRule, to: item.tx, priorityNumber: priority)
                 }
                 try? modelContext.save()
+                Ledger.notifyDataChanged()
             }
         }
 
@@ -918,8 +984,8 @@ struct TransactionRuleBuilderSheet: View {
 struct TransactionDetailRulesSection: View {
     let tx: MoneyTransaction
     let accounts: [Account]
+    @Binding var showCreateSheet: Bool
 
-    @State private var showCreateSheet = false
     @State private var editingRule: TransactionRule?
     private var store: TransactionRuleStore { TransactionRuleStore.shared }
 
@@ -935,43 +1001,13 @@ struct TransactionDetailRulesSection: View {
 
         VStack(alignment: .leading, spacing: 12) {
             if matchedRulesWithIndex.isEmpty {
-                HStack(spacing: 10) {
-                    Image(systemName: "checkmark.seal")
-                        .foregroundStyle(Theme.brand)
-                    Text("No matching rules for this transaction.")
-                        .font(.caption)
-                        .foregroundStyle(Theme.secondaryInk)
-                    Spacer()
-                    Button {
-                        showCreateSheet = true
-                    } label: {
-                        Image(systemName: "plus")
-                            .font(.caption.weight(.bold))
-                            .frame(width: 28, height: 28)
-                            .background(Theme.track.opacity(0.75), in: Circle())
-                            .foregroundStyle(Theme.ink)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Create rule")
-                }
-                .padding(10)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Theme.track.opacity(0.5), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                Text("No matching rules for this transaction.")
+                    .font(.caption)
+                    .foregroundStyle(Theme.secondaryInk)
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Theme.track.opacity(0.5), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             } else {
-                HStack {
-                    Spacer()
-                    Button {
-                        showCreateSheet = true
-                    } label: {
-                        Image(systemName: "plus")
-                            .font(.caption.weight(.bold))
-                            .frame(width: 28, height: 28)
-                            .background(Theme.track.opacity(0.75), in: Circle())
-                            .foregroundStyle(Theme.ink)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Create rule")
-                }
                 VStack(spacing: 8) {
                     ForEach(matchedRulesWithIndex, id: \.rule.id) { item in
                         Button {

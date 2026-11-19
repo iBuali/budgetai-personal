@@ -402,12 +402,12 @@ struct TransactionLocationCard: View {
         VStack(alignment: .leading, spacing: 0) {
             // Small Apple Wallet–style map header
             ZStack(alignment: .topTrailing) {
-                Map(position: .constant(cameraPosition), interactionModes: []) {
-                    Marker(placeName, coordinate: coordinate)
-                        .tint(Theme.brand)
-                }
-                .frame(height: 148)
-                .allowsHitTesting(false)
+                StaticTransactionMapView(
+                    placeName: placeName,
+                    latitude: coordinate.latitude,
+                    longitude: coordinate.longitude
+                )
+                .equatable()
 
                 Button {
                     openInAppleMaps()
@@ -500,6 +500,26 @@ struct TransactionLocationCard: View {
             MKLaunchOptionsMapCenterKey: NSValue(mkCoordinate: coordinate),
             MKLaunchOptionsMapSpanKey: NSValue(mkCoordinateSpan: MKCoordinateSpan(latitudeDelta: 0.015, longitudeDelta: 0.015))
         ])
+    }
+}
+
+private struct StaticTransactionMapView: View, Equatable {
+    let placeName: String
+    let latitude: Double
+    let longitude: Double
+
+    var body: some View {
+        let coord = CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+        let region = MKCoordinateRegion(
+            center: coord,
+            span: MKCoordinateSpan(latitudeDelta: 0.012, longitudeDelta: 0.012)
+        )
+        Map(position: .constant(.region(region)), interactionModes: []) {
+            Marker(placeName, coordinate: coord)
+                .tint(Theme.brand)
+        }
+        .frame(height: 148)
+        .allowsHitTesting(false)
     }
 }
 

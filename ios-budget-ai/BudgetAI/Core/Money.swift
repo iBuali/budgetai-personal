@@ -18,6 +18,7 @@ enum Keys {
     static let iCloudLastBackupStatus = "iCloudLastBackupStatus"
     static let homeAccountOrder = "homeAccountOrder"
     static let homeHiddenAccounts = "homeHiddenAccounts"
+    static let appearanceMode = "appearanceMode"
 }
 
 enum AppSettings {
@@ -34,6 +35,22 @@ enum Money {
     private static let threeDecimal: Set<String> = ["BHD", "KWD", "OMR", "JOD", "TND", "LYD", "IQD"]
     private static let zeroDecimal: Set<String> = ["JPY", "KRW", "VND", "CLP", "ISK", "UGX", "PYG", "XAF", "XOF", "IDR"]
     private static let locale = Locale(identifier: "en_US")
+
+    private static func cachedNumberFormatter(decimals: Int) -> NumberFormatter {
+        let key = "BudgetAI.NumberFormatter.\(decimals)"
+        let dict = Thread.current.threadDictionary
+        if let cached = dict[key] as? NumberFormatter {
+            return cached
+        }
+        let f = NumberFormatter()
+        f.locale = locale
+        f.numberStyle = .decimal
+        f.usesGroupingSeparator = true
+        f.minimumFractionDigits = decimals
+        f.maximumFractionDigits = decimals
+        dict[key] = f
+        return f
+    }
 
     static func symbol(_ code: String) -> String {
         switch code {
@@ -57,7 +74,8 @@ enum Money {
     }
 
     static func number(_ value: Double, decimals: Int) -> String {
-        abs(value).formatted(.number.precision(.fractionLength(decimals)).locale(locale))
+        let f = cachedNumberFormatter(decimals: decimals)
+        return f.string(from: NSNumber(value: abs(value))) ?? "0"
     }
 
     /// "BD 4,286.750", "−BD 6.750", "+$12.00"
@@ -75,8 +93,8 @@ enum Money {
     /// Short number for chart axes and dense rows: "1,148" / "4.2k"
     static func short(_ value: Double) -> String {
         let v = abs(value)
-        if v >= 10_000 { return (v / 1000).formatted(.number.precision(.fractionLength(1)).locale(locale)) + "k" }
-        return v.formatted(.number.precision(.fractionLength(0)).locale(locale))
+        if v >= 10_000 { return number(v / 1000, decimals: 1) + "k" }
+        return number(v, decimals: 0)
     }
 
     static func parse(_ text: String) -> Double? {
@@ -85,6 +103,37 @@ enum Money {
     }
 
     static let popularCurrencies = ["BHD", "SAR", "AED", "KWD", "QAR", "OMR", "USD", "EUR", "GBP", "INR", "PKR", "EGP"]
+}
+
+enum DateFormatCache {
+    static func shortTime(_ date: Date) -> String {
+        let key = "BudgetAI.DateFormatter.shortTime"
+        let dict = Thread.current.threadDictionary
+        let f: DateFormatter
+        if let cached = dict[key] as? DateFormatter {
+            f = cached
+        } else {
+            f = DateFormatter()
+            f.dateStyle = .none
+            f.timeStyle = .short
+            dict[key] = f
+        }
+        return f.string(from: date)
+    }
+
+    static func dayHeader(_ date: Date) -> String {
+        let key = "BudgetAI.DateFormatter.dayHeader"
+        let dict = Thread.current.threadDictionary
+        let f: DateFormatter
+        if let cached = dict[key] as? DateFormatter {
+            f = cached
+        } else {
+            f = DateFormatter()
+            f.setLocalizedDateFormatFromTemplate("EEEEMMMd")
+            dict[key] = f
+        }
+        return f.string(from: date)
+    }
 }
 
 struct HomeAccountPreferences {

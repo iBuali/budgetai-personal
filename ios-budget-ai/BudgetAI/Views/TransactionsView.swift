@@ -52,6 +52,10 @@ struct TxFilterState: Equatable {
     }
 
     func matches(_ tx: MoneyTransaction, ignoringDates: Bool = false) -> Bool {
+        matches(tx, interval: ignoringDates ? nil : self.interval, ignoringDates: ignoringDates)
+    }
+
+    func matches(_ tx: MoneyTransaction, interval activeInterval: DateInterval?, ignoringDates: Bool = false) -> Bool {
         switch kind {
         case .all: break
         case .review: if !tx.isPending && !tx.isPossibleDuplicate { return false }
@@ -59,7 +63,7 @@ struct TxFilterState: Equatable {
         case .expenses: if !tx.isSpending { return false }
         case .transfers: if !tx.isTransfer { return false }
         }
-        if !ignoringDates, let interval, !(tx.date >= interval.start && tx.date < interval.end) { return false }
+        if !ignoringDates, let activeInterval, !(tx.date >= activeInterval.start && tx.date < activeInterval.end) { return false }
         if !categories.isEmpty && !categories.contains(tx.categoryRaw) && !categories.contains(tx.subcategoryKey) { return false }
         if !accounts.isEmpty {
             let hit = tx.accountID.map(accounts.contains) ?? false
@@ -99,55 +103,85 @@ struct TransactionsView: View {
             || tx.note.localizedCaseInsensitiveContains(query)
     }
 
-    private func computeFiltered() -> [MoneyTransaction] {
-        let ignoreDatesForReview = mode == .calendar || filters.range == .thisCycle
-        if filters.kind == .review {
-            return transactions.filter { ($0.isPending || $0.isPossibleDuplicate) && filters.matches($0, ignoringDates: ignoreDatesForReview) && matchesSearch($0) }
-        }
-        if filters.kind == .all {
-            return transactions.filter { filters.matches($0, ignoringDates: mode == .calendar) && matchesSearch($0) }
-        }
-        return transactions.filter { !$0.isPending && filters.matches($0, ignoringDates: mode == .calendar) && matchesSearch($0) }
-    }
-
-    private func computeGrouped(from items: [MoneyTransaction]) -> [(day: Date, items: [MoneyTransaction])] {
-        let cal = Calendar.current
-        let groups = Dictionary(grouping: items) { cal.startOfDay(for: $0.date) }
-        return groups.map { ($0.key, $0.value) }.sorted { $0.day > $1.day }
-    }
-
-    private func computeTotals(from items: [MoneyTransaction]) -> (income: Double, spent: Double) {
-        items.reduce((0, 0)) { acc, tx in
-            guard !tx.isPending else { return acc }
-            if tx.isOrdinaryIncome { return (acc.0 + tx.amount, acc.1) }
-            if tx.isSpending { return (acc.0, acc.1 + tx.amount) }
-            return acc
-        }
-    }
-
-    private func computeReviewBuckets() -> (pending: [MoneyTransaction], needsReview: [MoneyTransaction]) {
+    private struct TxViewSnapshot {
+        var filtered: [MoneyTransaction] = []
         var pending: [MoneyTransaction] = []
         var needsReview: [MoneyTransaction] = []
+        var grouped: [(day: Date, items: [MoneyTransaction])] = []
+        var totals: (income: Double, spent: Double) = (0, 0)
+        var hasUncategorizedOther = false
+    }
+
+    private func computeViewSnapshot() -> TxViewSnapshot {
+        var snap = TxViewSnapshot()
+        let cal = Calendar.current
+        let ignoreDatesForReview = mode == .calendar || filters.range == .thisCycle
+        let ignoreDates = (filters.kind == .review) ? ignoreDatesForReview : (mode == .calendar)
+        let activeInterval = ignoreDates ? nil : filters.interval
+        let showSummary = mode == .list && (filters.activeCount > 0 || filters.kind != .all)
+
+        var groupsByDay: [Date: [MoneyTransaction]] = [:]
+        var dayKeys: [Date] = []
+
         for tx in transactions {
             if tx.isPending {
-                pending.append(tx)
-                needsReview.append(tx)
+                snap.pending.append(tx)
+                snap.needsReview.append(tx)
             } else if tx.isPossibleDuplicate {
-                needsReview.append(tx)
+                snap.needsReview.append(tx)
+            }
+
+            if !snap.hasUncategorizedOther && tx.categoryRaw == SpendCategory.other.rawValue && !tx.isIncome {
+                snap.hasUncategorizedOther = true
+            }
+
+            let passesKindScope: Bool = {
+                switch filters.kind {
+                case .review: return tx.isPending || tx.isPossibleDuplicate
+                case .all: return true
+                case .income, .expenses, .transfers: return !tx.isPending
+                }
+            }()
+            guard passesKindScope,
+                  filters.matches(tx, interval: activeInterval, ignoringDates: ignoreDates),
+                  matchesSearch(tx) else { continue }
+
+            snap.filtered.append(tx)
+
+            if showSummary && !tx.isPending {
+                if tx.isOrdinaryIncome {
+                    snap.totals.income += tx.amount
+                } else if tx.isSpending {
+                    snap.totals.spent += tx.amount
+                }
+            }
+
+            if mode == .list {
+                let day = cal.startOfDay(for: tx.date)
+                if groupsByDay[day] == nil { dayKeys.append(day) }
+                groupsByDay[day, default: []].append(tx)
             }
         }
-        return (pending, needsReview)
+
+        if mode == .list {
+            snap.grouped = dayKeys.sorted(by: >).compactMap { day in
+                guard let items = groupsByDay[day] else { return nil }
+                return (day: day, items: items)
+            }
+        }
+
+        return snap
     }
 
     var body: some View {
         let _ = cycleStartDay
-        let currentFiltered = computeFiltered()
-        let reviewBuckets = computeReviewBuckets()
-        let currentPending = reviewBuckets.pending
-        let currentNeedsReview = reviewBuckets.needsReview
-        let currentGrouped = mode == .list ? computeGrouped(from: currentFiltered) : []
+        let snap = computeViewSnapshot()
+        let currentFiltered = snap.filtered
+        let currentPending = snap.pending
+        let currentNeedsReview = snap.needsReview
+        let currentGrouped = snap.grouped
         let showSummary = mode == .list && (filters.activeCount > 0 || filters.kind != .all) && !currentFiltered.isEmpty
-        let currentTotals = showSummary ? computeTotals(from: currentFiltered) : (0.0, 0.0)
+        let currentTotals = snap.totals
 
         NavigationStack {
             VStack(spacing: 0) {
@@ -334,7 +368,7 @@ struct TransactionsView: View {
                     DrawerMenuToolbarButtons()
                 }
                 ToolbarItemGroup(placement: .topBarTrailing) {
-                    if transactions.contains(where: { $0.category == .other && !$0.isIncome }) && GeminiAccount.isConfigured {
+                    if snap.hasUncategorizedOther && GeminiAccount.isConfigured {
                         Button {
                             Task { await recategorize() }
                         } label: {
@@ -629,7 +663,7 @@ struct TransactionsView: View {
         let cal = Calendar.current
         if cal.isDateInToday(day) { return "Today" }
         if cal.isDateInYesterday(day) { return "Yesterday" }
-        return day.formatted(.dateTime.weekday(.wide).month(.abbreviated).day())
+        return DateFormatCache.dayHeader(day)
     }
 
     private func recategorize() async {
@@ -912,14 +946,18 @@ struct TransactionDetailView: View {
     @State private var editingCategory = false
     @State private var nameText = ""
     @State private var amountText = ""
+    @State private var noteText = ""
     @State private var showLocationPicker = false
     @State private var isCapturingGPS = false
     @State private var showAddSenderBankAlert = false
     @State private var newSenderBankName = ""
+    @State private var showCreateRuleSheet = false
+    @State private var cachedSMSLegHeaders: [String] = []
+    @State private var cachedInferredLocation: TransactionLocationData? = nil
     @FocusState private var focusedField: DetailField?
 
     private enum DetailField: Hashable {
-        case name, amount
+        case name, amount, note
     }
 
     private var account: Account? { accounts.first { $0.id == tx.accountID } }
@@ -929,7 +967,7 @@ struct TransactionDetailView: View {
 
     private var matchedRecipientAccount: Account? {
         guard let recip = tx.smsRecipientSuffix, !recip.isEmpty else { return nil }
-        return SMSParser.findMatchingAccount(suffix: recip, excludingAccountID: tx.accountID, in: context)
+        return SMSParser.findMatchingAccount(suffix: recip, excludingAccountID: tx.accountID, in: accounts)
     }
 
     private var recipientDisplayText: String {
@@ -962,6 +1000,10 @@ struct TransactionDetailView: View {
         return abs(parsed - tx.amount) >= 0.0005
     }
 
+    private var hasUnsavedNote: Bool {
+        noteText != tx.note
+    }
+
     private var effectiveLocation: TransactionLocationData? {
         if tx.hasLocation {
             let place = (tx.locationName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
@@ -974,7 +1016,7 @@ struct TransactionDetailView: View {
                 longitude: tx.longitude
             )
         }
-        return LocationService.inferLocation(from: tx.rawText, merchant: tx.merchant)
+        return cachedInferredLocation
     }
 
     private func effectiveAccountBalance(_ acc: Account) -> Double {
@@ -1039,6 +1081,11 @@ struct TransactionDetailView: View {
             syncSMSAccountAndRecipientIfNeeded()
             nameText = tx.merchant
             amountText = Money.number(tx.amount, decimals: Money.digits(currency)).replacingOccurrences(of: ",", with: "")
+            noteText = tx.note
+            refreshDerivedSMSMetadata()
+        }
+        .onChange(of: tx.rawText) { _, _ in
+            refreshDerivedSMSMetadata()
         }
         .onChange(of: focusedField) { oldValue, _ in
             if oldValue == .name {
@@ -1046,6 +1093,8 @@ struct TransactionDetailView: View {
             } else if oldValue == .amount {
                 commitAmount(silent: true)
                 amountText = Money.number(tx.amount, decimals: Money.digits(currency)).replacingOccurrences(of: ",", with: "")
+            } else if oldValue == .note {
+                commitNote(silent: true)
             }
         }
         .onDisappear {
@@ -1218,11 +1267,9 @@ struct TransactionDetailView: View {
                     .multilineTextAlignment(.trailing)
                     .focused($focusedField, equals: .name)
                     .submitLabel(.done)
-                    .onChange(of: nameText) { _, newValue in
-                        let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
-                        guard !trimmed.isEmpty, trimmed != tx.merchant else { return }
-                        tx.merchant = trimmed
-                        try? context.save()
+                    .onSubmit {
+                        commitName(silent: true)
+                        focusedField = nil
                     }
             }
 
@@ -1234,12 +1281,6 @@ struct TransactionDetailView: View {
                     .multilineTextAlignment(.trailing)
                     .monospacedDigit()
                     .focused($focusedField, equals: .amount)
-                    .onChange(of: amountText) { _, newValue in
-                        guard let parsed = Money.parse(newValue), parsed > 0, abs(parsed - tx.amount) >= 0.0005 else { return }
-                        Ledger.edit(tx, context: context) { target in
-                            target.amount = abs(parsed)
-                        }
-                    }
             }
 
             DatePicker(
@@ -1250,6 +1291,7 @@ struct TransactionDetailView: View {
                         tx.date = newDate
                         Ledger.recordSnapshot(context: context)
                         try? context.save()
+                        Ledger.notifyDataChanged()
                     }
                 ),
                 displayedComponents: [.date, .hourAndMinute]
@@ -1308,10 +1350,8 @@ struct TransactionDetailView: View {
                 savingsGoalPicker
             }
 
-            TextField("Note", text: $tx.note, axis: .vertical)
-                .onChange(of: tx.note) { _, _ in
-                    try? context.save()
-                }
+            TextField("Note", text: $noteText, axis: .vertical)
+                .focused($focusedField, equals: .note)
         }
     }
 
@@ -1445,6 +1485,7 @@ struct TransactionDetailView: View {
             tx.category = new
             tx.aiCategorized = false
             try? context.save()
+            Ledger.notifyDataChanged()
         }
     }
 
@@ -1491,10 +1532,26 @@ struct TransactionDetailView: View {
 
     @ViewBuilder
     private var rulesSection: some View {
-        Section("Transaction Rules") {
-            TransactionDetailRulesSection(tx: tx, accounts: accounts)
+        Section {
+            TransactionDetailRulesSection(tx: tx, accounts: accounts, showCreateSheet: $showCreateRuleSheet)
                 .listRowInsets(EdgeInsets())
                 .listRowBackground(Color.clear)
+        } header: {
+            HStack {
+                Text("Transaction Rules")
+                Spacer()
+                Button {
+                    showCreateRuleSheet = true
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.caption.weight(.bold))
+                        .frame(width: 26, height: 26)
+                        .background(Theme.track.opacity(0.75), in: Circle())
+                        .foregroundStyle(Theme.ink)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Create rule")
+            }
         }
     }
 
@@ -1599,9 +1656,8 @@ struct TransactionDetailView: View {
                 }
             }
 
-            if let toBal = tx.smsToBalance, let toID = tx.toAccountID, let toAccount = Ledger.account(toID, context: context) {
-                let toEffectiveBal = effectiveAccountBalance(toAccount)
-                Divider()
+            if let toBal = tx.smsToBalance, let toID = tx.toAccountID, let destAcc = toAccount {
+                let toEffectiveBal = effectiveAccountBalance(destAcc)
 
                 LabeledContent("Destination previous balance") {
                     let destPrev = max(0, toBal - tx.amount)
@@ -1610,19 +1666,19 @@ struct TransactionDetailView: View {
                 }
 
                 LabeledContent("Destination new balance") {
-                    Text("\(toAccount.name) (\(Money.format(toEffectiveBal, currency)))")
+                    Text("\(destAcc.name) (\(Money.format(toEffectiveBal, currency)))")
                         .monospacedDigit()
                         .animatedNumber(toEffectiveBal)
                 }
 
-                if !toAccount.kind.isLiability || toAccount.kind == .creditCard {
+                if !destAcc.kind.isLiability || destAcc.kind == .creditCard {
                     if abs(toEffectiveBal - toBal) >= 0.0005 && !tx.isPending {
                         Button {
                             if let synced = Ledger.syncBalanceForAccount(id: toID, balance: toBal, on: tx, isToAccount: true, context: context, force: true) {
-                                appState.show("\(toAccount.name) set to \(Money.format(synced, currency))")
+                                appState.show("\(destAcc.name) set to \(Money.format(synced, currency))")
                             }
                         } label: {
-                            Label("Match \(toAccount.name) to bank balance", systemImage: "equal.circle.fill")
+                            Label("Match \(destAcc.name) to bank balance", systemImage: "equal.circle.fill")
                         }
                     }
                 }
@@ -1630,11 +1686,19 @@ struct TransactionDetailView: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 Text("Classification reason").font(.caption).foregroundStyle(Theme.secondaryInk)
-                Text(tx.smsClassificationReason.isEmpty ? "—" : tx.smsClassificationReason)
+                Text(formattedClassificationReason)
                     .font(.footnote)
                     .foregroundStyle(Theme.ink)
             }
         }
+    }
+
+    private var formattedClassificationReason: String {
+        let raw = tx.smsClassificationReason.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else { return "—" }
+        return raw
+            .replacingOccurrences(of: #"^Matched\s+Rule\s+\d+:\s*"#, with: "Matched: ", options: .regularExpression)
+            .replacingOccurrences(of: #"^Rule\s+\d+:\s*"#, with: "", options: .regularExpression)
     }
 
     @ViewBuilder
@@ -1643,7 +1707,7 @@ struct TransactionDetailView: View {
             if rawSMSMessages.count > 1 {
                 ForEach(Array(rawSMSMessages.enumerated()), id: \.offset) { idx, msg in
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(smsLegHeaderTitle(index: idx, message: msg))
+                        Text(idx < cachedSMSLegHeaders.count ? cachedSMSLegHeaders[idx] : "SMS \(idx + 1)")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(idx == 0 ? Theme.ink : Theme.positive)
                         Text(msg)
@@ -1714,9 +1778,18 @@ struct TransactionDetailView: View {
         }
     }
 
+    private func refreshDerivedSMSMetadata() {
+        cachedInferredLocation = tx.hasLocation ? nil : LocationService.inferLocation(from: tx.rawText, merchant: tx.merchant)
+        let messages = rawSMSMessages
+        cachedSMSLegHeaders = messages.count > 1
+            ? messages.enumerated().map { idx, msg in smsLegHeaderTitle(index: idx, message: msg) }
+            : []
+    }
+
     private func commitPendingEdits(silent: Bool) {
         if hasUnsavedName { commitName(silent: silent) }
         if hasUnsavedAmount { commitAmount(silent: silent) }
+        if hasUnsavedNote { commitNote(silent: silent) }
     }
 
     private func commitName(silent: Bool = false) {
@@ -1727,6 +1800,12 @@ struct TransactionDetailView: View {
         if !silent {
             appState.show("Updated name to \(trimmed)")
         }
+    }
+
+    private func commitNote(silent: Bool = false) {
+        guard noteText != tx.note else { return }
+        tx.note = noteText
+        try? context.save()
     }
 
     private func commitAmount(silent: Bool = false) {

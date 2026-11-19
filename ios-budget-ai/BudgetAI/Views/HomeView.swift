@@ -158,10 +158,6 @@ struct HomeView: View {
     @AppStorage(Keys.cycleStartDay) private var cycleStartDay = 1
     @AppStorage(Keys.homeAccountOrder) private var homeAccountOrder = ""
     @AppStorage(Keys.homeHiddenAccounts) private var homeHiddenAccounts = ""
-    @State private var range: ChartRange = .month
-    @State private var chartStyle: SpendingChartStyle = .pie
-    @State private var selectedCategory: SpendCategory?
-    @State private var showAllCategories = false
     @State private var showCustomizeItems = false
     @State private var billToPay: Bill?
     @State private var showStatementImport = false
@@ -177,7 +173,12 @@ struct HomeView: View {
             ScrollView {
                 VStack(spacing: 16) {
                     header(f)
-                    spendingCard(f)
+                    HomeSpendingCard(
+                        transactions: transactions,
+                        currency: currency,
+                        cycleStartDay: cycleStartDay,
+                        dataVersion: appState.dataVersion
+                    )
                     financialItemsSection
                     safeCard(f)
                     duplicatesBanner
@@ -268,244 +269,7 @@ struct HomeView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    @ViewBuilder
-    private func chartStyleToggleButtons(useGlass: Bool) -> some View {
-        HStack(spacing: 2) {
-            ForEach(SpendingChartStyle.allCases) { style in
-                let isSelected = chartStyle == style
-                let pill = HStack(spacing: 4) {
-                    Image(systemName: style.symbol)
-                        .font(.caption.weight(.semibold))
-                    Text(style.rawValue)
-                        .font(.caption.weight(.semibold))
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .foregroundStyle(isSelected ? .white : Theme.secondaryInk)
-
-                Button {
-                    withAnimation(.snappy(duration: 0.25)) {
-                        chartStyle = style
-                    }
-                } label: {
-                    if useGlass, #available(iOS 26.0, *) {
-                        pill.glassEffect(
-                            isSelected ? .regular.tint(Theme.cobalt).interactive() : .regular.interactive(),
-                            in: Capsule()
-                        )
-                    } else {
-                        pill.background(isSelected ? Theme.cobalt : Theme.track, in: Capsule())
-                    }
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("\(style.rawValue) chart")
-            }
-        }
-    }
-
-    private func spendingCard(_ f: Finance) -> some View {
-        let breakdown = f.categoryBreakdown(range)
-        let totalSpent = breakdown.reduce(0) { $0 + $1.amount }
-        let activeSlice = selectedCategory.flatMap { cat in
-            breakdown.first(where: { $0.category == cat })
-        }
-
-        return VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .center, spacing: 12) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Spending by Category")
-                        .font(.headline)
-                        .foregroundStyle(Theme.ink)
-                    Text(f.rangeSubtitle(range))
-                        .font(.caption)
-                        .foregroundStyle(Theme.secondaryInk)
-                }
-
-                Spacer()
-
-                if #available(iOS 26.0, *) {
-                    GlassEffectContainer(spacing: 2) {
-                        chartStyleToggleButtons(useGlass: true)
-                    }
-                } else {
-                    chartStyleToggleButtons(useGlass: false)
-                }
-            }
-
-            Picker("Range", selection: $range) {
-                ForEach(ChartRange.allCases) { Text($0.rawValue).tag($0) }
-            }
-            .pickerStyle(.segmented)
-            .onChange(of: range) { _, _ in
-                selectedCategory = nil
-                showAllCategories = false
-            }
-
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                if let active = activeSlice {
-                    let pct = totalSpent > 0 ? Int((active.amount / totalSpent * 100).rounded()) : 0
-                    HStack(spacing: 6) {
-                        Circle()
-                            .fill(active.category.color)
-                            .frame(width: 9, height: 9)
-                        Text(active.category.title)
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(Theme.ink)
-                            .lineLimit(1)
-                    }
-                    Text(Money.format(active.amount, currency))
-                        .font(.title3.weight(.bold).monospacedDigit())
-                        .foregroundStyle(Theme.ink)
-                        .animatedNumber(active.amount)
-                    Text("\(pct)%")
-                        .font(.caption.weight(.semibold).monospacedDigit())
-                        .foregroundStyle(active.category.color)
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 3)
-                        .background(active.category.color.opacity(0.14), in: Capsule())
-                    Spacer(minLength: 0)
-                    Button {
-                        withAnimation(.snappy(duration: 0.25)) {
-                            selectedCategory = nil
-                        }
-                    } label: {
-                        Text("All")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(Theme.cobalt)
-                    }
-                    .buttonStyle(.plain)
-                } else {
-                    Text("Spent")
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(Theme.secondaryInk)
-                    Text(Money.format(totalSpent, currency))
-                        .font(.title2.weight(.bold).monospacedDigit())
-                        .foregroundStyle(Theme.ink)
-                        .animatedNumber(totalSpent)
-                    Spacer(minLength: 0)
-                    if !breakdown.isEmpty {
-                        Text("\(breakdown.count) \(breakdown.count == 1 ? "category" : "categories")")
-                            .font(.caption.weight(.medium).monospacedDigit())
-                            .foregroundStyle(Theme.secondaryInk)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(Theme.track.opacity(0.75), in: Capsule())
-                    }
-                }
-            }
-
-            if breakdown.isEmpty {
-                VStack(spacing: 8) {
-                    Image(systemName: chartStyle.symbol)
-                        .font(.system(size: 28, weight: .medium))
-                        .foregroundStyle(Theme.secondaryInk.opacity(0.55))
-                    Text("No spending recorded \(range == .week ? "this week" : range == .month ? "this cycle" : "this year")")
-                        .font(.subheadline)
-                        .foregroundStyle(Theme.secondaryInk)
-                }
-                .frame(maxWidth: .infinity)
-                .frame(height: 170)
-            } else {
-                if chartStyle == .pie {
-                    CategoryPieChart(
-                        breakdown: breakdown,
-                        totalSpent: totalSpent,
-                        selectedCategory: $selectedCategory
-                    )
-                } else {
-                    CategoryBarChart(
-                        breakdown: breakdown,
-                        selectedCategory: $selectedCategory
-                    )
-                }
-
-                Divider()
-                    .padding(.vertical, 2)
-
-                categoryBreakdownList(breakdown: breakdown, totalSpent: totalSpent)
-            }
-        }
-        .card()
-        .sensoryFeedback(.selection, trigger: range)
-        .sensoryFeedback(.selection, trigger: chartStyle)
-    }
-
-    private func categoryBreakdownList(breakdown: [(category: SpendCategory, amount: Double)], totalSpent: Double) -> some View {
-        let limit = 5
-        let visible = showAllCategories ? breakdown : Array(breakdown.prefix(limit))
-        let maxAmount = breakdown.first?.amount ?? 1
-
-        return VStack(spacing: 6) {
-            ForEach(visible, id: \.category.id) { item in
-                let isSelected = selectedCategory == item.category
-                let pct = totalSpent > 0 ? Int((item.amount / totalSpent * 100).rounded()) : 0
-                let ratio = maxAmount > 0 ? min(1, max(0.05, item.amount / maxAmount)) : 0
-
-                Button {
-                    withAnimation(.snappy(duration: 0.22)) {
-                        selectedCategory = isSelected ? nil : item.category
-                    }
-                } label: {
-                    HStack(spacing: 10) {
-                        CategoryIcon(category: item.category, size: 28)
-
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack(spacing: 6) {
-                                Text(item.category.title)
-                                    .font(.subheadline.weight(isSelected ? .semibold : .medium))
-                                    .foregroundStyle(Theme.ink)
-                                    .lineLimit(1)
-                                Spacer(minLength: 4)
-                                Text("\(pct)%")
-                                    .font(.caption.monospacedDigit())
-                                    .foregroundStyle(Theme.secondaryInk)
-                                Text(Money.format(item.amount, currency))
-                                    .font(.subheadline.weight(.semibold).monospacedDigit())
-                                    .foregroundStyle(Theme.ink)
-                            }
-
-                            GeometryReader { geo in
-                                ZStack(alignment: .leading) {
-                                    Capsule()
-                                        .fill(Theme.track.opacity(0.65))
-                                    Capsule()
-                                        .fill(item.category.color)
-                                        .frame(width: geo.size.width * ratio)
-                                }
-                            }
-                            .frame(height: 4)
-                        }
-                    }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 6)
-                    .background(
-                        isSelected ? item.category.color.opacity(0.11) : Color.clear,
-                        in: RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    )
-                    .opacity(selectedCategory == nil || isSelected ? 1.0 : 0.45)
-                }
-                .buttonStyle(.plain)
-            }
-
-            if breakdown.count > limit {
-                Button {
-                    withAnimation(.snappy(duration: 0.25)) {
-                        showAllCategories.toggle()
-                    }
-                } label: {
-                    HStack(spacing: 4) {
-                        Text(showAllCategories ? "Show fewer" : "Show all \(breakdown.count) categories")
-                        Image(systemName: showAllCategories ? "chevron.up" : "chevron.down")
-                            .font(.caption2.weight(.semibold))
-                    }
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(Theme.cobalt)
-                    .padding(.top, 4)
-                }
-                .buttonStyle(.plain)
-            }
-        }
-    }
+    // Nothing here; chart state moved into HomeSpendingCard to isolate chart interaction redraws.
 
     @ViewBuilder
     private var financialItemsSection: some View {
@@ -746,6 +510,299 @@ enum HomeRoute: Hashable {
     case netWorth
     case netWorthAccount(UUID)
     case bills
+}
+
+private struct HomeSpendingCard: View {
+    let transactions: [MoneyTransaction]
+    let currency: String
+    let cycleStartDay: Int
+    let dataVersion: Int
+
+    @State private var range: ChartRange = .month
+    @State private var chartStyle: SpendingChartStyle = .pie
+    @State private var selectedCategory: SpendCategory?
+    @State private var showAllCategories = false
+
+    @State private var breakdown: [(category: SpendCategory, amount: Double)] = []
+    @State private var totalSpent: Double = 0
+    @State private var rangeSubtitle: String = ""
+
+    private func recomputeBreakdown() {
+        let cal = Calendar.current
+        let now = Date.now
+        let thisMonth = Cycle.interval(containing: now, startDay: cycleStartDay)
+        let today = cal.startOfDay(for: now)
+        let endOfToday = cal.date(byAdding: .day, value: 1, to: today) ?? now.addingTimeInterval(86_400)
+        let interval: DateInterval
+        let subtitle: String
+        switch range {
+        case .week:
+            let start = cal.date(byAdding: .day, value: -6, to: today) ?? today
+            interval = DateInterval(start: start, end: endOfToday)
+            subtitle = "Last 7 days"
+        case .month:
+            interval = thisMonth
+            subtitle = Cycle.label(thisMonth)
+        case .year:
+            let firstMonth = cal.date(byAdding: .month, value: -11, to: now) ?? now
+            let start = Cycle.interval(containing: firstMonth, startDay: cycleStartDay).start
+            let end = max(thisMonth.end, endOfToday)
+            interval = DateInterval(start: start, end: end)
+            subtitle = "Last 12 months"
+        }
+
+        var totals: [SpendCategory: Double] = [:]
+        var total = 0.0
+        for tx in transactions where !tx.isPending && tx.isSpending && tx.date >= interval.start && tx.date < interval.end {
+            totals[tx.category, default: 0] += tx.amount
+            total += tx.amount
+        }
+        breakdown = totals.map { ($0.key, $0.value) }.sorted { $0.1 > $1.1 }
+        totalSpent = total
+        rangeSubtitle = subtitle
+    }
+
+    var body: some View {
+        let activeSlice = selectedCategory.flatMap { cat in
+            breakdown.first(where: { $0.category == cat })
+        }
+
+        return VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Spending by Category")
+                        .font(.headline)
+                        .foregroundStyle(Theme.ink)
+                    Text(rangeSubtitle.isEmpty ? " " : rangeSubtitle)
+                        .font(.caption)
+                        .foregroundStyle(Theme.secondaryInk)
+                }
+
+                Spacer()
+
+                if #available(iOS 26.0, *) {
+                    GlassEffectContainer(spacing: 2) {
+                        chartStyleToggleButtons(useGlass: true)
+                    }
+                } else {
+                    chartStyleToggleButtons(useGlass: false)
+                }
+            }
+
+            Picker("Range", selection: $range) {
+                ForEach(ChartRange.allCases) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .onChange(of: range) { _, _ in
+                selectedCategory = nil
+                showAllCategories = false
+                recomputeBreakdown()
+            }
+
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                if let active = activeSlice {
+                    let pct = totalSpent > 0 ? Int((active.amount / totalSpent * 100).rounded()) : 0
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(active.category.color)
+                            .frame(width: 9, height: 9)
+                        Text(active.category.title)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(Theme.ink)
+                            .lineLimit(1)
+                    }
+                    Text(Money.format(active.amount, currency))
+                        .font(.title3.weight(.bold).monospacedDigit())
+                        .foregroundStyle(Theme.ink)
+                        .animatedNumber(active.amount)
+                    Text("\(pct)%")
+                        .font(.caption.weight(.semibold).monospacedDigit())
+                        .foregroundStyle(active.category.color)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(active.category.color.opacity(0.14), in: Capsule())
+                    Spacer(minLength: 0)
+                    Button {
+                        withAnimation(.snappy(duration: 0.25)) {
+                            selectedCategory = nil
+                        }
+                    } label: {
+                        Text("All")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Theme.cobalt)
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    Text("Spent")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(Theme.secondaryInk)
+                    Text(Money.format(totalSpent, currency))
+                        .font(.title2.weight(.bold).monospacedDigit())
+                        .foregroundStyle(Theme.ink)
+                        .animatedNumber(totalSpent)
+                    Spacer(minLength: 0)
+                    if !breakdown.isEmpty {
+                        Text("\(breakdown.count) \(breakdown.count == 1 ? "category" : "categories")")
+                            .font(.caption.weight(.medium).monospacedDigit())
+                            .foregroundStyle(Theme.secondaryInk)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Theme.track.opacity(0.75), in: Capsule())
+                    }
+                }
+            }
+
+            if breakdown.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: chartStyle.symbol)
+                        .font(.system(size: 28, weight: .medium))
+                        .foregroundStyle(Theme.secondaryInk.opacity(0.55))
+                    Text("No spending recorded \(range == .week ? "this week" : range == .month ? "this cycle" : "this year")")
+                        .font(.subheadline)
+                        .foregroundStyle(Theme.secondaryInk)
+                }
+                .frame(maxWidth: .infinity)
+                .frame(height: 170)
+            } else {
+                if chartStyle == .pie {
+                    CategoryPieChart(
+                        breakdown: breakdown,
+                        totalSpent: totalSpent,
+                        selectedCategory: $selectedCategory
+                    )
+                } else {
+                    CategoryBarChart(
+                        breakdown: breakdown,
+                        selectedCategory: $selectedCategory
+                    )
+                }
+
+                Divider()
+                    .padding(.vertical, 2)
+
+                categoryBreakdownList(breakdown: breakdown, totalSpent: totalSpent)
+            }
+        }
+        .card()
+        .onAppear(perform: recomputeBreakdown)
+        .onChange(of: cycleStartDay) { _, _ in recomputeBreakdown() }
+        .onChange(of: transactions.count) { _, _ in recomputeBreakdown() }
+        .onChange(of: dataVersion) { _, _ in recomputeBreakdown() }
+        .sensoryFeedback(.selection, trigger: range)
+        .sensoryFeedback(.selection, trigger: chartStyle)
+    }
+
+    @ViewBuilder
+    private func chartStyleToggleButtons(useGlass: Bool) -> some View {
+        HStack(spacing: 2) {
+            ForEach(SpendingChartStyle.allCases) { style in
+                let isSelected = chartStyle == style
+                let pill = HStack(spacing: 4) {
+                    Image(systemName: style.symbol)
+                        .font(.caption.weight(.semibold))
+                    Text(style.rawValue)
+                        .font(.caption.weight(.semibold))
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .foregroundStyle(isSelected ? .white : Theme.secondaryInk)
+
+                Button {
+                    withAnimation(.snappy(duration: 0.25)) {
+                        chartStyle = style
+                    }
+                } label: {
+                    if useGlass, #available(iOS 26.0, *) {
+                        pill.glassEffect(
+                            isSelected ? .regular.tint(Theme.cobalt).interactive() : .regular.interactive(),
+                            in: Capsule()
+                        )
+                    } else {
+                        pill.background(isSelected ? Theme.cobalt : Theme.track, in: Capsule())
+                    }
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("\(style.rawValue) chart")
+            }
+        }
+    }
+
+    private func categoryBreakdownList(breakdown: [(category: SpendCategory, amount: Double)], totalSpent: Double) -> some View {
+        let limit = 5
+        let visible = showAllCategories ? breakdown : Array(breakdown.prefix(limit))
+        let maxAmount = breakdown.first?.amount ?? 1
+
+        return VStack(spacing: 6) {
+            ForEach(visible, id: \.category.id) { item in
+                let isSelected = selectedCategory == item.category
+                let pct = totalSpent > 0 ? Int((item.amount / totalSpent * 100).rounded()) : 0
+                let ratio = maxAmount > 0 ? min(1, max(0.05, item.amount / maxAmount)) : 0
+
+                Button {
+                    withAnimation(.snappy(duration: 0.22)) {
+                        selectedCategory = isSelected ? nil : item.category
+                    }
+                } label: {
+                    HStack(spacing: 10) {
+                        CategoryIcon(category: item.category, size: 28)
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack(spacing: 6) {
+                                Text(item.category.title)
+                                    .font(.subheadline.weight(isSelected ? .semibold : .medium))
+                                    .foregroundStyle(Theme.ink)
+                                    .lineLimit(1)
+                                Spacer(minLength: 4)
+                                Text("\(pct)%")
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(Theme.secondaryInk)
+                                Text(Money.format(item.amount, currency))
+                                    .font(.subheadline.weight(.semibold).monospacedDigit())
+                                    .foregroundStyle(Theme.ink)
+                            }
+
+                            GeometryReader { geo in
+                                ZStack(alignment: .leading) {
+                                    Capsule()
+                                        .fill(Theme.track.opacity(0.65))
+                                    Capsule()
+                                        .fill(item.category.color)
+                                        .frame(width: geo.size.width * ratio)
+                                }
+                            }
+                            .frame(height: 4)
+                        }
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+                    .background(
+                        isSelected ? item.category.color.opacity(0.11) : Color.clear,
+                        in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    )
+                    .opacity(selectedCategory == nil || isSelected ? 1.0 : 0.45)
+                }
+                .buttonStyle(.plain)
+            }
+
+            if breakdown.count > limit {
+                Button {
+                    withAnimation(.snappy(duration: 0.25)) {
+                        showAllCategories.toggle()
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Text(showAllCategories ? "Show fewer" : "Show all \(breakdown.count) categories")
+                        Image(systemName: showAllCategories ? "chevron.up" : "chevron.down")
+                            .font(.caption2.weight(.semibold))
+                    }
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Theme.cobalt)
+                    .padding(.top, 4)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
 }
 
 private struct HomeFinancialItemCard: View {

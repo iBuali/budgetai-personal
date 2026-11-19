@@ -14,6 +14,7 @@ struct ProfileView: View {
     @AppStorage(Keys.budgetAlerts) private var budgetAlerts = true
     @AppStorage(Keys.onboarded) private var onboarded = true
     @AppStorage(Keys.cycleStartDay) private var cycleStartDay = 1
+    @AppStorage(Keys.appearanceMode) private var appearanceModeRaw = AppAppearanceMode.automatic.rawValue
     @Query private var customCategories: [CustomCategory]
     @State private var confirmSample = false
     @State private var confirmErase = false
@@ -26,7 +27,7 @@ struct ProfileView: View {
     private var initials: String {
         let parts = userName.split(separator: " ").prefix(2)
         let s = parts.compactMap(\.first).map(String.init).joined().uppercased()
-        return s.isEmpty ? "B" : s
+        return s.isEmpty ? "F" : s
     }
 
     var body: some View {
@@ -53,6 +54,25 @@ struct ProfileView: View {
                     }
                     TextField("Your name", text: $userName)
                         .textContentType(.name)
+                }
+
+                Section("Appearance") {
+                    HStack(spacing: 12) {
+                        IconBadge(symbol: "moon.fill", color: Theme.cobalt, size: 32)
+                        SheetPickerRow(
+                            title: "Dark mode",
+                            selection: Binding(
+                                get: { AppAppearanceMode(rawValue: appearanceModeRaw) ?? .automatic },
+                                set: { newMode in
+                                    appearanceModeRaw = newMode.rawValue
+                                    AppAppearanceMode.applyToWindows(newMode)
+                                }
+                            ),
+                            options: AppAppearanceMode.allCases.map {
+                                SheetPickerOption(id: $0, title: $0.title, symbol: $0.symbol, color: Theme.cobalt)
+                            }
+                        )
+                    }
                 }
 
                 Section("Money") {
@@ -181,6 +201,7 @@ struct ProfileView: View {
                 StatementExportSheet()
             }
         }
+        .preferredColorScheme((AppAppearanceMode(rawValue: appearanceModeRaw) ?? .automatic).colorScheme)
     }
 
     private func ordinal(_ d: Int) -> String {

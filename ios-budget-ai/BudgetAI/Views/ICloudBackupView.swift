@@ -160,8 +160,6 @@ struct ICloudBackupView: View {
             .padding(.vertical, 6)
         } header: {
             Text("Backup Status")
-        } footer: {
-            Text("Backups are encrypted and stored in your personal Apple iCloud account. Your financial data is private and accessible only on your devices signed in with your Apple ID.")
         }
     }
 
@@ -208,30 +206,27 @@ struct ICloudBackupView: View {
                 get: { backupService.isAutoBackupEnabled },
                 set: { backupService.isAutoBackupEnabled = $0 }
             )) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Automatic iCloud Backup")
-                        .font(.body)
-                        .foregroundStyle(Theme.ink)
-                    Text("Back up your data regularly in the background")
-                        .font(.caption2)
-                        .foregroundStyle(Theme.secondaryInk)
-                }
+                Text("Automatic iCloud Backup")
+                    .font(.body)
+                    .foregroundStyle(Theme.ink)
             }
 
             if backupService.isAutoBackupEnabled {
-                Picker("Frequency", selection: Binding(
-                    get: { backupService.autoBackupSchedule },
-                    set: { backupService.autoBackupSchedule = $0 }
-                )) {
-                    ForEach([BackupSchedule.weekly, BackupSchedule.daily, BackupSchedule.monthly]) { s in
-                        Text(s.title).tag(s)
-                    }
-                }
+                SheetPickerRow(
+                    title: "Frequency",
+                    selection: Binding(
+                        get: { backupService.autoBackupSchedule },
+                        set: { backupService.autoBackupSchedule = $0 }
+                    ),
+                    options: [
+                        SheetPickerOption(id: BackupSchedule.weekly, title: BackupSchedule.weekly.title, symbol: "calendar.badge.clock", color: Theme.cobalt),
+                        SheetPickerOption(id: BackupSchedule.daily, title: BackupSchedule.daily.title, symbol: "clock.fill", color: Theme.cobalt),
+                        SheetPickerOption(id: BackupSchedule.monthly, title: BackupSchedule.monthly.title, symbol: "calendar", color: Theme.cobalt)
+                    ]
+                )
             }
         } header: {
             Text("Backup Settings")
-        } footer: {
-            Text("When enabled, Budget AI securely backs up changes when the app is opened according to your chosen schedule.")
         }
     }
 
@@ -239,8 +234,9 @@ struct ICloudBackupView: View {
 
     @ViewBuilder
     private var backupsListSection: some View {
+        let latestBackups = Array(backupService.availableBackups.prefix(5))
         Section {
-            if backupService.availableBackups.isEmpty {
+            if latestBackups.isEmpty {
                 HStack(spacing: 12) {
                     Image(systemName: "clock.arrow.circlepath")
                         .font(.title3)
@@ -251,29 +247,29 @@ struct ICloudBackupView: View {
                 }
                 .padding(.vertical, 8)
             } else {
-                ForEach(backupService.availableBackups) { backup in
+                ForEach(latestBackups) { backup in
                     backupRow(backup)
                 }
                 .onDelete { offsets in
                     for index in offsets {
-                        if backupService.availableBackups.indices.contains(index) {
-                            backupService.deleteBackup(backupService.availableBackups[index])
+                        if latestBackups.indices.contains(index) {
+                            backupService.deleteBackup(latestBackups[index])
                         }
                     }
                 }
             }
         } header: {
             HStack {
-                Text("Available Backups (\(backupService.availableBackups.count))")
+                Text("Available Backups (\(latestBackups.count))")
                 Spacer()
-                if !backupService.availableBackups.isEmpty {
+                if !latestBackups.isEmpty {
                     Text("Swipe to Delete")
                         .font(.caption2)
                         .foregroundStyle(Theme.secondaryInk)
                 }
             }
         } footer: {
-            Text("Tap \"Restore\" on any backup to recover your transactions, accounts, and budgets.")
+            Text("Backups are encrypted and stored in your personal Apple iCloud account. Your financial data is private and accessible only on your devices signed in with your Apple ID.")
         }
     }
 

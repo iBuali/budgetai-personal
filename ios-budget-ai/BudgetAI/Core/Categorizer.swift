@@ -799,7 +799,7 @@ enum SMSParser {
                 parsed.goalID = g
             }
             parsed.confidence = .high
-            parsed.classificationReason = "Matched Rule \(priorityNum): \(rule.name)"
+            parsed.classificationReason = "Matched: \(rule.name)"
             parsed.matchedUserRule = true
         }
 
@@ -1460,9 +1460,13 @@ enum SMSParser {
     }
 
     static func findMatchingAccount(suffix: String, excludingAccountID: UUID? = nil, in context: ModelContext) -> Account? {
+        let accounts = (try? context.fetch(FetchDescriptor<Account>(sortBy: [SortDescriptor(\.createdAt)]))) ?? []
+        return findMatchingAccount(suffix: suffix, excludingAccountID: excludingAccountID, in: accounts)
+    }
+
+    static func findMatchingAccount(suffix: String, excludingAccountID: UUID? = nil, in accounts: [Account]) -> Account? {
         let clean = cleanAccountDigits(suffix)
         guard !clean.isEmpty else { return nil }
-        let accounts = (try? context.fetch(FetchDescriptor<Account>(sortBy: [SortDescriptor(\.createdAt)]))) ?? []
         let candidates = accounts.filter { acc in
             if let excludingAccountID, acc.id == excludingAccountID { return false }
             return digitsMatch(accountMatch: acc.smsMatch, query: clean)
@@ -1602,6 +1606,10 @@ enum SMSParser {
     /// and specific accounts are correctly identified even if bank name differs or is omitted.
     static func findMatchingAccount(forBank bank: String?, senderOrPhone: String? = nil, digits: String? = nil, in context: ModelContext) -> Account? {
         let accounts = (try? context.fetch(FetchDescriptor<Account>(sortBy: [SortDescriptor(\.createdAt)]))) ?? []
+        return findMatchingAccount(forBank: bank, senderOrPhone: senderOrPhone, digits: digits, in: accounts)
+    }
+
+    static func findMatchingAccount(forBank bank: String?, senderOrPhone: String? = nil, digits: String? = nil, in accounts: [Account]) -> Account? {
         guard !accounts.isEmpty else { return nil }
         let trimmedBank = bank?.trimmingCharacters(in: .whitespacesAndNewlines)
         let hasBank = (trimmedBank?.isEmpty == false)
@@ -1674,6 +1682,10 @@ enum SMSParser {
     /// helpline numbers, and middle-of-IBAN digits.
     static func findAccountInSMSText(_ text: String, detectedBank: String? = nil, in context: ModelContext) -> Account? {
         let accounts = (try? context.fetch(FetchDescriptor<Account>(sortBy: [SortDescriptor(\.createdAt)]))) ?? []
+        return findAccountInSMSText(text, detectedBank: detectedBank, in: accounts)
+    }
+
+    static func findAccountInSMSText(_ text: String, detectedBank: String? = nil, in accounts: [Account]) -> Account? {
         guard !accounts.isEmpty else { return nil }
         let cleanText = normalizeText(text).replacingOccurrences(of: "\n", with: " ")
         let lowerText = cleanText.lowercased()

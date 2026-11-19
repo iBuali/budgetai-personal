@@ -16,10 +16,59 @@ final class AppState {
     var showNotifications = false
     var showSettings = false
     var notificationsReadSignature: String = UserDefaults.standard.string(forKey: "notificationsReadSignature") ?? ""
+    var hasUnreadAlerts = false
+    var dataVersion = 0
 
     func markNotificationsRead(signature: String) {
         notificationsReadSignature = signature
         UserDefaults.standard.set(signature, forKey: "notificationsReadSignature")
+        hasUnreadAlerts = false
+    }
+
+    @MainActor
+    func refreshAlerts(context: ModelContext) {
+        var parts: [String] = []
+        let cal = Calendar.current
+        let soon = cal.date(byAdding: .day, value: 7, to: .now) ?? .now
+
+        let bills = (try? context.fetch(FetchDescriptor<Bill>())) ?? []
+        for bill in bills where !bill.isPaidForCurrentCycle() && bill.nextDueDate <= soon {
+            parts.append("bill-\(bill.id.uuidString)")
+        }
+
+        let reviewCount = (try? context.fetchCount(FetchDescriptor<MoneyTransaction>(predicate: #Predicate {
+            $0.isPending || $0.isPossibleDuplicate
+        }))) ?? 0
+        if reviewCount > 0 { parts.append("review-\(reviewCount)") }
+
+        let budgets = (try? context.fetch(FetchDescriptor<Budget>())) ?? []
+        if !budgets.isEmpty {
+            let interval = Cycle.interval(containing: .now)
+            let start = interval.start, end = interval.end
+            let cycleTxs = (try? context.fetch(FetchDescriptor<MoneyTransaction>(predicate: #Predicate {
+                $0.date >= start && $0.date < end && !$0.isPending
+            }))) ?? []
+            var spentByCategory: [String: Double] = [:]
+            for tx in cycleTxs where tx.isSpending {
+                spentByCategory[tx.categoryRaw, default: 0] += tx.amount
+            }
+            for b in budgets where b.limit > 0 {
+                let spent = b.categories.reduce(0) { $0 + (spentByCategory[$1.rawValue] ?? 0) }
+                let pct = Int((spent / b.limit) * 100)
+                if pct >= 80 { parts.append("budget-\(b.id.uuidString)-\(pct)") }
+            }
+        }
+
+        let accounts = (try? context.fetch(FetchDescriptor<Account>())) ?? []
+        for acc in accounts where acc.kind.isLiability && acc.balance > 0 && acc.paymentDueReminder {
+            let days = acc.daysUntilDue()
+            if days <= 5 {
+                parts.append("card-\(acc.id.uuidString)-\(days)")
+            }
+        }
+
+        let sig = parts.joined(separator: "|")
+        hasUnreadAlerts = !sig.isEmpty && sig != notificationsReadSignature
     }
 
     func openTransactions(filter: TxFilter) {
@@ -92,6 +141,7 @@ struct RootView: View {
                 Ledger.recordSnapshot(context: context)
                 Ledger.refreshCardReminders(context: context)
                 ICloudBackupService.shared.performAutoBackupIfDue(context: context)
+                appState.refreshAlerts(context: context)
             }
         }
         .onChange(of: scenePhase) { _, phase in
@@ -102,6 +152,7 @@ struct RootView: View {
                     await Task.yield()
                     SMSImporter.reconcileExistingTransactions(context: context)
                     ICloudBackupService.shared.performAutoBackupIfDue(context: context)
+                    appState.refreshAlerts(context: context)
                 }
             }
         }
@@ -128,7 +179,9 @@ enum DrawerDestination: Identifiable {
 
 struct MainTabs: View {
     @Environment(AppState.self) private var appState
+    @Environment(\.modelContext) private var context
     @State private var drawerDestination: DrawerDestination?
+    @State private var alertRefreshTask: Task<Void, Never>?
 
     var body: some View {
         @Bindable var state = appState
@@ -137,7 +190,7 @@ struct MainTabs: View {
                 Tab("Home", systemImage: "house.fill", value: AppTab.home) { HomeView() }
                 Tab("Transactions", systemImage: "list.bullet", value: AppTab.transactions) { TransactionsView() }
                 Tab("Budgets", systemImage: "chart.bar.fill", value: AppTab.budgets) { BudgetsView() }
-                Tab("Insights", systemImage: "lightbulb.fill", value: AppTab.insights) { InsightsView() }
+                Tab("Insights", image: "FalakTabIcon", value: AppTab.insights) { InsightsView() }
                 Tab("Accounts", systemImage: "square.3.layers.3d", value: AppTab.accounts) {
                     NavigationStack { NetWorthView(isRootTab: true) }
                 }
@@ -224,6 +277,20 @@ struct MainTabs: View {
         }
         .animation(.snappy(duration: 0.28), value: appState.showDrawer)
         .animation(.snappy(duration: 0.22), value: appState.showNotifications)
+        .onReceive(NotificationCenter.default.publisher(for: .budgetDataDidChange)) { _ in
+            appState.dataVersion += 1
+            alertRefreshTask?.cancel()
+            alertRefreshTask = Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(150))
+                guard !Task.isCancelled else { return }
+                appState.refreshAlerts(context: context)
+            }
+        }
+        .onChange(of: appState.showNotifications) { _, shown in
+            if !shown {
+                appState.refreshAlerts(context: context)
+            }
+        }
         .sheet(isPresented: $state.showSettings) { ProfileView() }
         .sheet(item: $drawerDestination) { dest in
             switch dest {
@@ -253,18 +320,17 @@ private struct SideMenuDrawer: View {
     private var initials: String {
         let parts = userName.split(separator: " ").prefix(2)
         let s = parts.compactMap(\.first).map(String.init).joined().uppercased()
-        return s.isEmpty ? "B" : s
+        return s.isEmpty ? "F" : s
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 10) {
-                Text("B")
-                    .font(.subheadline.bold())
-                    .foregroundStyle(.white)
+                Image("FalakLogo")
+                    .resizable()
+                    .scaledToFit()
                     .frame(width: 28, height: 28)
-                    .background(Color(hex: 0x2F6BFF), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                Text("Budget AI")
+                Text("FALAK")
                     .font(.headline.weight(.semibold))
                     .foregroundStyle(Theme.ink)
                 Spacer()
@@ -543,7 +609,7 @@ struct LockView: View {
                 .foregroundStyle(.white)
                 .frame(width: 84, height: 84)
                 .background(Theme.cobalt, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
-            Text("Budget AI is locked").font(.title2.bold()).foregroundStyle(Theme.ink)
+            Text("FALAK is locked").font(.title2.bold()).foregroundStyle(Theme.ink)
             Text("Your finances stay private on this iPhone.").foregroundStyle(Theme.secondaryInk)
             Spacer()
             Button(action: unlock) {

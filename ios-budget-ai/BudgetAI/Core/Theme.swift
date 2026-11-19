@@ -7,9 +7,9 @@ enum Theme {
     static let card = Color(light: .white, dark: Color(hex: 0x161D2E))
     static let ink = Color(light: Color(hex: 0x1A1A18), dark: Color(hex: 0xF5F7FC))
     static let secondaryInk = Color(light: Color(hex: 0x6E6D68), dark: Color(hex: 0x9AA5BC))
-    static let cobalt = Color(light: Color(hex: 0x1A1A18), dark: Color(hex: 0x5B82FF))
-    static let brand = Color(light: Color(hex: 0x1A1A18), dark: Color(hex: 0x5B82FF))
-    static let cobaltSoft = Color(light: Color(hex: 0xEFEEE9), dark: Color(hex: 0x5B82FF).opacity(0.18))
+    static let cobalt = Color(light: Color(hex: 0x1A1A18), dark: Color(hex: 0xB44CFF))
+    static let brand = Color(light: Color(hex: 0x1A1A18), dark: Color(hex: 0xB44CFF))
+    static let cobaltSoft = Color(light: Color(hex: 0xEFEEE9), dark: Color(hex: 0xB44CFF).opacity(0.18))
     static let positive = Color(light: Color(hex: 0x16A34A), dark: Color(hex: 0x34D399))
     static let income = Color(light: Color(hex: 0x16A34A), dark: Color(hex: 0x34D399))
     static let negative = Color(light: Color(hex: 0xDC2626), dark: Color(hex: 0xF87171))
@@ -68,5 +68,56 @@ struct PressableStyle: ButtonStyle {
             .scaleEffect(configuration.isPressed ? 0.97 : 1)
             .opacity(configuration.isPressed ? 0.9 : 1)
             .animation(.spring(response: 0.25, dampingFraction: 0.7), value: configuration.isPressed)
+    }
+}
+
+enum AppAppearanceMode: String, CaseIterable, Identifiable, Hashable {
+    case automatic = "automatic"
+    case dark = "dark"
+    case light = "light"
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .automatic: "Automatic"
+        case .dark: "On"
+        case .light: "Off"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .automatic: "circle.lefthalf.filled"
+        case .dark: "moon.fill"
+        case .light: "sun.max.fill"
+        }
+    }
+
+    var colorScheme: ColorScheme? {
+        switch self {
+        case .automatic: nil
+        case .dark: .dark
+        case .light: .light
+        }
+    }
+
+    var interfaceStyle: UIUserInterfaceStyle {
+        switch self {
+        case .automatic: .unspecified
+        case .dark: .dark
+        case .light: .light
+        }
+    }
+
+    @MainActor
+    static func applyToWindows(_ mode: AppAppearanceMode) {
+        let style = mode.interfaceStyle
+        for scene in UIApplication.shared.connectedScenes {
+            guard let windowScene = scene as? UIWindowScene else { continue }
+            for window in windowScene.windows {
+                window.overrideUserInterfaceStyle = style
+            }
+        }
     }
 }

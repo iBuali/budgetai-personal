@@ -41,10 +41,8 @@ struct BillsView: View {
                         .buttonStyle(.plain)
                         .swipeActions(edge: .leading) {
                             Button {
-                                withAnimation(.spring(response: 0.45, dampingFraction: 0.7)) {
-                                    bill.unmarkPaid()
-                                    try? context.save()
-                                    Notifier.rescheduleBills(bills)
+                                withAnimation(.easeInOut(duration: 0.2)) {
+                                    Ledger.unpayBill(bill, context: context)
                                     appState.show("\(bill.name) marked as unpaid")
                                 }
                             } label: { Label("Unmark", systemImage: "arrow.uturn.backward") }
@@ -52,7 +50,7 @@ struct BillsView: View {
                         }
                         .swipeActions(edge: .trailing) {
                             Button(role: .destructive) {
-                                withAnimation {
+                                withAnimation(.easeInOut(duration: 0.2)) {
                                     context.delete(bill)
                                     try? context.save()
                                     Notifier.rescheduleBills(bills.filter { $0.id != bill.id })
@@ -117,7 +115,7 @@ struct BillsView: View {
         .buttonStyle(.plain)
         .swipeActions(edge: .leading) {
             Button {
-                withAnimation(.spring(response: 0.45, dampingFraction: 0.7)) {
+                withAnimation(.easeInOut(duration: 0.2)) {
                     Ledger.payBill(bill, accountID: Ledger.defaultAccountID(context: context), context: context)
                     Notifier.rescheduleBills(bills)
                     appState.show("\(bill.name) marked as paid")
@@ -127,7 +125,7 @@ struct BillsView: View {
         }
         .swipeActions(edge: .trailing) {
             Button(role: .destructive) {
-                withAnimation {
+                withAnimation(.easeInOut(duration: 0.2)) {
                     context.delete(bill)
                     try? context.save()
                     Notifier.rescheduleBills(bills.filter { $0.id != bill.id })

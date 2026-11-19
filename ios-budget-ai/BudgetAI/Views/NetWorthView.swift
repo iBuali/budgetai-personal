@@ -9,78 +9,21 @@ struct NetWorthView: View {
     @Query(sort: \Account.createdAt) private var accounts: [Account]
     @Query(sort: \NetWorthSnapshot.day) private var snapshots: [NetWorthSnapshot]
     @AppStorage(Keys.currency) private var currency = "BHD"
-    @State private var range = 2
     @State private var editing: Account?
     @State private var showNew = false
-    @State private var selectedDate: Date?
     @State private var didOpenInitialAccount = false
-
-    private let ranges = [(label: "3M", months: 3), (label: "6M", months: 6), (label: "1Y", months: 12), (label: "All", months: 1200)]
 
     private var finance: Finance { Finance(transactions: [], accounts: accounts) }
 
-    private var points: [ChartPoint] {
-        let start = Calendar.current.date(byAdding: .month, value: -ranges[range].months, to: .now) ?? .distantPast
-        return snapshots.filter { $0.day >= start }.map { ChartPoint(date: $0.day, value: $0.netWorth) }
-    }
-
     var body: some View {
         let f = finance
-        let pts = points
-        let change = (pts.last?.value ?? f.netWorth) - (pts.first?.value ?? f.netWorth)
-        let selected = selectedDate.flatMap { d in pts.min(by: { abs($0.date.timeIntervalSince(d)) < abs($1.date.timeIntervalSince(d)) }) }
         ScrollViewReader { proxy in
             List {
-            Section {
-                VStack(alignment: .leading, spacing: 6) {
-                    let heroValue = selected?.value ?? f.netWorth
-                    Text(selected.map { $0.date.formatted(date: .abbreviated, time: .omitted) } ?? "Net worth")
-                        .font(.subheadline).foregroundStyle(Theme.secondaryInk)
-                    Text(Money.format(heroValue, currency))
-                        .font(.system(size: 36, weight: .bold).monospacedDigit())
-                        .foregroundStyle(Theme.ink)
-                        .minimumScaleFactor(0.6).lineLimit(1)
-                        .animatedNumber(heroValue)
-                    Text("\(Money.format(change, currency, signed: true)) in \(ranges[range].label == "All" ? "total" : ranges[range].label)")
-                        .font(.subheadline.weight(.medium).monospacedDigit())
-                        .foregroundStyle(change >= 0 ? Theme.positive : Theme.negative)
-                        .animatedNumber(change)
-                    Chart(pts) { p in
-                        AreaMark(x: .value("Date", p.date), y: .value("Net worth", p.value))
-                            .interpolationMethod(.catmullRom)
-                            .foregroundStyle(LinearGradient(colors: [Theme.cobalt.opacity(0.16), Theme.cobalt.opacity(0.01)], startPoint: .top, endPoint: .bottom))
-                        LineMark(x: .value("Date", p.date), y: .value("Net worth", p.value))
-                            .interpolationMethod(.catmullRom)
-                            .foregroundStyle(Theme.cobalt)
-                            .lineStyle(StrokeStyle(lineWidth: 2.5, lineCap: .round))
-                        if let selected, selected.date == p.date {
-                            RuleMark(x: .value("Date", p.date)).foregroundStyle(Theme.ink.opacity(0.2))
-                            PointMark(x: .value("Date", p.date), y: .value("Net worth", p.value)).foregroundStyle(Theme.cobalt)
-                        }
-                    }
-                    .chartXSelection(value: $selectedDate)
-                    .chartYScale(domain: .automatic(includesZero: false))
-                    .chartYAxis {
-                        AxisMarks(position: .trailing) { v in
-                            AxisGridLine().foregroundStyle(Theme.track)
-                            AxisValueLabel { if let d = v.as(Double.self) { Text(Money.short(d)) } }
-                        }
-                    }
-                    .frame(height: 180)
-                    .padding(.top, 8)
-                    .overlay {
-                        if pts.count < 2 {
-                            Text("History builds up as you use the app").font(.footnote).foregroundStyle(Theme.secondaryInk)
-                        }
-                    }
-                    Picker("Range", selection: $range) {
-                        ForEach(ranges.indices, id: \.self) { Text(ranges[$0].label).tag($0) }
-                    }
-                    .pickerStyle(.segmented)
-                    .padding(.top, 6)
-                }
-                .padding(.vertical, 6)
-            }
+            NetWorthChartSection(
+                snapshots: snapshots,
+                currentNetWorth: f.netWorth,
+                currency: currency
+            )
 
             Section {
                 LabeledContent {
@@ -563,5 +506,78 @@ struct AccountEditor: View {
             Notifier.rescheduleCreditCards(all)
         }
         dismiss()
+    }
+}
+
+private struct NetWorthChartSection: View {
+    let snapshots: [NetWorthSnapshot]
+    let currentNetWorth: Double
+    let currency: String
+
+    @State private var range = 2
+    @State private var selectedDate: Date?
+
+    private let ranges = [(label: "3M", months: 3), (label: "6M", months: 6), (label: "1Y", months: 12), (label: "All", months: 1200)]
+
+    private var points: [ChartPoint] {
+        let start = Calendar.current.date(byAdding: .month, value: -ranges[range].months, to: .now) ?? .distantPast
+        return snapshots.filter { $0.day >= start }.map { ChartPoint(date: $0.day, value: $0.netWorth) }
+    }
+
+    var body: some View {
+        let pts = points
+        let change = (pts.last?.value ?? currentNetWorth) - (pts.first?.value ?? currentNetWorth)
+        let selected = selectedDate.flatMap { d in pts.min(by: { abs($0.date.timeIntervalSince(d)) < abs($1.date.timeIntervalSince(d)) }) }
+
+        Section {
+            VStack(alignment: .leading, spacing: 6) {
+                let heroValue = selected?.value ?? currentNetWorth
+                Text(selected.map { $0.date.formatted(date: .abbreviated, time: .omitted) } ?? "Net worth")
+                    .font(.subheadline).foregroundStyle(Theme.secondaryInk)
+                Text(Money.format(heroValue, currency))
+                    .font(.system(size: 36, weight: .bold).monospacedDigit())
+                    .foregroundStyle(Theme.ink)
+                    .minimumScaleFactor(0.6).lineLimit(1)
+                    .animatedNumber(heroValue)
+                Text("\(Money.format(change, currency, signed: true)) in \(ranges[range].label == "All" ? "total" : ranges[range].label)")
+                    .font(.subheadline.weight(.medium).monospacedDigit())
+                    .foregroundStyle(change >= 0 ? Theme.positive : Theme.negative)
+                    .animatedNumber(change)
+                Chart(pts) { p in
+                    AreaMark(x: .value("Date", p.date), y: .value("Net worth", p.value))
+                        .interpolationMethod(.catmullRom)
+                        .foregroundStyle(LinearGradient(colors: [Theme.cobalt.opacity(0.16), Theme.cobalt.opacity(0.01)], startPoint: .top, endPoint: .bottom))
+                    LineMark(x: .value("Date", p.date), y: .value("Net worth", p.value))
+                        .interpolationMethod(.catmullRom)
+                        .foregroundStyle(Theme.cobalt)
+                        .lineStyle(StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                    if let selected, selected.date == p.date {
+                        RuleMark(x: .value("Date", p.date)).foregroundStyle(Theme.ink.opacity(0.2))
+                        PointMark(x: .value("Date", p.date), y: .value("Net worth", p.value)).foregroundStyle(Theme.cobalt)
+                    }
+                }
+                .chartXSelection(value: $selectedDate)
+                .chartYScale(domain: .automatic(includesZero: false))
+                .chartYAxis {
+                    AxisMarks(position: .trailing) { v in
+                        AxisGridLine().foregroundStyle(Theme.track)
+                        AxisValueLabel { if let d = v.as(Double.self) { Text(Money.short(d)) } }
+                    }
+                }
+                .frame(height: 180)
+                .padding(.top, 8)
+                .overlay {
+                    if pts.count < 2 {
+                        Text("History builds up as you use the app").font(.footnote).foregroundStyle(Theme.secondaryInk)
+                    }
+                }
+                Picker("Range", selection: $range) {
+                    ForEach(ranges.indices, id: \.self) { Text(ranges[$0].label).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .padding(.top, 6)
+            }
+            .padding(.vertical, 6)
+        }
     }
 }

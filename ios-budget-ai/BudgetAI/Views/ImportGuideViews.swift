@@ -8,8 +8,8 @@ struct SMSSetupGuideView: View {
     private let steps: [(title: String, detail: String, icon: String)] = [
         ("1. Create Message Automation", "Open Apple Shortcuts → Automation tab → tap New Automation (+). Choose \"Message\", enter \"BHD\" under Message Contains (or select your bank as sender), and select \"Run Immediately\".", "message.badge.filled.fill"),
         ("2. Add 'Get Current Location' (Optional)", "Tap \"New Blank Automation\" → tap \"Add Action\" → search for \"Get Current Location\" and add it. This captures your exact GPS location at the moment of payment so you see purchase locations on the map.", "location.fill"),
-        ("3. Add 'Add Bank SMS' Action", "Tap \"Add Action\" → search for \"Add Bank SMS\" (from Budget AI). Set up the parameters:\n• Message: Shortcut Input\n• Sender: Shortcut Input → Sender (optional)\n• Location: Current Location (if Step 2 was added)\n• Tap arrow for Latitude & Longitude if desired", "arrow.triangle.2.circlepath"),
-        ("4. Automatic GPS Fallback", "Budget AI also attempts automatic real-time GPS location capture directly whenever a bank SMS is imported. Ensure Location is set to \"While Using\" in iOS Settings.", "checkmark.seal.fill")
+        ("3. Add 'Add Bank SMS' Action", "Tap \"Add Action\" → search for \"Add Bank SMS\" (from FALAK). Set up the parameters:\n• Message: Shortcut Input\n• Sender: Shortcut Input → Sender (optional)\n• Location: Current Location (if Step 2 was added)\n• Tap arrow for Latitude & Longitude if desired", "arrow.triangle.2.circlepath"),
+        ("4. Automatic GPS Fallback", "FALAK also attempts automatic real-time GPS location capture directly whenever a bank SMS is imported. Ensure Location is set to \"While Using\" in iOS Settings.", "checkmark.seal.fill")
     ]
 
     var body: some View {
@@ -19,7 +19,7 @@ struct SMSSetupGuideView: View {
                     IconBadge(symbol: "message.badge.filled.fill", color: Theme.cobalt, size: 52)
                     Text("Import bank SMS automatically")
                         .font(.title3.weight(.bold)).foregroundStyle(Theme.ink)
-                    Text("iOS doesn't let apps read your messages directly. A one-time Shortcuts automation forwards bank alerts to Budget AI and automatically tags your purchase location.")
+                    Text("iOS doesn't let apps read your messages directly. A one-time Shortcuts automation forwards bank alerts to FALAK and automatically tags your purchase location.")
                         .font(.subheadline).foregroundStyle(Theme.secondaryInk)
                 }
                 .padding(.vertical, 6)
@@ -88,11 +88,11 @@ struct SMSImportSettingsSection: View {
             HStack(spacing: 12) {
                 IconBadge(symbol: autoApprove ? "bolt.fill" : "hand.raised.fill", color: Theme.cobalt, size: 32)
                 SheetPickerRow(
-                    title: "New SMS transactions",
+                    title: "New SMS",
                     selection: $autoApprove,
                     options: [
-                        SheetPickerOption(id: true, title: "Add automatically", symbol: "bolt.fill", color: Theme.cobalt),
-                        SheetPickerOption(id: false, title: "Ask me to approve", symbol: "hand.raised.fill", color: Theme.cobalt)
+                        SheetPickerOption(id: true, title: "Auto-add", symbol: "bolt.fill", color: Theme.cobalt),
+                        SheetPickerOption(id: false, title: "Ask first", symbol: "hand.raised.fill", color: Theme.cobalt)
                     ]
                 )
             }
@@ -100,13 +100,13 @@ struct SMSImportSettingsSection: View {
             HStack(spacing: 12) {
                 IconBadge(symbol: "creditcard.fill", color: Theme.cobalt, size: 32)
                 AccountPickerRow(
-                    title: "Add to account",
+                    title: "Account",
                     selection: Binding(
                         get: { UUID(uuidString: accountIDString) },
                         set: { accountIDString = $0?.uuidString ?? "" }
                     ),
                     accounts: targetAccounts,
-                    noneLabel: "Detect automatically"
+                    noneLabel: "Auto-detect"
                 )
             }
 

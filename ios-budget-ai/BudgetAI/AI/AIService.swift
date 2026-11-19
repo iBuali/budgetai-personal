@@ -304,7 +304,7 @@ enum AIService {
     static func advisorReply(history: [ChatMessage], context: String) async throws -> String {
         let client = try GeminiAccount.client()
         let system = """
-        You are Budget AI, a friendly, direct personal finance advisor inside a budgeting app used mainly in Bahrain and the GCC. \
+        You are FALAK, a friendly, direct personal finance advisor inside a budgeting app used mainly in Bahrain and the GCC. \
         Use ONLY the user's data below for numbers; if something isn't in the data, say so. Use their currency. \
         Be concise: short paragraphs or up to 5 bullets, bold key amounts with **double asterisks**. \
         Give concrete, actionable steps. You are not a licensed advisor; for investments keep it general.
@@ -1475,15 +1475,15 @@ enum SMSImporter {
                 }
 
                 tx.smsConfidence = .high
-                tx.smsClassificationReason = "Rule 6: Merged 2 matching SMS at same date & time (Debit: \(debitBank ?? "Source") → Credit: \(creditBank ?? "Destination"))"
+                tx.smsClassificationReason = "Merged 2 matching SMS at same date & time (Debit: \(debitBank ?? "Source") → Credit: \(creditBank ?? "Destination"))"
             }
 
             var syncedBalance: Double? = nil
             if existing.isPending && (forceApprove || AppSettings.smsAutoApprove) && existing.smsBank != nil && existing.accountID != nil {
                 let approveRes = Ledger.approve(existing, context: context)
-                syncedBalance = approveRes.balanceSynced
+                syncedBalance = Ledger.syncBalanceFromSMS(existing, context: context, force: true) ?? approveRes.balanceSynced
             } else if !existing.isPending {
-                syncedBalance = Ledger.syncBalanceFromSMS(existing, context: context)
+                syncedBalance = Ledger.syncBalanceFromSMS(existing, context: context, force: true)
             }
 
             let code = AppSettings.currency
@@ -1643,21 +1643,21 @@ enum SMSImporter {
             let querySuffix: String? = tx.smsAccountSuffix ?? suffixes.accountSuffix
 
             let matchedAcc: Account? = {
-                if let q = querySuffix, !q.isEmpty, let m = SMSParser.findMatchingAccount(suffix: q, in: context) {
+                if let q = querySuffix, !q.isEmpty, let m = SMSParser.findMatchingAccount(suffix: q, in: allAccounts) {
                     return m
                 }
-                if let m = SMSParser.findAccountInSMSText(raw, detectedBank: tx.smsBank, in: context) {
+                if let m = SMSParser.findAccountInSMSText(raw, detectedBank: tx.smsBank, in: allAccounts) {
                     if let b = tx.smsBank, !b.isEmpty, m.kind != .creditCard,
                        let accBank = SMSParser.bankName(forAccount: m),
                        accBank.caseInsensitiveCompare(b) != .orderedSame,
                        !((accBank == "ila" && b == "Bank ABC") || (accBank == "Bank ABC" && b == "ila")),
-                       SMSParser.findMatchingAccount(forBank: b, senderOrPhone: tx.smsSender, digits: nil, in: context) != nil {
+                       SMSParser.findMatchingAccount(forBank: b, senderOrPhone: tx.smsSender, digits: nil, in: allAccounts) != nil {
                         return nil
                     }
                     return m
                 }
                 if querySuffix == nil, let b = tx.smsBank, !b.isEmpty {
-                    return SMSParser.findMatchingAccount(forBank: b, senderOrPhone: tx.smsSender, digits: nil, in: context)
+                    return SMSParser.findMatchingAccount(forBank: b, senderOrPhone: tx.smsSender, digits: nil, in: allAccounts)
                 }
                 return nil
             }()
@@ -1740,15 +1740,15 @@ enum SMSImporter {
                     let suf2 = cachedSuffixes(for: second)
 
                     let acc1ID: UUID? = {
-                        if let s = suf1.accountSuffix, let a = SMSParser.findMatchingAccount(suffix: s, in: context) { return a.id }
-                        if let a = SMSParser.findMatchingAccount(forBank: first.smsBank, senderOrPhone: first.smsSender, digits: nil, in: context) { return a.id }
-                        if let s = suf2.recipientSuffix ?? second.smsRecipientSuffix, let a = SMSParser.findMatchingAccount(suffix: s, in: context) { return a.id }
+                        if let s = suf1.accountSuffix, let a = SMSParser.findMatchingAccount(suffix: s, in: allAccounts) { return a.id }
+                        if let a = SMSParser.findMatchingAccount(forBank: first.smsBank, senderOrPhone: first.smsSender, digits: nil, in: allAccounts) { return a.id }
+                        if let s = suf2.recipientSuffix ?? second.smsRecipientSuffix, let a = SMSParser.findMatchingAccount(suffix: s, in: allAccounts) { return a.id }
                         return first.accountID
                     }()
                     let acc2ID: UUID? = {
-                        if let s = suf2.accountSuffix, let a = SMSParser.findMatchingAccount(suffix: s, in: context) { return a.id }
-                        if let a = SMSParser.findMatchingAccount(forBank: second.smsBank, senderOrPhone: second.smsSender, digits: nil, in: context) { return a.id }
-                        if let s = suf1.recipientSuffix ?? first.smsRecipientSuffix, let a = SMSParser.findMatchingAccount(suffix: s, in: context) { return a.id }
+                        if let s = suf2.accountSuffix, let a = SMSParser.findMatchingAccount(suffix: s, in: allAccounts) { return a.id }
+                        if let a = SMSParser.findMatchingAccount(forBank: second.smsBank, senderOrPhone: second.smsSender, digits: nil, in: allAccounts) { return a.id }
+                        if let s = suf1.recipientSuffix ?? first.smsRecipientSuffix, let a = SMSParser.findMatchingAccount(suffix: s, in: allAccounts) { return a.id }
                         return second.accountID
                     }()
 
@@ -1800,13 +1800,14 @@ enum SMSImporter {
                         tx.toBalanceAdjustment = 0
                         tx.isPossibleDuplicate = false
                         tx.smsConfidence = .high
-                        tx.smsClassificationReason = "Rule 6: Merged 2 matching SMS at same date & time (Debit: \(debitBank ?? "Source") → Credit: \(creditBank ?? "Destination"))"
+                        tx.smsClassificationReason = "Merged 2 matching SMS at same date & time (Debit: \(debitBank ?? "Source") → Credit: \(creditBank ?? "Destination"))"
                     }
 
                     if first.isPending && AppSettings.smsAutoApprove {
                         _ = Ledger.approve(first, context: context)
+                        _ = Ledger.syncBalanceFromSMS(first, context: context, force: true)
                     } else if !first.isPending {
-                        _ = Ledger.syncBalanceFromSMS(first, context: context)
+                        _ = Ledger.syncBalanceFromSMS(first, context: context, force: true)
                     }
                     modified = true
                     break

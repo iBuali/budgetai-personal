@@ -133,6 +133,13 @@ struct SpendCategory: Hashable, Identifiable {
     static var allCases: [SpendCategory] {
         builtIns + CategoryRegistry.shared.topLevel.filter { c in SpendCategory.builtInInfo[c.rawValue] == nil && !c.isIncomeCategory } + CategoryRegistry.shared.topLevel.filter { c in SpendCategory.builtInInfo[c.rawValue] == nil && c.isIncomeCategory }
     }
+    static func isTransferKey(_ raw: String) -> Bool {
+        if raw == "transfers" || raw == "internal_transfer" || raw == "visa_transfer" {
+            return true
+        }
+        return CategoryRegistry.shared.info(raw)?.isTransfer ?? false
+    }
+
     static var expenseCases: [SpendCategory] { allCases.filter { !$0.isIncomeCategory && !$0.isTransferCategory } }
     static var incomeCases: [SpendCategory] { allCases.filter { $0.isIncomeCategory && !$0.isTransferCategory } }
     static var transferCases: [SpendCategory] { allCases.filter(\.isTransferCategory) }
@@ -616,8 +623,8 @@ final class MoneyTransaction {
     }
 
     var isTransfer: Bool {
-        if category.isTransferCategory { return true }
-        if let t = smsTransactionType { return t.isTransferType }
+        if SpendCategory.isTransferKey(categoryRaw) { return true }
+        if !smsTransactionTypeRaw.isEmpty, let t = SMSTransactionType(rawValue: smsTransactionTypeRaw) { return t.isTransferType }
         return false
     }
 
@@ -629,14 +636,14 @@ final class MoneyTransaction {
     var signedAmount: Double { isIncome ? amount : -amount }
 
     var isSpending: Bool {
-        if category.isTransferCategory { return false }
-        if let t = smsTransactionType { return t.countsAsExpense }
+        if SpendCategory.isTransferKey(categoryRaw) { return false }
+        if !smsTransactionTypeRaw.isEmpty, let t = SMSTransactionType(rawValue: smsTransactionTypeRaw) { return t.countsAsExpense }
         return !isIncome
     }
 
     var isOrdinaryIncome: Bool {
-        if category.isTransferCategory { return false }
-        if let t = smsTransactionType { return t.countsAsIncome }
+        if SpendCategory.isTransferKey(categoryRaw) { return false }
+        if !smsTransactionTypeRaw.isEmpty, let t = SMSTransactionType(rawValue: smsTransactionTypeRaw) { return t.countsAsIncome }
         return isIncome
     }
 
@@ -800,6 +807,15 @@ enum BillFrequency: String, CaseIterable, Identifiable {
         }
     }
 
+    func previous(before date: Date, calendar: Calendar = .current) -> Date {
+        switch self {
+        case .weekly: calendar.date(byAdding: .day, value: -7, to: date) ?? date
+        case .monthly: calendar.date(byAdding: .month, value: -1, to: date) ?? date
+        case .quarterly: calendar.date(byAdding: .month, value: -3, to: date) ?? date
+        case .yearly: calendar.date(byAdding: .year, value: -1, to: date) ?? date
+        }
+    }
+
     /// Normalised monthly cost multiplier.
     var monthlyFactor: Double {
         switch self {
@@ -851,6 +867,7 @@ final class Bill {
     var lastPaidMethodRaw: String?
     var lastPaidAmount: Double?
     var lastPaidTxID: UUID?
+    var previousDueDate: Date?
     /// Comma-separated custom keywords to match in incoming bank SMS (e.g. "Batelco, Fiber, SADAD").
     var keywordsRaw: String = ""
 
@@ -921,6 +938,7 @@ final class Bill {
     }
 
     func markPaid(date: Date = .now, method: BillPaymentMethod, amount: Double? = nil, txID: UUID? = nil) {
+        previousDueDate = nextDueDate
         lastPaidAt = date
         lastPaidMethod = method
         lastPaidAmount = amount ?? self.amount
@@ -931,6 +949,12 @@ final class Bill {
     }
 
     func unmarkPaid() {
+        if let prev = previousDueDate {
+            nextDueDate = prev
+        } else {
+            nextDueDate = frequency.previous(before: nextDueDate)
+        }
+        previousDueDate = nil
         lastPaidAt = nil
         lastPaidMethod = nil
         lastPaidAmount = nil

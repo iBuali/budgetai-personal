@@ -35,7 +35,7 @@ enum StatementExportService {
         </style>
         </head>
         <body>
-        <div class="header-title">Budget AI — Transaction Statement</div>
+        <div class="header-title">FALAK — Transaction Statement</div>
         <div class="header-meta">Generated on \(df.string(from: Date())) | Total Transactions: \(sorted.count)</div>
         <table>
           <thead>
@@ -124,7 +124,7 @@ enum StatementExportService {
                     .font: titleFont,
                     .foregroundColor: UIColor(red: 0.08, green: 0.15, blue: 0.32, alpha: 1.0)
                 ]
-                "Budget AI — Bank Statement".draw(at: CGPoint(x: margin, y: currentY), withAttributes: titleAttr)
+                "FALAK — Bank Statement".draw(at: CGPoint(x: margin, y: currentY), withAttributes: titleAttr)
                 currentY += 24
 
                 let subFont = UIFont.systemFont(ofSize: 9, weight: .regular)

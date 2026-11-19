@@ -60,7 +60,7 @@ struct GeminiSettingsView: View {
             } header: {
                 Text("Model")
             } footer: {
-                Text("If a model isn't available on your key, Budget AI automatically falls back to the next one.")
+                Text("If a model isn't available on your key, FALAK automatically falls back to the next one.")
             }
 
             Section("What AI does here") {

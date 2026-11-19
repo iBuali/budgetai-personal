@@ -441,7 +441,7 @@ struct TransactionRow: View {
                         Text(subtitle)
                             .lineLimit(1)
                             .truncationMode(.tail)
-                        Text("• \(tx.date.formatted(date: .omitted, time: .shortened))")
+                        Text("• \(DateFormatCache.shortTime(tx.date))")
                             .lineLimit(1)
                             .layoutPriority(1)
                     }
@@ -496,41 +496,6 @@ struct Toast: View {
 
 struct DrawerMenuToolbarButtons: View {
     @Environment(AppState.self) private var appState
-    @Query private var bills: [Bill]
-    @Query private var transactions: [MoneyTransaction]
-    @Query private var budgets: [Budget]
-    @Query private var accounts: [Account]
-
-    private var alertSignature: String {
-        var parts: [String] = []
-        let cal = Calendar.current
-        let soon = cal.date(byAdding: .day, value: 7, to: .now) ?? .now
-        for bill in bills where !bill.isPaidForCurrentCycle() && bill.nextDueDate <= soon {
-            parts.append("bill-\(bill.id.uuidString)")
-        }
-        let reviewCount = transactions.filter { $0.isPending || $0.isPossibleDuplicate }.count
-        if reviewCount > 0 { parts.append("review-\(reviewCount)") }
-        if !budgets.isEmpty {
-            let f = Finance(transactions: transactions, accounts: accounts, budgets: budgets, bills: bills)
-            let interval = f.monthInterval(.now)
-            for b in budgets where b.limit > 0 {
-                let pct = Int((f.spent(for: b, in: interval) / b.limit) * 100)
-                if pct >= 80 { parts.append("budget-\(b.id.uuidString)-\(pct)") }
-            }
-        }
-        for acc in accounts where acc.kind.isLiability && acc.balance > 0 && acc.paymentDueReminder {
-            let days = acc.daysUntilDue()
-            if days <= 5 {
-                parts.append("card-\(acc.id.uuidString)-\(days)")
-            }
-        }
-        return parts.joined(separator: "|")
-    }
-
-    private var hasAlerts: Bool {
-        let sig = alertSignature
-        return !sig.isEmpty && sig != appState.notificationsReadSignature
-    }
 
     var body: some View {
         HStack(spacing: 12) {
@@ -556,7 +521,7 @@ struct DrawerMenuToolbarButtons: View {
                     Image(systemName: "bell")
                         .font(.body.weight(.medium))
                         .foregroundStyle(Theme.ink)
-                    if hasAlerts {
+                    if appState.hasUnreadAlerts {
                         Circle()
                             .fill(Theme.negative)
                             .frame(width: 7, height: 7)

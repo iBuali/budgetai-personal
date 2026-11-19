@@ -53,6 +53,7 @@ struct Finance {
     let bills: [Bill]
     let now: Date
     let cal = Calendar.current
+    let cycleStartDay: Int
     let thisMonth: DateInterval
 
     init(transactions: [MoneyTransaction], accounts: [Account] = [], budgets: [Budget] = [],
@@ -79,7 +80,9 @@ struct Finance {
         self.goals = goals
         self.bills = bills
         self.now = now
-        self.thisMonth = Cycle.interval(containing: now)
+        let startDay = Cycle.startDay
+        self.cycleStartDay = startDay
+        self.thisMonth = Cycle.interval(containing: now, startDay: startDay)
     }
 
     // MARK: Balances
@@ -107,7 +110,7 @@ struct Finance {
 
     /// Budget cycle containing `date` (custom start day aware).
     func monthInterval(_ date: Date) -> DateInterval {
-        Cycle.interval(containing: date)
+        Cycle.interval(containing: date, startDay: cycleStartDay)
     }
 
     var lastMonth: DateInterval {
@@ -168,6 +171,14 @@ struct Finance {
         }
     }
 
+    func spendingTotalsByCategory(in interval: DateInterval) -> [String: Double] {
+        var totals: [String: Double] = [:]
+        for tx in spendingTransactions where tx.date >= interval.start && tx.date < interval.end {
+            totals[tx.categoryRaw, default: 0] += tx.amount
+        }
+        return totals
+    }
+
     var monthIncome: Double { income(in: thisMonth) }
     var monthExpenses: Double { expenses(in: thisMonth) }
     var monthNet: Double { monthIncome - monthExpenses }
@@ -212,8 +223,12 @@ struct Finance {
     // MARK: Safe to spend
 
     var essentialsRemaining: Double {
-        budgets.filter { $0.categories.contains(where: \.isEssential) }.reduce(0) { total, b in
-            total + max(0, b.limit - spent(for: b, in: thisMonth))
+        let essentialBudgets = budgets.filter { $0.categories.contains(where: \.isEssential) }
+        guard !essentialBudgets.isEmpty else { return 0 }
+        let totals = spendingTotalsByCategory(in: thisMonth)
+        return essentialBudgets.reduce(0) { total, b in
+            let budgetSpent = b.categories.reduce(0) { $0 + (totals[$1.rawValue] ?? 0) }
+            return total + max(0, b.limit - budgetSpent)
         }
     }
 

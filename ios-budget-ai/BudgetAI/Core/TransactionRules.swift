@@ -849,7 +849,7 @@ final class TransactionRuleStore {
         }
 
         tx.smsConfidence = .high
-        tx.smsClassificationReason = "Matched Rule \(priorityNumber): \(rule.name)"
+        tx.smsClassificationReason = "Matched: \(rule.name)"
         tx.aiCategorized = false
     }
 

@@ -5,7 +5,7 @@ import SwiftData
 /// Run from a Shortcuts "Message received" automation to import bank SMS alerts automatically.
 struct AddBankSMSIntent: AppIntent {
     static let title: LocalizedStringResource = "Add Bank SMS"
-    static let description = IntentDescription("Reads a bank SMS alert and adds the transaction to Budget AI with an automatic category and real-time location.")
+    static let description = IntentDescription("Reads a bank SMS alert and adds the transaction to FALAK with an automatic category and real-time location.")
     static let openAppWhenRun: Bool = false
 
     @Parameter(title: "Message", inputOptions: String.IntentInputOptions(multiline: true))
@@ -36,7 +36,7 @@ struct AddBankSMSIntent: AppIntent {
     var longitude: Double?
 
     static var parameterSummary: some ParameterSummary {
-        Summary("Add \(\.$message) from \(\.$sender) at \(\.$location) to Budget AI")
+        Summary("Add \(\.$message) from \(\.$sender) at \(\.$location) to FALAK")
     }
 
     @MainActor

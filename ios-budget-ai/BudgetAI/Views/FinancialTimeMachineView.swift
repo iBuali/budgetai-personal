@@ -13,6 +13,7 @@ extension SimulationScenario {
 }
 
 struct FinancialTimeMachineView: View {
+    @Environment(AppState.self) private var appState
     @Query(sort: \MoneyTransaction.date, order: .reverse) private var transactions: [MoneyTransaction]
     @Query private var accounts: [Account]
     @Query private var budgets: [Budget]
@@ -25,16 +26,45 @@ struct FinancialTimeMachineView: View {
     @State private var loaded = false
     @State private var days = 90
     @State private var scenario: SimulationScenario = .expected
-    @State private var compare = false
-    @State private var selectedDate: Date?
     @State private var showEditor = false
+    @State private var cachedBaseline: FinancialBaseline?
+    @State private var cachedResults: [SimulationResult] = []
+    @State private var cachedActual: [ProjectionPoint] = []
 
-    var body: some View {
+    private func recomputeBaselineAndSimulation() {
         let f = Finance(transactions: transactions, accounts: accounts, budgets: budgets, goals: goals, bills: bills)
         let base = TimeMachineEngine.baseline(from: f)
-        let results = SimulationScenario.allCases.map { TimeMachineEngine.simulate(base, assumptions, scenario: $0, days: days) }
+        cachedBaseline = base
+        cachedActual = base.isDemo ? [] : TimeMachineEngine.actualHistory(f, days: 30)
+        cachedResults = SimulationScenario.allCases.map {
+            TimeMachineEngine.simulate(base, assumptions, scenario: $0, days: days)
+        }
+    }
+
+    private func recomputeResultsOnly() {
+        guard let base = cachedBaseline else {
+            recomputeBaselineAndSimulation()
+            return
+        }
+        cachedResults = SimulationScenario.allCases.map {
+            TimeMachineEngine.simulate(base, assumptions, scenario: $0, days: days)
+        }
+    }
+
+    var body: some View {
+        let base: FinancialBaseline = cachedBaseline ?? TimeMachineEngine.baseline(
+            from: Finance(transactions: transactions, accounts: accounts, budgets: budgets, goals: goals, bills: bills)
+        )
+        let results: [SimulationResult] = cachedResults.isEmpty
+            ? SimulationScenario.allCases.map { TimeMachineEngine.simulate(base, assumptions, scenario: $0, days: days) }
+            : cachedResults
         let r = results.first(where: { $0.scenario == scenario }) ?? results[1]
-        let actual = base.isDemo ? [] : TimeMachineEngine.actualHistory(f, days: 30)
+        let actual: [ProjectionPoint] = cachedBaseline != nil
+            ? cachedActual
+            : (base.isDemo ? [] : TimeMachineEngine.actualHistory(
+                Finance(transactions: transactions, accounts: accounts, budgets: budgets, goals: goals, bills: bills),
+                days: 30
+            ))
 
         ScrollView {
             VStack(spacing: 16) {
@@ -43,7 +73,14 @@ struct FinancialTimeMachineView: View {
                 scenarioPicker
                 summaryGrid(r)
                 commitmentCard(r)
-                chartCard(actual: actual, results: results, selected: r)
+                TimeMachineChartCard(
+                    actual: actual,
+                    results: results,
+                    selected: r,
+                    targetBalance: assumptions.targetBalance,
+                    days: days,
+                    currency: currency
+                )
                 quickControls
                 comparisonCard(base, results)
                 if assumptions.targetBalance > 0 { targetCard(r) }
@@ -53,8 +90,6 @@ struct FinancialTimeMachineView: View {
             }
             .padding(.horizontal, 16)
             .padding(.bottom, 28)
-            .animation(.spring(response: 0.45, dampingFraction: 0.86), value: days)
-            .animation(.spring(response: 0.45, dampingFraction: 0.86), value: scenario)
         }
         .canvasBackground()
         .navigationTitle("Time Machine")
@@ -68,10 +103,19 @@ struct FinancialTimeMachineView: View {
         .sheet(isPresented: $showEditor) {
             AssumptionsEditor(assumptions: $assumptions, baseline: base, currency: currency)
         }
-        .onAppear(perform: load)
+        .onAppear {
+            load()
+            recomputeBaselineAndSimulation()
+        }
+        .onChange(of: days) { _, _ in recomputeResultsOnly() }
         .onChange(of: assumptions) { _, value in
             storedAssumptions = (try? JSONEncoder().encode(value)) ?? Data()
+            recomputeResultsOnly()
         }
+        .onChange(of: transactions.count) { _, _ in recomputeBaselineAndSimulation() }
+        .onChange(of: accounts.count) { _, _ in recomputeBaselineAndSimulation() }
+        .onChange(of: bills.count) { _, _ in recomputeBaselineAndSimulation() }
+        .onChange(of: appState.dataVersion) { _, _ in recomputeBaselineAndSimulation() }
         .sensoryFeedback(.selection, trigger: days)
         .sensoryFeedback(.selection, trigger: scenario)
     }
@@ -240,131 +284,7 @@ struct FinancialTimeMachineView: View {
         .card(padding: 14)
     }
 
-    // MARK: Chart
-
-    private func chartCard(actual: [ProjectionPoint], results: [SimulationResult], selected: SimulationResult) -> some View {
-        let shown = compare ? results : [selected]
-        let today = Calendar.current.startOfDay(for: .now)
-        let probe = selectedDate.flatMap { d in nearest(d, actual: actual, projected: selected.points) }
-        return VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("Balance over time").font(.headline).foregroundStyle(Theme.ink)
-                Spacer()
-                Toggle("Compare", isOn: $compare.animation(.spring(response: 0.4, dampingFraction: 0.85)))
-                    .toggleStyle(.button)
-                    .controlSize(.small)
-                    .font(.caption.weight(.semibold))
-            }
-            Group {
-                if let probe {
-                    HStack(spacing: 6) {
-                        Text(probe.point.date, format: .dateTime.day().month(.abbreviated).year())
-                            .foregroundStyle(Theme.secondaryInk)
-                        Text(m(probe.point.balance)).fontWeight(.bold).foregroundStyle(Theme.ink)
-                        Text(probe.isActual ? "Actual" : "Projected")
-                            .font(.caption2.weight(.bold))
-                            .padding(.horizontal, 6).padding(.vertical, 2)
-                            .background((probe.isActual ? Theme.ink : selected.scenario.color).opacity(0.12), in: Capsule())
-                            .foregroundStyle(probe.isActual ? Theme.ink : selected.scenario.color)
-                    }
-                } else {
-                    Text("Touch and drag the chart to explore")
-                        .foregroundStyle(Theme.secondaryInk)
-                }
-            }
-            .font(.subheadline.monospacedDigit())
-            .lineLimit(1)
-            .minimumScaleFactor(0.7)
-
-            Chart {
-                ForEach(actual) { p in
-                    LineMark(x: .value("Date", p.date, unit: .day), y: .value("Balance", p.balance),
-                             series: .value("Series", "Actual"))
-                        .interpolationMethod(.monotone)
-                        .foregroundStyle(Theme.ink)
-                        .lineStyle(StrokeStyle(lineWidth: 2.5, lineCap: .round))
-                }
-                ForEach(shown, id: \.scenario) { res in
-                    ForEach(res.points) { p in
-                        LineMark(x: .value("Date", p.date, unit: .day), y: .value("Balance", p.balance),
-                                 series: .value("Series", res.scenario.title))
-                            .interpolationMethod(.monotone)
-                            .foregroundStyle(res.scenario.color)
-                            .lineStyle(StrokeStyle(lineWidth: res.scenario == selected.scenario ? 2.6 : 1.8,
-                                                   lineCap: .round, dash: [6, 4]))
-                    }
-                }
-                RuleMark(x: .value("Today", today, unit: .day))
-                    .foregroundStyle(Theme.ink.opacity(0.25))
-                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
-                    .annotation(position: .top, alignment: .center) {
-                        Text("Today").font(.caption2).foregroundStyle(Theme.secondaryInk)
-                    }
-                if assumptions.targetBalance > 0 {
-                    RuleMark(y: .value("Target", assumptions.targetBalance))
-                        .foregroundStyle(Theme.positive.opacity(0.6))
-                        .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 3]))
-                        .annotation(position: .top, alignment: .leading) {
-                            Text("Target").font(.caption2.weight(.semibold)).foregroundStyle(Theme.positive)
-                        }
-                }
-                if let probe {
-                    RuleMark(x: .value("Selected", probe.point.date, unit: .day))
-                        .foregroundStyle(Theme.ink.opacity(0.15))
-                    PointMark(x: .value("Date", probe.point.date, unit: .day), y: .value("Balance", probe.point.balance))
-                        .foregroundStyle(probe.isActual ? Theme.ink : selected.scenario.color)
-                        .symbolSize(80)
-                }
-            }
-            .chartXSelection(value: $selectedDate)
-            .chartYScale(domain: .automatic(includesZero: false))
-            .chartYAxis {
-                AxisMarks(position: .trailing) { v in
-                    AxisGridLine().foregroundStyle(Theme.track)
-                    AxisValueLabel {
-                        if let d = v.as(Double.self) { Text((d < 0 ? "−" : "") + Money.short(d)) }
-                    }
-                }
-            }
-            .chartXAxis {
-                AxisMarks(values: .automatic(desiredCount: 4)) { _ in
-                    AxisValueLabel(format: axisFormat)
-                }
-            }
-            .frame(height: 210)
-
-            HStack(spacing: 14) {
-                if !actual.isEmpty { legend("Actual", Theme.ink, dashed: false) }
-                ForEach(shown, id: \.scenario) { res in legend(res.scenario.title, res.scenario.color, dashed: true) }
-            }
-            .font(.caption)
-        }
-        .card()
-    }
-
-    private var axisFormat: Date.FormatStyle {
-        days > 180 ? Date.FormatStyle().month(.abbreviated) : Date.FormatStyle().month(.abbreviated).day()
-    }
-
-    private func nearest(_ d: Date, actual: [ProjectionPoint], projected: [ProjectionPoint]) -> (point: ProjectionPoint, isActual: Bool)? {
-        let today = Calendar.current.startOfDay(for: .now)
-        if d < today, let p = actual.min(by: { abs($0.date.timeIntervalSince(d)) < abs($1.date.timeIntervalSince(d)) }) {
-            return (p, true)
-        }
-        if let p = projected.min(by: { abs($0.date.timeIntervalSince(d)) < abs($1.date.timeIntervalSince(d)) }) {
-            return (p, false)
-        }
-        return nil
-    }
-
-    private func legend(_ title: String, _ color: Color, dashed: Bool) -> some View {
-        HStack(spacing: 5) {
-            Capsule()
-                .stroke(color, style: StrokeStyle(lineWidth: 2.5, lineCap: .round, dash: dashed ? [4, 3] : []))
-                .frame(width: 18, height: 1)
-            Text(title).foregroundStyle(Theme.secondaryInk)
-        }
-    }
+    // MARK: Chart (isolated into TimeMachineChartCard below so chart scrubbing does not recompute parent views)
 
     // MARK: Quick what-ifs
 
@@ -858,5 +778,143 @@ struct OneTimeEventSheet: View {
             }
         }
         .presentationDetents([.medium])
+    }
+}
+
+private struct TimeMachineChartCard: View {
+    let actual: [ProjectionPoint]
+    let results: [SimulationResult]
+    let selected: SimulationResult
+    let targetBalance: Double
+    let days: Int
+    let currency: String
+
+    @State private var selectedDate: Date?
+    @State private var compare = false
+
+    private var axisFormat: Date.FormatStyle {
+        days > 180 ? Date.FormatStyle().month(.abbreviated) : Date.FormatStyle().month(.abbreviated).day()
+    }
+
+    private func m(_ v: Double, signed: Bool = false) -> String { Money.format(v, currency, signed: signed) }
+
+    private func nearest(_ d: Date, actual: [ProjectionPoint], projected: [ProjectionPoint]) -> (point: ProjectionPoint, isActual: Bool)? {
+        let today = Calendar.current.startOfDay(for: .now)
+        if d < today, let p = actual.min(by: { abs($0.date.timeIntervalSince(d)) < abs($1.date.timeIntervalSince(d)) }) {
+            return (p, true)
+        }
+        if let p = projected.min(by: { abs($0.date.timeIntervalSince(d)) < abs($1.date.timeIntervalSince(d)) }) {
+            return (p, false)
+        }
+        return nil
+    }
+
+    private func legend(_ title: String, _ color: Color, dashed: Bool) -> some View {
+        HStack(spacing: 5) {
+            Capsule()
+                .stroke(color, style: StrokeStyle(lineWidth: 2.5, lineCap: .round, dash: dashed ? [4, 3] : []))
+                .frame(width: 18, height: 1)
+            Text(title).foregroundStyle(Theme.secondaryInk)
+        }
+    }
+
+    var body: some View {
+        let shown = compare ? results : [selected]
+        let today = Calendar.current.startOfDay(for: .now)
+        let probe = selectedDate.flatMap { d in nearest(d, actual: actual, projected: selected.points) }
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Balance over time").font(.headline).foregroundStyle(Theme.ink)
+                Spacer()
+                Toggle("Compare", isOn: $compare.animation(.spring(response: 0.4, dampingFraction: 0.85)))
+                    .toggleStyle(.button)
+                    .controlSize(.small)
+                    .font(.caption.weight(.semibold))
+            }
+            Group {
+                if let probe {
+                    HStack(spacing: 6) {
+                        Text(probe.point.date, format: .dateTime.day().month(.abbreviated).year())
+                            .foregroundStyle(Theme.secondaryInk)
+                        Text(m(probe.point.balance)).fontWeight(.bold).foregroundStyle(Theme.ink)
+                        Text(probe.isActual ? "Actual" : "Projected")
+                            .font(.caption2.weight(.bold))
+                            .padding(.horizontal, 6).padding(.vertical, 2)
+                            .background((probe.isActual ? Theme.ink : selected.scenario.color).opacity(0.12), in: Capsule())
+                            .foregroundStyle(probe.isActual ? Theme.ink : selected.scenario.color)
+                    }
+                } else {
+                    Text("Touch and drag the chart to explore")
+                        .foregroundStyle(Theme.secondaryInk)
+                }
+            }
+            .font(.subheadline.monospacedDigit())
+            .lineLimit(1)
+            .minimumScaleFactor(0.7)
+
+            Chart {
+                ForEach(actual) { p in
+                    LineMark(x: .value("Date", p.date, unit: .day), y: .value("Balance", p.balance),
+                             series: .value("Series", "Actual"))
+                        .interpolationMethod(.monotone)
+                        .foregroundStyle(Theme.ink)
+                        .lineStyle(StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                }
+                ForEach(shown, id: \.scenario) { res in
+                    ForEach(res.points) { p in
+                        LineMark(x: .value("Date", p.date, unit: .day), y: .value("Balance", p.balance),
+                                 series: .value("Series", res.scenario.title))
+                            .interpolationMethod(.monotone)
+                            .foregroundStyle(res.scenario.color)
+                            .lineStyle(StrokeStyle(lineWidth: res.scenario == selected.scenario ? 2.6 : 1.8,
+                                                   lineCap: .round, dash: [6, 4]))
+                    }
+                }
+                RuleMark(x: .value("Today", today, unit: .day))
+                    .foregroundStyle(Theme.ink.opacity(0.25))
+                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                    .annotation(position: .top, alignment: .center) {
+                        Text("Today").font(.caption2).foregroundStyle(Theme.secondaryInk)
+                    }
+                if targetBalance > 0 {
+                    RuleMark(y: .value("Target", targetBalance))
+                        .foregroundStyle(Theme.positive.opacity(0.6))
+                        .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 3]))
+                        .annotation(position: .top, alignment: .leading) {
+                            Text("Target").font(.caption2.weight(.semibold)).foregroundStyle(Theme.positive)
+                        }
+                }
+                if let probe {
+                    RuleMark(x: .value("Selected", probe.point.date, unit: .day))
+                        .foregroundStyle(Theme.ink.opacity(0.15))
+                    PointMark(x: .value("Date", probe.point.date, unit: .day), y: .value("Balance", probe.point.balance))
+                        .foregroundStyle(probe.isActual ? Theme.ink : selected.scenario.color)
+                        .symbolSize(80)
+                }
+            }
+            .chartXSelection(value: $selectedDate)
+            .chartYScale(domain: .automatic(includesZero: false))
+            .chartYAxis {
+                AxisMarks(position: .trailing) { v in
+                    AxisGridLine().foregroundStyle(Theme.track)
+                    AxisValueLabel {
+                        if let d = v.as(Double.self) { Text((d < 0 ? "−" : "") + Money.short(d)) }
+                    }
+                }
+            }
+            .chartXAxis {
+                AxisMarks(values: .automatic(desiredCount: 4)) { _ in
+                    AxisValueLabel(format: axisFormat)
+                }
+            }
+            .frame(height: 210)
+
+            HStack(spacing: 14) {
+                if !actual.isEmpty { legend("Actual", Theme.ink, dashed: false) }
+                ForEach(shown, id: \.scenario) { res in legend(res.scenario.title, res.scenario.color, dashed: true) }
+            }
+            .font(.caption)
+        }
+        .card()
     }
 }

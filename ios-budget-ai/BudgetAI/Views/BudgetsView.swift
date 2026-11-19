@@ -74,6 +74,7 @@ struct BudgetsView: View {
     var body: some View {
         let f = finance
         let interval = f.monthInterval(selectedMonth)
+        let spentByCategory = f.spendingTotalsByCategory(in: interval)
         NavigationStack {
             ScrollView {
                 VStack(spacing: 16) {
@@ -81,8 +82,8 @@ struct BudgetsView: View {
                         monthStrip
                             .transition(.move(edge: .top).combined(with: .opacity))
                     }
-                    overview(f, interval: interval)
-                    categorySection(f, interval: interval)
+                    overview(f, spentByCategory: spentByCategory, interval: interval)
+                    categorySection(spentByCategory: spentByCategory)
                     goalsSection
                 }
                 .padding(.horizontal, 16)
@@ -117,8 +118,9 @@ struct BudgetsView: View {
         }
     }
 
-    private func overview(_ f: Finance, interval: DateInterval) -> some View {
-        let spent = f.budgetSpent(in: interval)
+    private func overview(_ f: Finance, spentByCategory: [String: Double], interval: DateInterval) -> some View {
+        let uniqueKeys = Set(budgets.flatMap(\.categories).map(\.rawValue))
+        let spent = uniqueKeys.reduce(0) { $0 + (spentByCategory[$1] ?? 0) }
         let total = f.totalBudget
         let used = total > 0 ? spent / total : 0
         let pct = Int(used * 100)
@@ -156,7 +158,7 @@ struct BudgetsView: View {
         .card(padding: 20)
     }
 
-    private func categorySection(_ f: Finance, interval: DateInterval) -> some View {
+    private func categorySection(spentByCategory: [String: Double]) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             SectionTitle(title: "Category budgets") {
                 Button { showNewBudget = true } label: { Image(systemName: "plus.circle.fill").font(.title3) }
@@ -168,11 +170,11 @@ struct BudgetsView: View {
                     .foregroundStyle(Theme.secondaryInk)
             }
             ForEach(budgets) { budget in
-                let spent = f.spent(for: budget, in: interval)
+                let cats = budget.categories
+                let spent = Set(cats.map(\.rawValue)).reduce(0) { $0 + (spentByCategory[$1] ?? 0) }
                 let ratio = budget.limit > 0 ? spent / budget.limit : 0
                 let pct = Int(ratio * 100)
                 let isExpanded = expandedBudgets.contains(budget.id)
-                let cats = budget.categories
 
                 VStack(alignment: .leading, spacing: 10) {
                     HStack(spacing: 12) {
@@ -248,7 +250,7 @@ struct BudgetsView: View {
                     if isExpanded {
                         VStack(alignment: .leading, spacing: 11) {
                             ForEach(Array(cats.enumerated()), id: \.element.id) { index, cat in
-                                let catSpent = f.spent(cat, in: interval)
+                                let catSpent = spentByCategory[cat.rawValue] ?? 0
                                 let catRatio = budget.limit > 0 ? catSpent / budget.limit : (spent > 0 ? catSpent / spent : 0)
                                 MiniCategorySpendRow(
                                     category: cat,
@@ -316,24 +318,11 @@ struct BudgetsView: View {
                         VStack(alignment: .leading, spacing: 6) {
                             HStack(alignment: .top) {
                                 VStack(alignment: .leading, spacing: 2) {
-                                    HStack(spacing: 6) {
-                                        Text(goal.name)
-                                            .font(.subheadline.weight(.semibold))
-                                            .foregroundStyle(Theme.ink)
-                                            .lineLimit(1)
-                                            .minimumScaleFactor(0.85)
-                                        if linkedAcc != nil || linkedSuffix != nil {
-                                            Label(
-                                                linkedSuffix.map { "••\($0)" } ?? (linkedAcc?.name ?? "Linked"),
-                                                systemImage: "link"
-                                            )
-                                            .font(.caption2.weight(.semibold))
-                                            .foregroundStyle(Theme.cobalt)
-                                            .padding(.horizontal, 6)
-                                            .padding(.vertical, 2)
-                                            .background(Theme.cobalt.opacity(0.12), in: Capsule())
-                                        }
-                                    }
+                                    Text(goal.name)
+                                        .font(.subheadline.weight(.semibold))
+                                        .foregroundStyle(Theme.ink)
+                                        .lineLimit(1)
+                                        .minimumScaleFactor(0.85)
                                     if hasCommitment {
                                         Text("Total: \(Money.format(goal.saved, currency, decimals: 0)) / \(Money.number(goal.target, decimals: 0))")
                                             .font(.caption2)
@@ -381,12 +370,28 @@ struct BudgetsView: View {
                                 color: (hasCommitment && monthlyPaid >= goal.monthlyCommitment) || goal.isComplete ? Theme.positive : Theme.cobalt
                             )
 
-                            if hasCommitment && monthlyPaid >= goal.monthlyCommitment {
-                                HStack {
-                                    Label("Monthly commitment paid", systemImage: "checkmark.circle.fill")
-                                        .font(.caption2.weight(.medium))
-                                        .foregroundStyle(Theme.positive)
-                                    Spacer()
+                            let showPaidBadge = hasCommitment && monthlyPaid >= goal.monthlyCommitment
+                            let showLinkedBadge = linkedAcc != nil || linkedSuffix != nil
+                            if showPaidBadge || showLinkedBadge {
+                                HStack(spacing: 8) {
+                                    if showPaidBadge {
+                                        Label("Monthly commitment paid", systemImage: "checkmark.circle.fill")
+                                            .font(.caption2.weight(.medium))
+                                            .foregroundStyle(Theme.positive)
+                                    }
+                                    Spacer(minLength: 4)
+                                    if showLinkedBadge {
+                                        Label(
+                                            linkedSuffix.map { "••\($0)" } ?? (linkedAcc?.name ?? "Linked"),
+                                            systemImage: "link"
+                                        )
+                                        .font(.caption2.weight(.semibold))
+                                        .foregroundStyle(Theme.cobalt)
+                                        .lineLimit(1)
+                                        .padding(.horizontal, 7)
+                                        .padding(.vertical, 2)
+                                        .background(Theme.cobalt.opacity(0.12), in: Capsule())
+                                    }
                                 }
                             }
                         }

@@ -1,6 +1,10 @@
 import Foundation
 import SwiftData
 
+extension Notification.Name {
+    static let budgetDataDidChange = Notification.Name("budgetDataDidChange")
+}
+
 struct LedgerResult {
     var flaggedDuplicate = false
     var alerts: [String] = []
@@ -20,6 +24,7 @@ enum Ledger {
         context.insert(tx)
         if tx.isPending {
             try? context.save()
+            notifyDataChanged()
             return result
         }
         applyBalance(tx, sign: 1, context: context)
@@ -33,6 +38,7 @@ enum Ledger {
         recordSnapshot(context: context)
         try? context.save()
         if tx.category == .visaTransfer { refreshCardReminders(context: context) }
+        notifyDataChanged()
         return result
     }
 
@@ -59,6 +65,7 @@ enum Ledger {
         recordSnapshot(context: context)
         try? context.save()
         if tx.category == .visaTransfer { refreshCardReminders(context: context) }
+        notifyDataChanged()
         return result
     }
 
@@ -81,6 +88,7 @@ enum Ledger {
         recordSnapshot(context: context)
         try? context.save()
         reconcileDuplicates(context: context)
+        notifyDataChanged()
     }
 
     /// Reverse the old effect, mutate, then apply the new one.
@@ -88,6 +96,7 @@ enum Ledger {
         if tx.isPending {
             change(tx)
             try? context.save()
+            notifyDataChanged()
             return
         }
         let oldAccountID = tx.accountID
@@ -110,6 +119,7 @@ enum Ledger {
         recordSnapshot(context: context)
         try? context.save()
         if tx.category == .visaTransfer { refreshCardReminders(context: context) }
+        notifyDataChanged()
     }
 
     static func applyBalance(_ tx: MoneyTransaction, sign: Double, context: ModelContext) {
@@ -303,6 +313,7 @@ enum Ledger {
                 }
                 recordSnapshot(context: context)
                 try? context.save()
+                notifyDataChanged()
             }
             return balance
         }
@@ -316,6 +327,7 @@ enum Ledger {
             }
             recordSnapshot(context: context)
             try? context.save()
+            notifyDataChanged()
         }
         return balance
     }
@@ -522,6 +534,21 @@ enum Ledger {
         try? context.save()
         let bills = (try? context.fetch(FetchDescriptor<Bill>())) ?? []
         Notifier.rescheduleBills(bills)
+        notifyDataChanged()
+    }
+
+    static func unpayBill(_ bill: Bill, context: ModelContext) {
+        if let txID = bill.lastPaidTxID {
+            let descriptor = FetchDescriptor<MoneyTransaction>(predicate: #Predicate { $0.id == txID })
+            if let tx = try? context.fetch(descriptor).first {
+                delete(tx, context: context)
+            }
+        }
+        bill.unmarkPaid()
+        try? context.save()
+        let bills = (try? context.fetch(FetchDescriptor<Bill>())) ?? []
+        Notifier.rescheduleBills(bills)
+        notifyDataChanged()
     }
 
     /// Automatically matches an incoming expense or SMS payment to an active bill or subscription.
@@ -603,6 +630,7 @@ enum Ledger {
             goal.monthContributed += amount
             goal.saved += amount
             try? context.save()
+            notifyDataChanged()
         }
     }
 
@@ -636,5 +664,10 @@ enum Ledger {
         TransactionRuleStore.shared.deleteAll()
         CategoryRegistry.shared.reload(context: context)
         Notifier.rescheduleBills([])
+        notifyDataChanged()
+    }
+
+    static func notifyDataChanged() {
+        NotificationCenter.default.post(name: .budgetDataDidChange, object: nil)
     }
 }
