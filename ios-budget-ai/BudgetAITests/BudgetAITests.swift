@@ -1995,7 +1995,7 @@ struct BudgetAITests {
         )
         #expect(!excelData.isEmpty)
         let excelStr = String(data: excelData, encoding: .utf8) ?? ""
-        #expect(excelStr.contains("Budget AI — Transaction Statement"))
+        #expect(excelStr.contains("FALAK — Transaction Statement"))
         #expect(excelStr.contains("Costa Coffee"))
         #expect(excelStr.contains("Salary Transfer"))
 
