@@ -3068,9 +3068,9 @@ struct BudgetAITests {
             category: .internalTransfer,
             date: Date(),
             source: .sms,
-            accountID: bisb.id,
-            rawText: "\(ilaSMS)\n\n---\n\n\(bisbSMS)"
+            accountID: bisb.id
         )
+        corrupted.rawText = "\(ilaSMS)\n\n---\n\n\(bisbSMS)"
         corrupted.toAccountID = bisb.id
         corrupted.smsTransactionType = .internalTransfer
         corrupted.smsBank = "ila · BisB"
@@ -3297,9 +3297,9 @@ struct BudgetAITests {
             category: .internalTransfer,
             date: now,
             source: .sms,
-            accountID: bisb.id,
-            isPending: true
+            accountID: bisb.id
         )
+        pendingTx.isPending = true
         pendingTx.toAccountID = ila.id
         pendingTx.smsTransactionType = .internalTransfer
         pendingTx.smsRecipientSuffix = "0846"
