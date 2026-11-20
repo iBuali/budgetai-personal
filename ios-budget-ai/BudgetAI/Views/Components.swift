@@ -568,13 +568,14 @@ struct AccountPickerRow: View {
     }
 
     var body: some View {
-        HStack {
-            Text(title)
-                .foregroundStyle(Theme.ink)
-            Spacer()
-            Button {
-                showSheet = true
-            } label: {
+        Button {
+            showSheet = true
+        } label: {
+            HStack {
+                Text(title)
+                    .foregroundStyle(Theme.ink)
+                    .layoutPriority(1)
+                Spacer()
                 HStack(spacing: 6) {
                     if let acc = selectedAccount {
                         AccountIcon(account: acc, size: 22)
@@ -593,8 +594,9 @@ struct AccountPickerRow: View {
                 .padding(.vertical, 6)
                 .background(Theme.track.opacity(0.65), in: Capsule())
             }
-            .buttonStyle(.plain)
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
         .sheet(isPresented: $showSheet) {
             NavigationStack {
                 List {
@@ -610,6 +612,7 @@ struct AccountPickerRow: View {
                                 Image(systemName: "checkmark").font(.subheadline.weight(.semibold)).foregroundStyle(Theme.cobalt)
                             }
                         }
+                        .contentShape(Rectangle())
                     }
                     ForEach(accounts) { acc in
                         Button {
@@ -627,6 +630,7 @@ struct AccountPickerRow: View {
                                     Image(systemName: "checkmark").font(.subheadline.weight(.semibold)).foregroundStyle(Theme.cobalt)
                                 }
                             }
+                            .contentShape(Rectangle())
                         }
                     }
                 }
@@ -675,13 +679,14 @@ struct SheetPickerRow<Value: Hashable>: View {
     }
 
     var body: some View {
-        HStack {
-            Text(title)
-                .foregroundStyle(Theme.ink)
-            Spacer()
-            Button {
-                showSheet = true
-            } label: {
+        Button {
+            showSheet = true
+        } label: {
+            HStack {
+                Text(title)
+                    .foregroundStyle(Theme.ink)
+                    .layoutPriority(1)
+                Spacer()
                 HStack(spacing: 6) {
                     if let opt = selectedOption {
                         if let sym = opt.symbol {
@@ -689,6 +694,8 @@ struct SheetPickerRow<Value: Hashable>: View {
                         }
                         Text(opt.title)
                             .lineLimit(1)
+                    } else {
+                        Text("None")
                     }
                     Image(systemName: "chevron.up.chevron.down")
                         .font(.caption2.weight(.semibold))
@@ -700,8 +707,9 @@ struct SheetPickerRow<Value: Hashable>: View {
                 .padding(.vertical, 6)
                 .background(Theme.track.opacity(0.65), in: Capsule())
             }
-            .buttonStyle(.plain)
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
         .sheet(isPresented: $showSheet) {
             NavigationStack {
                 List {
@@ -727,6 +735,7 @@ struct SheetPickerRow<Value: Hashable>: View {
                                         .foregroundStyle(Theme.cobalt)
                                 }
                             }
+                            .contentShape(Rectangle())
                         }
                     }
                 }

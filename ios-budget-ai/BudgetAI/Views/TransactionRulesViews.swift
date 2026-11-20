@@ -734,10 +734,10 @@ struct TransactionRuleBuilderSheet: View {
             if !affected.isEmpty {
                 let priority = store.priorityNumber(for: savedRule.id) ?? 1
                 for item in affected {
-                    store.apply(rule: savedRule, to: item.tx, priorityNumber: priority)
+                    Ledger.edit(item.tx, context: modelContext) { target in
+                        store.apply(rule: savedRule, to: target, priorityNumber: priority)
+                    }
                 }
-                try? modelContext.save()
-                Ledger.notifyDataChanged()
             }
         }
 

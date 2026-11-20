@@ -123,51 +123,33 @@ enum Ledger {
     }
 
     static func applyBalance(_ tx: MoneyTransaction, sign: Double, context: ModelContext) {
-        if tx.smsTransactionType == .unknown {
-            return
-        }
         let isCardPayment = tx.category == .visaTransfer
         let isInternal = tx.smsTransactionType == .internalTransfer || tx.category == .internalTransfer || isCardPayment
-        if sign > 0, !isCardPayment, isInternal {
-            if tx.toAccountID == nil,
-               let recip = tx.smsRecipientSuffix,
-               let matchedDest = SMSParser.findMatchingAccount(suffix: recip, excludingAccountID: tx.accountID, in: context) {
-                tx.toAccountID = matchedDest.id
+        let shouldApplyAccountBalances = tx.smsTransactionType != .unknown
+            && !(isInternal && !isCardPayment && tx.toAccountID == nil && tx.goalID == nil)
+
+        if shouldApplyAccountBalances {
+            if let id = tx.accountID, let account = account(id, context: context) {
+                if account.kind.isLiability {
+                    account.balance += (tx.isIncome ? -tx.amount : tx.amount) * sign
+                    if sign > 0 && tx.isIncome {
+                        account.advanceDueDateIfPaid(on: tx.date, paymentAmount: tx.amount)
+                    }
+                } else {
+                    account.balance += tx.signedAmount * sign
+                }
             }
-            if tx.goalID == nil,
-               let matchedGoal = SMSParser.findMatchingGoal(suffix: tx.smsRecipientSuffix, accountID: tx.toAccountID, in: context),
-               matchedGoal.linkedAccountID == nil || matchedGoal.linkedAccountID != tx.accountID {
-                tx.goalID = matchedGoal.id
-                if tx.toAccountID == nil, let linkedAcc = matchedGoal.linkedAccountID, linkedAcc != tx.accountID {
-                    tx.toAccountID = linkedAcc
+            // Internal transfers credit the destination account (paying down a loan or card reduces what's owed).
+            if (isInternal || (tx.smsTransactionType == nil && tx.isTransfer)),
+               let to = tx.toAccountID, to != tx.accountID, let dest = account(to, context: context) {
+                dest.balance += (dest.kind.isLiability ? -tx.amount : tx.amount) * sign
+                if sign > 0 && (dest.kind == .creditCard || dest.kind == .loan) {
+                    // Paid in full / installment paid shortly before the due date → move the reminder to next month's due date.
+                    dest.advanceDueDateIfPaid(on: tx.date, paymentAmount: tx.amount)
                 }
             }
         }
-        if isInternal && !isCardPayment && tx.toAccountID == nil && tx.goalID == nil {
-            // Do not change net worth on an internal transfer without a destination account or linked savings goal.
-            // (Card payments still debit the paying bank account even before a card account is linked.)
-            return
-        }
-        if let id = tx.accountID, let account = account(id, context: context) {
-            if account.kind.isLiability {
-                account.balance += (tx.isIncome ? -tx.amount : tx.amount) * sign
-                if sign > 0 && tx.isIncome {
-                    account.advanceDueDateIfPaid(on: tx.date, paymentAmount: tx.amount)
-                }
-            } else {
-                account.balance += tx.signedAmount * sign
-            }
-        }
-        // Internal transfers credit the destination account (paying down a loan or card reduces what's owed).
-        if (isInternal || (tx.smsTransactionType == nil && tx.isTransfer)),
-           let to = tx.toAccountID, to != tx.accountID, let dest = account(to, context: context) {
-            dest.balance += (dest.kind.isLiability ? -tx.amount : tx.amount) * sign
-            if sign > 0 && (dest.kind == .creditCard || dest.kind == .loan) {
-                // Paid in full / installment paid shortly before the due date → move the reminder to next month's due date.
-                dest.advanceDueDateIfPaid(on: tx.date, paymentAmount: tx.amount)
-            }
-        }
-        // Automatically update the linked savings goal when a transfer contributes to it.
+        // Automatically update the linked savings goal when a transaction contributes to it.
         if let goalID = tx.goalID, let targetGoal = goal(goalID, context: context) {
             let txMonthKey = DateKeys.month(tx.date)
             let currentMonthKey = DateKeys.month(.now)
@@ -291,13 +273,37 @@ enum Ledger {
         return add(tx, context: context, checkDuplicates: false)
     }
 
+    /// Returns true if `tx` is the most recent non-pending transaction affecting `accountID`
+    /// (as either the source `accountID` or destination `toAccountID`).
+    static func isLatestTransaction(_ tx: MoneyTransaction, forAccountID accountID: UUID, context: ModelContext) -> Bool {
+        guard !tx.isPending, (tx.accountID == accountID || tx.toAccountID == accountID) else { return false }
+        let txDate = tx.date
+        let txID = tx.id
+        let descriptor = FetchDescriptor<MoneyTransaction>(
+            predicate: #Predicate { !$0.isPending && $0.date > txDate && $0.id != txID }
+        )
+        let newerTxs = (try? context.fetch(descriptor)) ?? []
+        return !newerTxs.contains { $0.accountID == accountID || $0.toAccountID == accountID }
+    }
+
     /// When the bank SMS includes the available balance, make the app's account match it.
     /// Updates the specified account's balance independently based on the SMS balance.
     @discardableResult
-    static func syncBalanceForAccount(id: UUID, balance: Double, on tx: MoneyTransaction, isToAccount: Bool = false, context: ModelContext, force: Bool = false) -> Double? {
+    static func syncBalanceForAccount(
+        id: UUID,
+        balance: Double,
+        on tx: MoneyTransaction,
+        isToAccount: Bool = false,
+        context: ModelContext,
+        force: Bool = false,
+        onlyIfLatest: Bool = false
+    ) -> Double? {
         guard force || AppSettings.smsSyncBalance, !tx.isPending, !tx.isCardLimitBalance,
               let account = account(id, context: context),
               (!account.kind.isLiability || account.kind == .creditCard) else { return nil }
+        if onlyIfLatest && !isLatestTransaction(tx, forAccountID: id, context: context) {
+            return nil
+        }
         if account.kind == .creditCard && account.creditLimit > 0 {
             if balance > account.creditLimit {
                 account.creditLimit = balance
@@ -336,13 +342,13 @@ enum Ledger {
     /// For internal transfers, matches each account (source `accountID` and destination `toAccountID`)
     /// with its own respective balance from the SMS; balances are never merged or mixed.
     @discardableResult
-    static func syncBalanceFromSMS(_ tx: MoneyTransaction, context: ModelContext, force: Bool = false) -> Double? {
+    static func syncBalanceFromSMS(_ tx: MoneyTransaction, context: ModelContext, force: Bool = false, onlyIfLatest: Bool = false) -> Double? {
         var syncedPrimary: Double? = nil
         if let id = tx.accountID, let bal = tx.smsBalance {
-            syncedPrimary = syncBalanceForAccount(id: id, balance: bal, on: tx, isToAccount: false, context: context, force: force)
+            syncedPrimary = syncBalanceForAccount(id: id, balance: bal, on: tx, isToAccount: false, context: context, force: force, onlyIfLatest: onlyIfLatest)
         }
         if let toId = tx.toAccountID, let toBal = tx.smsToBalance, toId != tx.accountID {
-            _ = syncBalanceForAccount(id: toId, balance: toBal, on: tx, isToAccount: true, context: context, force: force)
+            _ = syncBalanceForAccount(id: toId, balance: toBal, on: tx, isToAccount: true, context: context, force: force, onlyIfLatest: onlyIfLatest)
         }
         return syncedPrimary
     }

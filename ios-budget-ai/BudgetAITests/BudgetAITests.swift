@@ -2967,4 +2967,371 @@ struct BudgetAITests {
         #expect(withNew.first?.id == card.id)
         #expect(withNew.last?.id == newLoan.id)
     }
+
+    // MARK: - 25. Per-Leg Cross-Bank Internal Transfer & Balance Match Rules
+
+    @Test func ilaToBisBCrossBankTransferAndReconcilePreservesBothAccountsAndBalances() async throws {
+        let ilaSMS = "Success! Fawri+ transfer of BHD 0.100 to IBAN ****3876 is completed on 19/11/2026 20:03 Ref ABCO261119177962 Balance BHD 1,027.164 Enquiry 17123456"
+        let bisbSMS = "Fawri+ payment BHD0.100 received from IBAN 1101 to IBAN 3876 ref. ABCO261119177962 on 2026/11/19 20:03. Balance BHD512.093. Tel 17515151"
+
+        // Case 1: ila Debit SMS arrives first, BisB Credit SMS arrives second, followed by reconciliation
+        do {
+            let context = makeCleanContext()
+            let ila = Account(name: "ila", kind: .bank, institution: "ila Bank", balance: 1027.264)
+            ila.smsMatch = "1101"
+            let bisb = Account(name: "BisB", kind: .bank, institution: "BisB", balance: 511.993)
+            bisb.smsMatch = "3876"
+            context.insert(ila)
+            context.insert(bisb)
+            try context.save()
+
+            _ = await SMSImporter.importText(ilaSMS, context: context, forceApprove: true)
+            _ = await SMSImporter.importText(bisbSMS, context: context, forceApprove: true)
+
+            let txs = try context.fetch(FetchDescriptor<MoneyTransaction>())
+            #expect(txs.count == 1)
+            let merged = try #require(txs.first)
+            #expect(merged.smsTransactionType == .internalTransfer)
+            #expect(merged.category == .internalTransfer)
+            #expect(merged.accountID == ila.id)
+            #expect(merged.toAccountID == bisb.id)
+            #expect(merged.smsAccountSuffix == "1101")
+            #expect(merged.smsRecipientSuffix == "3876")
+            #expect(merged.smsBank == "ila · BisB")
+            #expect(abs((merged.smsBalance ?? 0) - 1027.164) < 0.0001)
+            #expect(abs((merged.smsToBalance ?? 0) - 512.093) < 0.0001)
+            #expect(abs(ila.balance - 1027.164) < 0.0001)
+            #expect(abs(bisb.balance - 512.093) < 0.0001)
+
+            // Reconciling existing transactions must NEVER re-parse combined rawText into BisB -> BisB
+            SMSImporter.reconcileExistingTransactions(context: context)
+            #expect(merged.accountID == ila.id)
+            #expect(merged.toAccountID == bisb.id)
+            #expect(merged.smsAccountSuffix == "1101")
+            #expect(merged.smsRecipientSuffix == "3876")
+            #expect(merged.smsBank == "ila · BisB")
+            #expect(abs((merged.smsBalance ?? 0) - 1027.164) < 0.0001)
+            #expect(abs((merged.smsToBalance ?? 0) - 512.093) < 0.0001)
+            #expect(abs(ila.balance - 1027.164) < 0.0001)
+            #expect(abs(bisb.balance - 512.093) < 0.0001)
+        }
+
+        // Case 2: BisB Credit SMS arrives first, ila Debit SMS arrives second, followed by reconciliation
+        do {
+            let context = makeCleanContext()
+            let ila = Account(name: "ila", kind: .bank, institution: "ila Bank", balance: 1027.264)
+            ila.smsMatch = "1101"
+            let bisb = Account(name: "BisB", kind: .bank, institution: "BisB", balance: 511.993)
+            bisb.smsMatch = "3876"
+            context.insert(ila)
+            context.insert(bisb)
+            try context.save()
+
+            _ = await SMSImporter.importText(bisbSMS, context: context, forceApprove: true)
+            _ = await SMSImporter.importText(ilaSMS, context: context, forceApprove: true)
+
+            SMSImporter.reconcileExistingTransactions(context: context)
+
+            let txs = try context.fetch(FetchDescriptor<MoneyTransaction>())
+            #expect(txs.count == 1)
+            let merged = try #require(txs.first)
+            #expect(merged.smsTransactionType == .internalTransfer)
+            #expect(merged.accountID == ila.id)
+            #expect(merged.toAccountID == bisb.id)
+            #expect(merged.smsAccountSuffix == "1101")
+            #expect(merged.smsRecipientSuffix == "3876")
+            #expect(merged.smsBank == "ila · BisB")
+            #expect(abs((merged.smsBalance ?? 0) - 1027.164) < 0.0001)
+            #expect(abs((merged.smsToBalance ?? 0) - 512.093) < 0.0001)
+            #expect(abs(ila.balance - 1027.164) < 0.0001)
+            #expect(abs(bisb.balance - 512.093) < 0.0001)
+        }
+    }
+
+    @Test func selfHealsCorruptedMergedInternalTransferOnReconcile() async throws {
+        let context = makeCleanContext()
+        let ila = Account(name: "ila", kind: .bank, institution: "ila Bank", balance: 1027.264)
+        ila.smsMatch = "1101"
+        let bisb = Account(name: "BisB", kind: .bank, institution: "BisB", balance: 511.893)
+        bisb.smsMatch = "3876"
+        context.insert(ila)
+        context.insert(bisb)
+
+        let ilaSMS = "Success! Fawri+ transfer of BHD 0.100 to IBAN ****3876 is completed on 19/11/2026 20:03 Ref ABCO261119177962 Balance BHD 1,027.164 Enquiry 17123456"
+        let bisbSMS = "Fawri+ payment BHD0.100 received from IBAN 1101 to IBAN 3876 ref. ABCO261119177962 on 2026/11/19 20:03. Balance BHD512.093. Tel 17515151"
+
+        // Simulate the previously corrupted stored transaction (both accountID & toAccountID pointing to BisB)
+        let corrupted = MoneyTransaction(
+            amount: 0.100,
+            isIncome: false,
+            merchant: "BisB → BisB",
+            category: .internalTransfer,
+            date: Date(),
+            source: .sms,
+            accountID: bisb.id,
+            rawText: "\(ilaSMS)\n\n---\n\n\(bisbSMS)"
+        )
+        corrupted.toAccountID = bisb.id
+        corrupted.smsTransactionType = .internalTransfer
+        corrupted.smsBank = "ila · BisB"
+        corrupted.smsReference = "ABCO261119177962"
+        corrupted.smsAccountSuffix = "3876"
+        corrupted.smsRecipientSuffix = "1101"
+        corrupted.smsBalance = 1027.164
+        corrupted.smsToBalance = 512.093
+        corrupted.smsClassificationReason = "Merged 2 matching SMS at same date & time (Debit: ila → Credit: BisB)"
+        context.insert(corrupted)
+        try context.save()
+
+        SMSImporter.reconcileExistingTransactions(context: context)
+
+        #expect(corrupted.accountID == ila.id)
+        #expect(corrupted.toAccountID == bisb.id)
+        #expect(corrupted.merchant == "ila → BisB")
+        #expect(corrupted.smsAccountSuffix == "1101")
+        #expect(corrupted.smsRecipientSuffix == "3876")
+        #expect(abs((corrupted.smsBalance ?? 0) - 1027.164) < 0.0001)
+        #expect(abs((corrupted.smsToBalance ?? 0) - 512.093) < 0.0001)
+        #expect(abs(ila.balance - 1027.164) < 0.0001)
+        #expect(abs(bisb.balance - 512.093) < 0.0001)
+    }
+
+    @Test func manualVsAutoBalanceSyncAndLatestTransactionRules() async throws {
+        let context = makeCleanContext()
+        defer { UserDefaults.standard.removeObject(forKey: Keys.smsSyncBalance) }
+
+        let ila = Account(name: "ila", kind: .bank, institution: "ila Bank", balance: 1000.000)
+        ila.smsMatch = "1101"
+        let bisb = Account(name: "BisB", kind: .bank, institution: "BisB", balance: 500.000)
+        bisb.smsMatch = "3876"
+        context.insert(ila)
+        context.insert(bisb)
+        try context.save()
+
+        // 1. Manual match mode (`smsSyncBalance == false`) must NOT auto-sync account balances
+        UserDefaults.standard.set(false, forKey: Keys.smsSyncBalance)
+
+        let olderSMS = "Purchase of BHD 5.000 at Coffee on IBAN 1101 on 19/11/2026 10:00 Ref OLD001 Balance BHD 900.000 Enquiry 17123456"
+        let olderRes = await SMSImporter.importText(olderSMS, context: context, forceApprove: true)
+        let olderTx = try #require(olderRes.transaction)
+        #expect(abs(ila.balance - 995.000) < 0.0001) // 1000 - 5, NOT auto-synced to 900
+        #expect(Ledger.isLatestTransaction(olderTx, forAccountID: ila.id, context: context) == true)
+
+        let transferDebitSMS = "Success! Fawri+ transfer of BHD 10.000 to IBAN ****3876 is completed on 19/11/2026 12:00 Ref TRF002 Balance BHD 980.000 Enquiry 17123456"
+        let transferCreditSMS = "Fawri+ payment BHD10.000 received from IBAN 1101 to IBAN 3876 ref. TRF002 on 2026/11/19 12:00. Balance BHD520.000. Tel 17515151"
+        _ = await SMSImporter.importText(transferDebitSMS, context: context, forceApprove: true)
+        let transferRes = await SMSImporter.importText(transferCreditSMS, context: context, forceApprove: true)
+        let transferTx = try #require(transferRes.transaction)
+
+        // Neither bank was auto-synced in Manual mode
+        #expect(abs(ila.balance - 985.000) < 0.0001)  // 995 - 10
+        #expect(abs(bisb.balance - 510.000) < 0.0001) // 500 + 10
+
+        // Older tx is no longer latest for ila; transferTx IS latest for both ila and bisb
+        #expect(Ledger.isLatestTransaction(olderTx, forAccountID: ila.id, context: context) == false)
+        #expect(Ledger.isLatestTransaction(transferTx, forAccountID: ila.id, context: context) == true)
+        #expect(Ledger.isLatestTransaction(transferTx, forAccountID: bisb.id, context: context) == true)
+
+        // Newer purchase on BisB -> transferTx is still latest for ila, NOT latest for bisb
+        let newerBisBSMS = "Purchase of BHD 2.000 at Shop on account 3876 on 2026/11/19 14:00 Ref NEW003. Balance BHD 505.000. Tel: 17515151"
+        let newerBisBRes = await SMSImporter.importText(newerBisBSMS, context: context, forceApprove: true)
+        let newerBisBTx = try #require(newerBisBRes.transaction)
+
+        #expect(Ledger.isLatestTransaction(transferTx, forAccountID: ila.id, context: context) == true)
+        #expect(Ledger.isLatestTransaction(transferTx, forAccountID: bisb.id, context: context) == false)
+        #expect(Ledger.isLatestTransaction(newerBisBTx, forAccountID: bisb.id, context: context) == true)
+        #expect(abs(bisb.balance - 508.000) < 0.0001) // Manual mode: 510 - 2, NOT auto-synced to 505
+
+        // Syncing onlyIfLatest skips olderTx, while manual force on ila updates ONLY ila
+        #expect(Ledger.syncBalanceFromSMS(olderTx, context: context, force: true, onlyIfLatest: true) == nil)
+        let manualSync = Ledger.syncBalanceForAccount(id: ila.id, balance: 980.000, on: transferTx, isToAccount: false, context: context, force: true)
+        #expect(manualSync == 980.000)
+        #expect(abs(ila.balance - 980.000) < 0.0001)
+        #expect(abs(bisb.balance - 508.000) < 0.0001)
+
+        // 2. Auto-match mode (`smsSyncBalance == true`) syncs automatically on import
+        UserDefaults.standard.set(true, forKey: Keys.smsSyncBalance)
+        let autoSMS = "Purchase of BHD 3.000 at Cafe on IBAN 1101 on 19/11/2026 16:00 Ref AUTO004 Balance BHD 970.000 Enquiry 17123456"
+        _ = await SMSImporter.importText(autoSMS, context: context, forceApprove: true)
+        #expect(abs(ila.balance - 970.000) < 0.0001)
+    }
+
+    @Test func savingsGoalReassignmentAndAllTransactionEditsReflectOnGoals() async throws {
+        let context = makeCleanContext()
+
+        let bisb = Account(name: "BisB", kind: .bank, institution: "BisB", balance: 500.000)
+        bisb.smsMatch = "9001"
+        let ila = Account(name: "ila", kind: .bank, institution: "ila Bank", balance: 100.000)
+        ila.smsMatch = "0846"
+        context.insert(bisb)
+        context.insert(ila)
+
+        let targetDate = Calendar.current.date(byAdding: .month, value: 6, to: .now) ?? .now
+        let goalA = SavingsGoal(
+            name: "Goal A",
+            symbol: "star.fill",
+            target: 500.000,
+            saved: 50.000,
+            targetDate: targetDate,
+            monthlyCommitment: 50.000,
+            linkedAccountID: ila.id,
+            smsMatch: "0846"
+        )
+        let goalB = SavingsGoal(
+            name: "Goal B",
+            symbol: "airplane",
+            target: 300.000,
+            saved: 10.000,
+            targetDate: targetDate,
+            monthlyCommitment: 20.000
+        )
+        context.insert(goalA)
+        context.insert(goalB)
+        try context.save()
+
+        let now = Date()
+        let dfSlash = DateFormatter()
+        dfSlash.locale = Locale(identifier: "en_US_POSIX")
+        dfSlash.dateFormat = "yyyy/MM/dd"
+        let todayYMD = dfSlash.string(from: now)
+
+        // 1. Auto-assigned SMS internal transfer (BisB -> ila) links Goal A and updates goalA.saved & monthContributed
+        let smsOut = "Your account ending 9001 has been debited BHD 25.000 for outward transfer Ref: GOALREF1 on \(todayYMD) 12:00. Balance BHD 475.000. Tel: 17515151"
+        let smsIn = "Your account ending 0846 has been credited with BHD 25.000 via Fawri+ Ref: GOALREF1 on \(todayYMD) 12:00. Available balance BHD 125.000. Call 17123456"
+        _ = await SMSImporter.importText(smsOut, context: context, forceApprove: true)
+        let mergedOutcome = await SMSImporter.importText(smsIn, context: context, forceApprove: true)
+        let tx = try #require(mergedOutcome.transaction)
+
+        #expect(tx.smsTransactionType == .internalTransfer)
+        #expect(tx.accountID == bisb.id)
+        #expect(tx.toAccountID == ila.id)
+        #expect(tx.goalID == goalA.id)
+        #expect(abs(goalA.saved - 75.000) < 0.0001)
+        #expect(abs(goalA.contributedThisMonth(now: now) - 25.000) < 0.0001)
+
+        // Changing goal to None (nil) must keep tx.goalID == nil (not snap back) and reverse Goal A totals, even after reconcile
+        Ledger.edit(tx, context: context) { target in
+            target.goalID = nil
+        }
+        #expect(tx.goalID == nil)
+        #expect(abs(goalA.saved - 50.000) < 0.0001)
+        #expect(abs(goalA.contributedThisMonth(now: now) - 0.000) < 0.0001)
+
+        SMSImporter.reconcileExistingTransactions(context: context)
+        #expect(tx.goalID == nil)
+        #expect(abs(goalA.saved - 50.000) < 0.0001)
+        #expect(abs(goalA.contributedThisMonth(now: now) - 0.000) < 0.0001)
+
+        // 2. Reassign Goal A -> Goal B updates both goals accurately
+        Ledger.edit(tx, context: context) { target in
+            target.goalID = goalA.id
+        }
+        #expect(abs(goalA.saved - 75.000) < 0.0001)
+        #expect(abs(goalA.contributedThisMonth(now: now) - 25.000) < 0.0001)
+
+        Ledger.edit(tx, context: context) { target in
+            target.goalID = goalB.id
+        }
+        #expect(tx.goalID == goalB.id)
+        #expect(abs(goalA.saved - 50.000) < 0.0001)
+        #expect(abs(goalA.contributedThisMonth(now: now) - 0.000) < 0.0001)
+        #expect(abs(goalB.saved - 35.000) < 0.0001)
+        #expect(abs(goalB.contributedThisMonth(now: now) - 25.000) < 0.0001)
+
+        // 3. Manually assigning an internal transfer to Goal A (linkedAccountID == toAccountID) and unassigning to nil stays nil
+        let manualTransfer = MoneyTransaction(
+            amount: 15.000,
+            isIncome: false,
+            merchant: "Manual Savings",
+            category: .internalTransfer,
+            date: now,
+            source: .transfer,
+            accountID: bisb.id
+        )
+        manualTransfer.toAccountID = ila.id
+        Ledger.add(manualTransfer, context: context, checkDuplicates: false)
+        Ledger.edit(manualTransfer, context: context) { target in
+            target.goalID = goalA.id
+        }
+        #expect(manualTransfer.goalID == goalA.id)
+        #expect(abs(goalA.saved - 65.000) < 0.0001)
+
+        Ledger.edit(manualTransfer, context: context) { target in
+            target.goalID = nil
+        }
+        #expect(manualTransfer.goalID == nil)
+        #expect(abs(goalA.saved - 50.000) < 0.0001)
+        #expect(abs(goalA.contributedThisMonth(now: now) - 0.000) < 0.0001)
+
+        // 4. Editing amount on goal-linked transaction reflects on goal saved & monthContributed
+        Ledger.edit(tx, context: context) { target in
+            target.amount = 40.000
+        }
+        #expect(abs(goalB.saved - 50.000) < 0.0001) // 10 + 40
+        #expect(abs(goalB.contributedThisMonth(now: now) - 40.000) < 0.0001)
+
+        // 5. Editing date across months updates monthContributed without losing saved, and restores when moved back
+        let prevMonthDate = Calendar.current.date(byAdding: .month, value: -1, to: now) ?? now.addingTimeInterval(-35 * 86_400)
+        Ledger.edit(tx, context: context) { target in
+            target.date = prevMonthDate
+        }
+        #expect(abs(goalB.saved - 50.000) < 0.0001)
+        #expect(abs(goalB.contributedThisMonth(now: now) - 0.000) < 0.0001)
+
+        Ledger.edit(tx, context: context) { target in
+            target.date = now
+        }
+        #expect(abs(goalB.saved - 50.000) < 0.0001)
+        #expect(abs(goalB.contributedThisMonth(now: now) - 40.000) < 0.0001)
+
+        // 6. Deleting goal-linked transaction subtracts from goal saved & monthContributed
+        Ledger.delete(tx, context: context)
+        #expect(abs(goalB.saved - 10.000) < 0.0001)
+        #expect(abs(goalB.contributedThisMonth(now: now) - 0.000) < 0.0001)
+
+        // 7. Clearing goalID on a pending internal transfer and approving keeps goalID == nil without adding to Goal A
+        let pendingTx = MoneyTransaction(
+            amount: 30.000,
+            isIncome: false,
+            merchant: "Pending Transfer",
+            category: .internalTransfer,
+            date: now,
+            source: .sms,
+            accountID: bisb.id,
+            isPending: true
+        )
+        pendingTx.toAccountID = ila.id
+        pendingTx.smsTransactionType = .internalTransfer
+        pendingTx.smsRecipientSuffix = "0846"
+        pendingTx.goalID = goalA.id
+        context.insert(pendingTx)
+        try context.save()
+
+        Ledger.edit(pendingTx, context: context) { target in
+            target.goalID = nil
+        }
+        _ = Ledger.approve(pendingTx, context: context)
+        #expect(pendingTx.goalID == nil)
+        #expect(abs(goalA.saved - 50.000) < 0.0001)
+        #expect(abs(goalA.contributedThisMonth(now: now) - 0.000) < 0.0001)
+
+        // 8. Assigning an .unknown SMS transaction to Goal B still updates Goal B saved & monthContributed
+        let unknownSMSTx = MoneyTransaction(
+            amount: 12.000,
+            isIncome: false,
+            merchant: "Unknown Notification",
+            category: .other,
+            date: now,
+            source: .sms,
+            accountID: bisb.id
+        )
+        unknownSMSTx.smsTransactionType = .unknown
+        Ledger.add(unknownSMSTx, context: context, checkDuplicates: false)
+        Ledger.edit(unknownSMSTx, context: context) { target in
+            target.goalID = goalB.id
+        }
+        #expect(unknownSMSTx.goalID == goalB.id)
+        #expect(abs(goalB.saved - 22.000) < 0.0001)
+        #expect(abs(goalB.contributedThisMonth(now: now) - 12.000) < 0.0001)
+    }
 }

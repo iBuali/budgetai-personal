@@ -942,6 +942,7 @@ struct TransactionDetailView: View {
     @Query(sort: \Account.createdAt) private var accounts: [Account]
     @Query(sort: \SavingsGoal.createdAt) private var goals: [SavingsGoal]
     @AppStorage(Keys.currency) private var currency = "BHD"
+    @AppStorage(Keys.smsSyncBalance) private var smsSyncBalance = true
     @State private var confirmDelete = false
     @State private var editingCategory = false
     @State private var nameText = ""
@@ -954,6 +955,8 @@ struct TransactionDetailView: View {
     @State private var showCreateRuleSheet = false
     @State private var cachedSMSLegHeaders: [String] = []
     @State private var cachedInferredLocation: TransactionLocationData? = nil
+    @State private var isLatestForSourceAccount = false
+    @State private var isLatestForDestAccount = false
     @FocusState private var focusedField: DetailField?
 
     private enum DetailField: Hashable {
@@ -1083,9 +1086,25 @@ struct TransactionDetailView: View {
             amountText = Money.number(tx.amount, decimals: Money.digits(currency)).replacingOccurrences(of: ",", with: "")
             noteText = tx.note
             refreshDerivedSMSMetadata()
+            refreshLatestTransactionFlags()
         }
         .onChange(of: tx.rawText) { _, _ in
             refreshDerivedSMSMetadata()
+        }
+        .onChange(of: tx.accountID) { _, _ in
+            refreshLatestTransactionFlags()
+        }
+        .onChange(of: tx.toAccountID) { _, _ in
+            refreshLatestTransactionFlags()
+        }
+        .onChange(of: tx.isPending) { _, _ in
+            refreshLatestTransactionFlags()
+        }
+        .onChange(of: tx.date) { _, _ in
+            refreshLatestTransactionFlags()
+        }
+        .onChange(of: smsSyncBalance) { _, _ in
+            refreshLatestTransactionFlags()
         }
         .onChange(of: focusedField) { oldValue, _ in
             if oldValue == .name {
@@ -1288,10 +1307,10 @@ struct TransactionDetailView: View {
                 selection: Binding(
                     get: { tx.date },
                     set: { newDate in
-                        tx.date = newDate
-                        Ledger.recordSnapshot(context: context)
-                        try? context.save()
-                        Ledger.notifyDataChanged()
+                        commitPendingEdits(silent: true)
+                        Ledger.edit(tx, context: context) { target in
+                            target.date = newDate
+                        }
                     }
                 ),
                 displayedComponents: [.date, .hourAndMinute]
@@ -1336,6 +1355,7 @@ struct TransactionDetailView: View {
             AccountPickerRow(
                 title: "Account",
                 selection: Binding(get: { tx.accountID }, set: { newID in
+                    commitPendingEdits(silent: true)
                     Ledger.edit(tx, context: context) { target in
                         target.accountID = newID
                     }
@@ -1362,6 +1382,7 @@ struct TransactionDetailView: View {
                 title: "Visa card",
                 selection: Binding(get: { tx.toAccountID }, set: { newID in
                     guard newID != tx.accountID else { return }
+                    commitPendingEdits(silent: true)
                     Ledger.edit(tx, context: context) { $0.toAccountID = newID }
                 }),
                 accounts: accounts.filter { $0.kind == .creditCard },
@@ -1385,6 +1406,7 @@ struct TransactionDetailView: View {
                 title: "To account",
                 selection: Binding(get: { tx.toAccountID ?? matchedRecipientAccount?.id }, set: { newID in
                     guard newID != tx.accountID else { return }
+                    commitPendingEdits(silent: true)
                     let linkedGoalID = newID.flatMap { id in goals.first(where: { $0.linkedAccountID == id })?.id }
                     Ledger.edit(tx, context: context) { target in
                         target.toAccountID = newID
@@ -1406,23 +1428,39 @@ struct TransactionDetailView: View {
 
     @ViewBuilder
     private var savingsGoalPicker: some View {
+        let currentSelection: String = {
+            guard let gid = tx.goalID, goals.contains(where: { $0.id == gid }) else { return "" }
+            return gid.uuidString
+        }()
         SheetPickerRow(
             title: "Savings goal",
-            selection: Binding(get: { tx.goalID }, set: { newGoalID in
-                let linkedAccountID = newGoalID.flatMap { id in goals.first(where: { $0.id == id })?.linkedAccountID }
-                Ledger.edit(tx, context: context) { target in
-                    target.goalID = newGoalID
-                    let isInternal = target.category == .internalTransfer || target.smsTransactionType == .internalTransfer
-                    if target.toAccountID == nil,
-                       let linkedAcc = linkedAccountID,
-                       linkedAcc != target.accountID,
-                       isInternal {
-                        target.toAccountID = linkedAcc
+            selection: Binding(
+                get: { currentSelection },
+                set: { rawID in
+                    commitPendingEdits(silent: true)
+                    let newGoalID = UUID(uuidString: rawID)
+                    guard newGoalID != tx.goalID else { return }
+                    let selectedGoal = newGoalID.flatMap { id in goals.first(where: { $0.id == id }) }
+                    let linkedAccountID = selectedGoal?.linkedAccountID
+                    Ledger.edit(tx, context: context) { target in
+                        target.goalID = newGoalID
+                        let isInternal = target.category == .internalTransfer || target.smsTransactionType == .internalTransfer
+                        if target.toAccountID == nil,
+                           let linkedAcc = linkedAccountID,
+                           linkedAcc != target.accountID,
+                           isInternal {
+                            target.toAccountID = linkedAcc
+                        }
+                    }
+                    if let selectedGoal {
+                        appState.show("Assigned to \(selectedGoal.name)")
+                    } else {
+                        appState.show("Removed from savings goal")
                     }
                 }
-            }),
-            options: [SheetPickerOption(id: UUID?.none, title: "None", symbol: "minus.circle", color: Theme.secondaryInk)]
-                + goals.map { SheetPickerOption(id: UUID?.some($0.id), title: $0.name, symbol: "target", color: Theme.cobalt) }
+            ),
+            options: [SheetPickerOption(id: "", title: "None", symbol: "minus.circle", color: Theme.secondaryInk)]
+                + goals.map { SheetPickerOption(id: $0.id.uuidString, title: $0.name, symbol: $0.symbol, color: Theme.cobalt) }
         )
     }
 
@@ -1468,11 +1506,14 @@ struct TransactionDetailView: View {
                 }
             }
         } else if tx.category == .internalTransfer || tx.category == .visaTransfer || tx.smsTransactionType == .internalTransfer || tx.isIncome != new.isIncomeCategory {
+            let wasInternal = tx.category == .internalTransfer || tx.smsTransactionType == .internalTransfer
             Ledger.edit(tx, context: context) { target in
                 target.subcategory = nil
                 target.category = new
                 target.toAccountID = nil
-                target.goalID = nil
+                if wasInternal {
+                    target.goalID = nil
+                }
                 target.smsBalanceIsCardLimit = false
                 target.isIncome = new.isIncomeCategory
                 if isSMSTransaction {
@@ -1645,9 +1686,10 @@ struct TransactionDetailView: View {
 
             if let bank = tx.smsBalance, let account, (!account.kind.isLiability || account.kind == .creditCard), !tx.isCardLimitBalance {
                 let effectiveBal = effectiveAccountBalance(account)
-                if abs(effectiveBal - bank) >= 0.0005 && !tx.isPending {
+                if !smsSyncBalance && isLatestForSourceAccount && abs(effectiveBal - bank) >= 0.0005 && !tx.isPending {
                     Button {
-                        if let synced = Ledger.syncBalanceFromSMS(tx, context: context, force: true) {
+                        if let synced = Ledger.syncBalanceForAccount(id: account.id, balance: bank, on: tx, isToAccount: false, context: context, force: true) {
+                            refreshLatestTransactionFlags()
                             appState.show("\(account.name) set to \(Money.format(synced, currency))")
                         }
                     } label: {
@@ -1656,7 +1698,7 @@ struct TransactionDetailView: View {
                 }
             }
 
-            if let toBal = tx.smsToBalance, let toID = tx.toAccountID, let destAcc = toAccount {
+            if let toBal = tx.smsToBalance, let toID = tx.toAccountID, toID != tx.accountID, let destAcc = toAccount {
                 let toEffectiveBal = effectiveAccountBalance(destAcc)
 
                 LabeledContent("Destination previous balance") {
@@ -1666,15 +1708,27 @@ struct TransactionDetailView: View {
                 }
 
                 LabeledContent("Destination new balance") {
-                    Text("\(destAcc.name) (\(Money.format(toEffectiveBal, currency)))")
-                        .monospacedDigit()
-                        .animatedNumber(toEffectiveBal)
+                    if (!destAcc.kind.isLiability || destAcc.kind == .creditCard) && abs(toEffectiveBal - toBal) >= 0.0005 {
+                        VStack(alignment: .trailing, spacing: 2) {
+                            Text("\(destAcc.name) (\(Money.format(toEffectiveBal, currency)))")
+                                .monospacedDigit()
+                                .animatedNumber(toEffectiveBal)
+                            Text("SMS: \(Money.format(toBal, currency))")
+                                .font(.caption2.monospacedDigit())
+                                .foregroundStyle(Theme.secondaryInk)
+                        }
+                    } else {
+                        Text("\(destAcc.name) (\(Money.format(toEffectiveBal, currency)))")
+                            .monospacedDigit()
+                            .animatedNumber(toEffectiveBal)
+                    }
                 }
 
                 if !destAcc.kind.isLiability || destAcc.kind == .creditCard {
-                    if abs(toEffectiveBal - toBal) >= 0.0005 && !tx.isPending {
+                    if !smsSyncBalance && isLatestForDestAccount && abs(toEffectiveBal - toBal) >= 0.0005 && !tx.isPending {
                         Button {
                             if let synced = Ledger.syncBalanceForAccount(id: toID, balance: toBal, on: tx, isToAccount: true, context: context, force: true) {
+                                refreshLatestTransactionFlags()
                                 appState.show("\(destAcc.name) set to \(Money.format(synced, currency))")
                             }
                         } label: {
@@ -1784,6 +1838,15 @@ struct TransactionDetailView: View {
         cachedSMSLegHeaders = messages.count > 1
             ? messages.enumerated().map { idx, msg in smsLegHeaderTitle(index: idx, message: msg) }
             : []
+    }
+
+    private func refreshLatestTransactionFlags() {
+        isLatestForSourceAccount = tx.accountID.map { Ledger.isLatestTransaction(tx, forAccountID: $0, context: context) } ?? false
+        if let toID = tx.toAccountID, toID != tx.accountID {
+            isLatestForDestAccount = Ledger.isLatestTransaction(tx, forAccountID: toID, context: context)
+        } else {
+            isLatestForDestAccount = false
+        }
     }
 
     private func commitPendingEdits(silent: Bool) {

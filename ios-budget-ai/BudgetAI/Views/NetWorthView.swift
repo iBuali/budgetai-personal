@@ -475,8 +475,9 @@ struct AccountEditor: View {
         let trimmedMatch = target.smsMatch.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmedMatch.isEmpty {
             let txs = (try? context.fetch(FetchDescriptor<MoneyTransaction>())) ?? []
-            for tx in txs where tx.source == .sms && tx.accountID == nil {
+            for tx in txs where tx.source == .sms && tx.accountID == nil && tx.toAccountID != target.id {
                 let raw = tx.rawText ?? ""
+                guard !raw.contains("\n\n---\n\n") else { continue }
                 let reparsedSuffix = raw.isEmpty ? nil : SMSParser.extractSuffixes(in: raw).accountSuffix
                 let candidateSuffix = reparsedSuffix ?? tx.smsAccountSuffix
                 let matchedBySuffix = candidateSuffix.map { SMSParser.digitsMatch(accountMatch: trimmedMatch, query: $0) } ?? false

@@ -1097,11 +1097,238 @@ enum SMSImporter {
         return nil
     }
 
+    private struct TransferLegInput {
+        let rawText: String
+        let explicitBank: String?
+        let sender: String?
+        let explicitAccountSuffix: String?
+        let explicitRecipientSuffix: String?
+        let explicitBalance: Double?
+        let fallbackAccountID: UUID?
+        let fallbackToAccountID: UUID?
+        let explicitRole: SMSTransactionType?
+        let fallbackIsIncome: Bool?
+    }
+
+    private struct ResolvedTwoLegTransfer {
+        let fromID: UUID
+        let toID: UUID
+        let sourceSuffix: String?
+        let destSuffix: String?
+        let sourceBalance: Double?
+        let destBalance: Double?
+        let debitBank: String?
+        let creditBank: String?
+        let combinedBank: String?
+        let combinedRaw: String
+        let debitSender: String?
+        let matchedGoalID: UUID?
+    }
+
+    /// Parses and resolves a two-SMS internal transfer strictly per leg so suffixes, banks, accounts,
+    /// and balances from one leg can never overwrite or corrupt the opposite leg.
+    private static func resolveTwoLegInternalTransfer(
+        _ legA: TransferLegInput,
+        _ legB: TransferLegInput,
+        allAccounts: [Account],
+        context: ModelContext,
+        fallbackDebitID: UUID? = nil,
+        fallbackCreditID: UUID? = nil
+    ) -> ResolvedTwoLegTransfer? {
+        struct ParsedTransferLeg {
+            let input: TransferLegInput
+            let parsed: ParsedSMS?
+            let direction: TransferLegDirection
+            let suffixes: (accountSuffix: String?, recipientSuffix: String?)
+            let bank: String?
+            let balance: Double?
+            let isIncome: Bool
+        }
+
+        func makeParsedLeg(_ leg: TransferLegInput) -> ParsedTransferLeg {
+            let parsed = leg.rawText.isEmpty ? nil : SMSParser.parse(leg.rawText, sender: leg.sender, context: context)
+            let rawSuffixes: (accountSuffix: String?, recipientSuffix: String?) = leg.rawText.isEmpty
+                ? (leg.explicitAccountSuffix, leg.explicitRecipientSuffix)
+                : SMSParser.extractSuffixes(in: leg.rawText)
+            let accSuffix: String? = {
+                if let s = rawSuffixes.accountSuffix, !s.isEmpty { return s }
+                if let ex = leg.explicitAccountSuffix, !ex.isEmpty, ex != rawSuffixes.recipientSuffix { return ex }
+                return nil
+            }()
+            let recSuffix: String? = {
+                if let s = rawSuffixes.recipientSuffix, !s.isEmpty { return s }
+                if let ex = leg.explicitRecipientSuffix, !ex.isEmpty, ex != rawSuffixes.accountSuffix { return ex }
+                return nil
+            }()
+            let bank = SMSParser.primaryBankName(from: leg.explicitBank) ?? parsed?.detectedBank
+            let balance = leg.explicitBalance ?? parsed?.balance
+            let isIncome = leg.fallbackIsIncome ?? parsed?.isIncome ?? (leg.explicitRole == .transferIn)
+            let direction = SMSParser.analyzeTransferLegDirection(in: leg.rawText, fallbackIsIncome: isIncome)
+            return ParsedTransferLeg(
+                input: leg,
+                parsed: parsed,
+                direction: direction,
+                suffixes: (accSuffix, recSuffix),
+                bank: bank,
+                balance: balance,
+                isIncome: isIncome
+            )
+        }
+
+        let leg1 = makeParsedLeg(legA)
+        let leg2 = makeParsedLeg(legB)
+
+        let firstIsDebit: Bool = {
+            if leg1.direction == .debit && leg2.direction != .debit { return true }
+            if leg2.direction == .debit && leg1.direction != .debit { return false }
+            if leg1.direction == .credit && leg2.direction != .credit { return false }
+            if leg2.direction == .credit && leg1.direction != .credit { return true }
+            if leg1.input.explicitRole == .transferOut && leg2.input.explicitRole != .transferOut { return true }
+            if leg2.input.explicitRole == .transferOut && leg1.input.explicitRole != .transferOut { return false }
+            if leg1.input.explicitRole == .transferIn && leg2.input.explicitRole != .transferIn { return false }
+            if leg2.input.explicitRole == .transferIn && leg1.input.explicitRole != .transferIn { return true }
+            if !leg1.isIncome && leg2.isIncome { return true }
+            if !leg2.isIncome && leg1.isIncome { return false }
+            return true
+        }()
+
+        let debitLeg = firstIsDebit ? leg1 : leg2
+        let creditLeg = firstIsDebit ? leg2 : leg1
+
+        func accountBySuffix(_ suffix: String?, preferredBank: String?, excluding excludedID: UUID?) -> Account? {
+            guard let suffix, !suffix.isEmpty else { return nil }
+            if let preferredBank, !preferredBank.isEmpty,
+               let bankScoped = allAccounts.first(where: {
+                   $0.id != excludedID
+                       && SMSParser.digitsMatch(accountMatch: $0.smsMatch, query: suffix)
+                       && SMSParser.accountMatchesBank($0, bank: preferredBank)
+               }) {
+                return bankScoped
+            }
+            return SMSParser.findMatchingAccount(suffix: suffix, excludingAccountID: excludedID, in: allAccounts)
+        }
+
+        func fallbackAccount(_ id: UUID?, preferredBank: String?, excluding excludedID: UUID?) -> Account? {
+            guard let id, id != excludedID, let acc = allAccounts.first(where: { $0.id == id }) else { return nil }
+            if let preferredBank, !preferredBank.isEmpty,
+               SMSParser.bankName(forAccount: acc) != nil,
+               !SMSParser.accountMatchesBank(acc, bank: preferredBank) {
+                return nil
+            }
+            return acc
+        }
+
+        // Pass 1a: Resolve each leg by its own explicit account/card suffix first
+        var debitAcc = accountBySuffix(debitLeg.suffixes.accountSuffix, preferredBank: debitLeg.bank, excluding: nil)
+        var creditAcc = accountBySuffix(creditLeg.suffixes.accountSuffix, preferredBank: creditLeg.bank, excluding: debitAcc?.id)
+
+        // Pass 1b: Resolve any remaining leg from the counterparty IBAN/account suffix stated in the opposite SMS
+        if debitAcc == nil {
+            debitAcc = accountBySuffix(creditLeg.suffixes.recipientSuffix, preferredBank: debitLeg.bank, excluding: creditAcc?.id)
+        }
+        if creditAcc == nil {
+            creditAcc = accountBySuffix(debitLeg.suffixes.recipientSuffix, preferredBank: creditLeg.bank, excluding: debitAcc?.id)
+        }
+
+        let bDebit = debitLeg.bank
+        let bCredit = creditLeg.bank
+        let isDifferentBanks: Bool = {
+            guard let bDebit, let bCredit, !bDebit.isEmpty, !bCredit.isEmpty else { return false }
+            return bDebit.caseInsensitiveCompare(bCredit) != .orderedSame
+        }()
+        let hasOppositeDirection = (debitLeg.direction == .debit && creditLeg.direction == .credit) || (!debitLeg.isIncome && creditLeg.isIncome)
+
+        // Pass 2: Match by each leg's own bank / SMS sender when account digits weren't configured
+        if debitAcc == nil, let bDebit, !bDebit.isEmpty {
+            let pool = creditAcc.map { c in allAccounts.filter { $0.id != c.id } } ?? allAccounts
+            debitAcc = SMSParser.findMatchingAccount(forBank: bDebit, senderOrPhone: debitLeg.input.sender, digits: nil, in: pool)
+        }
+        if creditAcc == nil, let bCredit, !bCredit.isEmpty, (isDifferentBanks || hasOppositeDirection) {
+            let pool = debitAcc.map { d in allAccounts.filter { $0.id != d.id } } ?? allAccounts
+            creditAcc = SMSParser.findMatchingAccount(forBank: bCredit, senderOrPhone: creditLeg.input.sender, digits: nil, in: pool)
+        }
+
+        // Pass 3: Safe fallback IDs (only if compatible with the leg's bank and distinct from the opposite leg)
+        if debitAcc == nil {
+            debitAcc = fallbackAccount(debitLeg.input.fallbackAccountID, preferredBank: bDebit, excluding: creditAcc?.id)
+                ?? fallbackAccount(fallbackDebitID, preferredBank: bDebit, excluding: creditAcc?.id)
+        }
+        if creditAcc == nil {
+            creditAcc = fallbackAccount(creditLeg.input.fallbackAccountID, preferredBank: bCredit, excluding: debitAcc?.id)
+                ?? fallbackAccount(debitLeg.input.fallbackToAccountID, preferredBank: bCredit, excluding: debitAcc?.id)
+                ?? fallbackAccount(creditLeg.input.fallbackToAccountID, preferredBank: bCredit, excluding: debitAcc?.id)
+                ?? fallbackAccount(fallbackCreditID, preferredBank: bCredit, excluding: debitAcc?.id)
+        }
+
+        guard let fromAcc = debitAcc, let toAcc = creditAcc, fromAcc.id != toAcc.id else {
+            return nil
+        }
+
+        let sourceSuffix: String? = {
+            if let s = debitLeg.suffixes.accountSuffix, !s.isEmpty { return s }
+            if let s = creditLeg.suffixes.recipientSuffix, !s.isEmpty,
+               SMSParser.digitsMatch(accountMatch: fromAcc.smsMatch, query: s) || !SMSParser.digitsMatch(accountMatch: toAcc.smsMatch, query: s) {
+                return s
+            }
+            return nil
+        }()
+
+        let destSuffix: String? = {
+            if let s = creditLeg.suffixes.accountSuffix, !s.isEmpty { return s }
+            if let s = debitLeg.suffixes.recipientSuffix, !s.isEmpty,
+               SMSParser.digitsMatch(accountMatch: toAcc.smsMatch, query: s) || !SMSParser.digitsMatch(accountMatch: fromAcc.smsMatch, query: s) {
+                return s
+            }
+            return nil
+        }()
+
+        let resolvedDebitBank = bDebit ?? SMSParser.bankName(forAccount: fromAcc)
+        let resolvedCreditBank = bCredit ?? SMSParser.bankName(forAccount: toAcc)
+        let combinedBank = SMSParser.formatCombinedBanks(debitBank: resolvedDebitBank, creditBank: resolvedCreditBank)
+
+        let dRaw = debitLeg.input.rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cRaw = creditLeg.input.rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let combinedRaw: String = {
+            if dRaw.isEmpty { return cRaw }
+            if cRaw.isEmpty || dRaw == cRaw || dRaw.contains(cRaw) { return dRaw }
+            return "\(dRaw)\n\n---\n\n\(cRaw)"
+        }()
+
+        let debitSender: String? = {
+            if let s = debitLeg.input.sender, !s.isEmpty { return s }
+            if let s = creditLeg.input.sender, !s.isEmpty { return s }
+            return nil
+        }()
+
+        let matchedGoalID: UUID? = {
+            if let goal = SMSParser.findMatchingGoal(suffix: destSuffix, accountID: toAcc.id, in: context),
+               goal.linkedAccountID == nil || goal.linkedAccountID != fromAcc.id {
+                return goal.id
+            }
+            return nil
+        }()
+
+        return ResolvedTwoLegTransfer(
+            fromID: fromAcc.id,
+            toID: toAcc.id,
+            sourceSuffix: sourceSuffix,
+            destSuffix: destSuffix,
+            sourceBalance: debitLeg.balance,
+            destBalance: creditLeg.balance,
+            debitBank: resolvedDebitBank,
+            creditBank: resolvedCreditBank,
+            combinedBank: combinedBank,
+            combinedRaw: combinedRaw,
+            debitSender: debitSender,
+            matchedGoalID: matchedGoalID
+        )
+    }
+
     /// When a user transfers between two accounts, they often receive two SMS alerts at the same date & time
     /// (e.g. one is "Transfer between accounts" / `internalTransfer` and the other is "Transfer Out" / `transferOut`,
     /// or one is `transferOut` from Account A and the other is `transferIn` to Account B).
     /// If the date, time, and amount match, this merges them into ONE single transaction instead of creating a duplicate,
-    /// while updating each account's balance strictly from its own SMS balance separately.
+    /// while preserving each account's balance strictly per SMS leg.
     private static func mergeSameTimeTransferIfNeeded(
         parsed: ParsedSMS,
         rawParsedType: SMSTransactionType,
@@ -1123,6 +1350,9 @@ enum SMSImporter {
         )
         let candidates = (try? context.fetch(descriptor)) ?? []
         guard !candidates.isEmpty else { return nil }
+
+        let allAccounts = (try? context.fetch(FetchDescriptor<Account>(sortBy: [SortDescriptor(\.createdAt)]))) ?? []
+        let accountsByID = Dictionary(uniqueKeysWithValues: allAccounts.map { ($0.id, $0) })
 
         let incomingTime = parsed.timeString ?? SMSParser.extractDateAndTime(in: rawSMS).time
         let newRole: SMSTransactionType = {
@@ -1166,274 +1396,67 @@ enum SMSImporter {
             }()
             guard isSameDateAndTime else { continue }
 
-            let existingRole = originalTransferRole(for: existing, context: context) ?? (existing.isIncome ? .transferIn : .transferOut)
             let existingRawText = existing.rawText ?? ""
-            let exSuffixes = SMSParser.extractSuffixes(in: existingRawText)
-            let inSuffixes = SMSParser.extractSuffixes(in: rawSMS)
-
-            // In a two-leg internal transfer (e.g. BisB -> ila), each bank's SMS often prints the OTHER (counterparty) account's IBAN:
-            // - BisB outgoing SMS: "was credited to IBAN ending 1101" (1101 is ila's IBAN, i.e. existing's account!)
-            // - ila incoming SMS: "from IBAN ****3876 credited to BHD Ac" (3876 is BisB's IBAN, i.e. incoming's account!)
-            let exCounterpartyFromOtherLeg = inSuffixes.recipientSuffix ?? parsed.recipientSuffix
-            let inCounterpartyFromOtherLeg = exSuffixes.recipientSuffix ?? existing.smsRecipientSuffix
-
-            let b1 = SMSParser.primaryBankName(from: existing.smsBank)
-            let b2 = SMSParser.primaryBankName(from: resolvedBank)
-            let isDifferentBanks: Bool = {
-                guard let b1, let b2, !b1.isEmpty, !b2.isEmpty else { return false }
-                return b1.caseInsensitiveCompare(b2) != .orderedSame
-            }()
-
-            // 4. Each message is associated with a different account already configured in the app
-            var resolvedExAccID: UUID? = {
-                if let s = exSuffixes.accountSuffix, let acc = SMSParser.findMatchingAccount(suffix: s, in: context) {
-                    return acc.id
+            let trimmedIncomingRaw = rawSMS.trimmingCharacters(in: .whitespacesAndNewlines)
+            if (existing.smsTransactionType == .internalTransfer || existing.category == .internalTransfer),
+               existingRawText.contains("\n\n---\n\n") {
+                if !trimmedIncomingRaw.isEmpty && existingRawText.contains(trimmedIncomingRaw) {
+                    let code = AppSettings.currency
+                    return SMSImportOutcome(
+                        transaction: existing,
+                        batchTransactions: [existing],
+                        usedAI: usedAI,
+                        learnedMerchant: false,
+                        flaggedDuplicate: false,
+                        alerts: [],
+                        pending: existing.isPending,
+                        balanceSynced: nil,
+                        message: "Internal Transfer \(Money.format(existing.amount, code)) · \(existing.merchant) (already merged)"
+                    )
                 }
-                if let bankAcc = SMSParser.findMatchingAccount(forBank: existing.smsBank, senderOrPhone: existing.smsSender, digits: nil, in: context) {
-                    return bankAcc.id
-                }
-                if let s = exCounterpartyFromOtherLeg, let acc = SMSParser.findMatchingAccount(suffix: s, in: context) {
-                    return acc.id
-                }
-                if let s = existing.smsAccountSuffix, s != exSuffixes.recipientSuffix, let acc = SMSParser.findMatchingAccount(suffix: s, in: context) {
-                    return acc.id
-                }
-                return existing.accountID
-            }()
-            var resolvedInAccID: UUID? = {
-                if let s = inSuffixes.accountSuffix ?? parsed.accountSuffix, let acc = SMSParser.findMatchingAccount(suffix: s, in: context) {
-                    return acc.id
-                }
-                if let bankAcc = SMSParser.findMatchingAccount(forBank: resolvedBank, senderOrPhone: resolvedSender, digits: nil, in: context) {
-                    return bankAcc.id
-                }
-                if let s = inCounterpartyFromOtherLeg, let acc = SMSParser.findMatchingAccount(suffix: s, in: context) {
-                    return acc.id
-                }
-                return targetAccountID
-            }()
-
-            // If both legs resolved to the same account (e.g. via fallback default account) or one was nil,
-            // use the counterparty IBAN suffix from the opposite leg or the distinct sender bank to disambiguate the two accounts.
-            if resolvedExAccID == nil || resolvedInAccID == nil || resolvedExAccID == resolvedInAccID {
-                if let sEx = exCounterpartyFromOtherLeg, let accEx = SMSParser.findMatchingAccount(suffix: sEx, in: context) {
-                    if resolvedInAccID == accEx.id,
-                       let sIn = inCounterpartyFromOtherLeg,
-                       let accIn = SMSParser.findMatchingAccount(suffix: sIn, excludingAccountID: accEx.id, in: context) {
-                        resolvedExAccID = accEx.id
-                        resolvedInAccID = accIn.id
-                    } else if resolvedInAccID != accEx.id {
-                        resolvedExAccID = accEx.id
-                    }
-                }
-                if let sIn = inCounterpartyFromOtherLeg, let accIn = SMSParser.findMatchingAccount(suffix: sIn, in: context) {
-                    if resolvedExAccID == accIn.id,
-                       let sEx = exCounterpartyFromOtherLeg,
-                       let accEx = SMSParser.findMatchingAccount(suffix: sEx, excludingAccountID: accIn.id, in: context) {
-                        resolvedInAccID = accIn.id
-                        resolvedExAccID = accEx.id
-                    } else if resolvedExAccID != accIn.id {
-                        resolvedInAccID = accIn.id
-                    }
-                }
-                if isDifferentBanks, (resolvedExAccID == nil || resolvedInAccID == nil || resolvedExAccID == resolvedInAccID) {
-                    let allAccs = (try? context.fetch(FetchDescriptor<Account>(sortBy: [SortDescriptor(\.createdAt)]))) ?? []
-                    let bankAcc1 = b1.flatMap { bank in allAccs.first(where: { SMSParser.accountMatchesBank($0, bank: bank) }) }
-                    let bankAcc2 = b2.flatMap { bank in allAccs.first(where: { $0.id != bankAcc1?.id && SMSParser.accountMatchesBank($0, bank: bank) }) }
-                    if let bankAcc1, let bankAcc2, bankAcc1.id != bankAcc2.id {
-                        resolvedExAccID = bankAcc1.id
-                        resolvedInAccID = bankAcc2.id
-                    }
-                }
-            }
-
-            guard let exAccCheck = resolvedExAccID,
-                  let inAccCheck = resolvedInAccID,
-                  exAccCheck != inAccCheck,
-                  Ledger.account(exAccCheck, context: context) != nil,
-                  Ledger.account(inAccCheck, context: context) != nil else {
                 continue
             }
 
-            // Record each SMS's own bank balance strictly against the account of that SMS's sender bank!
-            // This guarantees the two accounts' balances are NEVER merged or applied to one account in both.
-            var accountBalances: [UUID: Double] = [:]
-            let existingOriginAccID: UUID? = exAccCheck
-            if let exOrigin = existingOriginAccID, let exBal = existing.smsBalance {
-                accountBalances[exOrigin] = exBal
-            }
-            if let exTo = existing.toAccountID, let exToBal = existing.smsToBalance {
-                accountBalances[exTo] = exToBal
-            }
-            let incomingOriginAccID: UUID? = inAccCheck
-            if let inOrigin = incomingOriginAccID, let pBal = parsed.balance {
-                accountBalances[inOrigin] = pBal
-            }
-
-            // Analyze both SMS messages to determine which is the DEBIT leg (money leaving) and which is the CREDIT leg (money entering)
-            let existingLegDir = SMSParser.analyzeTransferLegDirection(
-                in: existingRawText,
+            let existingRole = originalTransferRole(for: existing, context: context) ?? (existing.isIncome ? .transferIn : .transferOut)
+            let existingInput = TransferLegInput(
+                rawText: existingRawText,
+                explicitBank: SMSParser.primaryBankName(from: existing.smsBank),
+                sender: existing.smsSender,
+                explicitAccountSuffix: existing.smsAccountSuffix,
+                explicitRecipientSuffix: existing.smsRecipientSuffix,
+                explicitBalance: existing.smsBalance,
+                fallbackAccountID: existing.accountID,
+                fallbackToAccountID: existing.toAccountID,
+                explicitRole: existingRole,
                 fallbackIsIncome: existingRole == .transferIn || existing.isIncome
             )
-            let incomingLegDir = SMSParser.analyzeTransferLegDirection(
-                in: rawSMS,
+            let incomingInput = TransferLegInput(
+                rawText: rawSMS,
+                explicitBank: SMSParser.primaryBankName(from: resolvedBank),
+                sender: resolvedSender,
+                explicitAccountSuffix: parsed.accountSuffix,
+                explicitRecipientSuffix: parsed.recipientSuffix,
+                explicitBalance: parsed.balance,
+                fallbackAccountID: targetAccountID,
+                fallbackToAccountID: parsed.toAccountID,
+                explicitRole: newRole,
                 fallbackIsIncome: newRole == .transferIn || parsed.isIncome
             )
-            let incomingIsCreditLeg: Bool = {
-                if incomingLegDir == .credit && existingLegDir != .credit { return true }
-                if existingLegDir == .credit && incomingLegDir != .credit { return false }
-                if newRole == .transferIn && existingRole != .transferIn { return true }
-                if existingRole == .transferIn && newRole != .transferIn { return false }
-                if parsed.recipientSuffix != nil && existing.smsRecipientSuffix == nil { return true }
-                return true
-            }()
 
-            // Resolve source (DEBIT / from) and destination (CREDIT / to) accounts for the single merged Internal Transfer transaction
-            var mergedFromID: UUID? = nil
-            var mergedToID: UUID? = nil
-
-            let exAcc = existingOriginAccID ?? existing.accountID
-            let newAcc = incomingOriginAccID ?? targetAccountID
-
-            if let exAcc, let newAcc, exAcc != newAcc {
-                // The two SMS messages belong to two DIFFERENT accounts (e.g., BisB and ila Bank)
-                if existingLegDir == .credit || existingRole == .transferIn {
-                    mergedFromID = newAcc
-                    mergedToID = exAcc
-                } else if incomingLegDir == .credit || newRole == .transferIn {
-                    mergedFromID = exAcc
-                    mergedToID = newAcc
-                } else if existingRole == .internalTransfer, existing.toAccountID == newAcc {
-                    mergedFromID = exAcc
-                    mergedToID = newAcc
-                } else if newRole == .internalTransfer, parsed.toAccountID == exAcc {
-                    mergedFromID = newAcc
-                    mergedToID = exAcc
-                } else if existingRole == .internalTransfer {
-                    mergedFromID = exAcc
-                    mergedToID = existing.toAccountID ?? newAcc
-                } else if newRole == .internalTransfer {
-                    mergedFromID = newAcc
-                    mergedToID = parsed.toAccountID ?? exAcc
-                } else {
-                    // Both were debit/transferOut on two different accounts: check if recipientSuffix matches one of them
-                    if let recip = existing.smsRecipientSuffix ?? parsed.recipientSuffix,
-                       let matchedDest = SMSParser.findMatchingAccount(suffix: recip, in: context) {
-                        if matchedDest.id == newAcc {
-                            mergedFromID = exAcc
-                            mergedToID = newAcc
-                        } else if matchedDest.id == exAcc {
-                            mergedFromID = newAcc
-                            mergedToID = exAcc
-                        }
-                    }
-                    mergedFromID = mergedFromID ?? exAcc
-                    mergedToID = mergedToID ?? newAcc
-                }
-            } else {
-                // Both SMS messages are from the same source account (or one had nil account)
-                mergedFromID = exAcc ?? newAcc
-                mergedToID = existing.toAccountID ?? parsed.toAccountID
+            guard let resolved = resolveTwoLegInternalTransfer(existingInput, incomingInput, allAccounts: allAccounts, context: context) else {
+                continue
             }
 
-            // Rule 6: When two SMS match in date & time, if destination account is still nil or equal to source,
-            // resolve the credit account from recipientSuffix matching one of the user's accounts
-            if mergedToID == nil || mergedToID == mergedFromID {
-                if let recipSuffix = parsed.recipientSuffix ?? existing.smsRecipientSuffix,
-                   let matchedDest = SMSParser.findMatchingAccount(suffix: recipSuffix, excludingAccountID: mergedFromID, in: context) {
-                    mergedToID = matchedDest.id
+            let safeExistingGoalID: UUID? = {
+                if let gid = existing.goalID, let g = Ledger.goal(gid, context: context),
+                   g.linkedAccountID == nil || g.linkedAccountID != resolved.fromID {
+                    return gid
                 }
-            }
-
-            // Never allow mergedToID to equal mergedFromID
-            if mergedToID == mergedFromID {
-                mergedToID = nil
-            }
-
-            let mergedGoalID = existing.goalID ?? parsed.goalID
-                ?? SMSParser.findMatchingGoal(suffix: parsed.recipientSuffix ?? existing.smsRecipientSuffix, accountID: mergedToID, in: context)?.id
-
-            // Assign each account's balance strictly from its own SMS balance (`accountBalances[accountID]`):
-            var sourceBalance: Double? = mergedFromID.flatMap { accountBalances[$0] }
-            var destBalance: Double? = mergedToID.flatMap { accountBalances[$0] }
-
-            // Fallback only if account ID wasn't in accountBalances and the SMS clearly belongs to that leg
-            if sourceBalance == nil {
-                if existingOriginAccID == mergedFromID {
-                    sourceBalance = existing.smsBalance
-                } else if incomingOriginAccID == mergedFromID {
-                    sourceBalance = parsed.balance
-                } else if existingRole != .transferIn && existingOriginAccID == nil {
-                    sourceBalance = existing.smsBalance
-                } else if newRole != .transferIn && incomingOriginAccID == nil {
-                    sourceBalance = parsed.balance
+                if let gid = parsed.goalID, let g = Ledger.goal(gid, context: context),
+                   g.linkedAccountID == nil || g.linkedAccountID != resolved.fromID {
+                    return gid
                 }
-            }
-            if destBalance == nil, let mergedToID {
-                if existingOriginAccID == mergedToID {
-                    destBalance = existing.smsBalance
-                } else if incomingOriginAccID == mergedToID {
-                    destBalance = parsed.balance
-                } else if existing.toAccountID == mergedToID, let exToBal = existing.smsToBalance {
-                    destBalance = exToBal
-                }
-            }
-
-            // Determine BOTH banks from the two SMS messages (Debit bank first, Credit bank second)
-            // so "SMS sender bank" includes both banks (e.g. "BisB · ila") while primaryBankName matches the Debit account!
-            let debitBank: String? = {
-                if let fromID = mergedFromID {
-                    if incomingOriginAccID == fromID, let b = resolvedBank {
-                        return SMSParser.primaryBankName(from: b)
-                    }
-                    if existingOriginAccID == fromID, let b = existing.smsBank {
-                        return SMSParser.primaryBankName(from: b)
-                    }
-                    if let fromAcc = Ledger.account(fromID, context: context),
-                       let accBank = SMSParser.bankName(forAccount: fromAcc) {
-                        return accBank
-                    }
-                }
-                return incomingIsCreditLeg
-                    ? (SMSParser.primaryBankName(from: existing.smsBank) ?? resolvedBank)
-                    : (resolvedBank ?? SMSParser.primaryBankName(from: existing.smsBank))
-            }()
-            let creditBank: String? = {
-                if let toID = mergedToID {
-                    if incomingOriginAccID == toID, let b = resolvedBank {
-                        return SMSParser.primaryBankName(from: b)
-                    }
-                    if existingOriginAccID == toID, let b = existing.smsBank {
-                        return SMSParser.primaryBankName(from: b)
-                    }
-                    if let toAcc = Ledger.account(toID, context: context),
-                       let accBank = SMSParser.bankName(forAccount: toAcc) {
-                        return accBank
-                    }
-                }
-                return incomingIsCreditLeg
-                    ? resolvedBank
-                    : SMSParser.primaryBankName(from: existing.smsBank)
-            }()
-            let mergedBank = SMSParser.formatCombinedBanks(debitBank: debitBank, creditBank: creditBank)
-            let mergedSender: String? = {
-                if let fromID = mergedFromID {
-                    if incomingOriginAccID == fromID, let s = resolvedSender, !s.isEmpty {
-                        return s
-                    }
-                    if existingOriginAccID == fromID, let s = existing.smsSender, !s.isEmpty {
-                        return s
-                    }
-                }
-                return existing.smsSender ?? resolvedSender
-            }()
-            let combinedRawSMS: String = {
-                let firstSMS = incomingIsCreditLeg ? existingRawText : rawSMS
-                let secondSMS = incomingIsCreditLeg ? rawSMS : existingRawText
-                if firstSMS.isEmpty { return secondSMS }
-                if secondSMS.isEmpty || firstSMS == secondSMS { return firstSMS }
-                if firstSMS.contains(secondSMS) { return firstSMS }
-                return "\(firstSMS)\n\n---\n\n\(secondSMS)"
+                return resolved.matchedGoalID
             }()
 
             // Update the existing transaction in-place so there is only ONE transaction in the database
@@ -1441,30 +1464,25 @@ enum SMSImporter {
                 tx.smsTransactionType = .internalTransfer
                 tx.category = .internalTransfer
                 tx.isIncome = false
-                if let mergedFromID { tx.accountID = mergedFromID }
-                tx.toAccountID = mergedToID
-                if let mergedGoalID { tx.goalID = mergedGoalID }
+                tx.accountID = resolved.fromID
+                tx.toAccountID = resolved.toID
+                tx.goalID = safeExistingGoalID
 
-                if let toID = tx.toAccountID, let destAcc = Ledger.account(toID, context: context) {
-                    if let fromID = tx.accountID, let srcAcc = Ledger.account(fromID, context: context), srcAcc.id != destAcc.id {
-                        tx.merchant = "\(srcAcc.name) → \(destAcc.name)"
-                    } else {
-                        tx.merchant = "Transfer to \(destAcc.name)"
-                    }
+                if let srcAcc = accountsByID[resolved.fromID] ?? Ledger.account(resolved.fromID, context: context),
+                   let dstAcc = accountsByID[resolved.toID] ?? Ledger.account(resolved.toID, context: context) {
+                    tx.merchant = "\(srcAcc.name) → \(dstAcc.name)"
                 } else if newRole == .internalTransfer && !parsed.merchant.isEmpty {
                     tx.merchant = parsed.merchant
                 }
 
-                tx.rawText = combinedRawSMS
-                tx.smsBank = mergedBank
-                tx.smsSender = mergedSender
+                tx.rawText = resolved.combinedRaw
+                tx.smsBank = resolved.combinedBank
+                if let s = resolved.debitSender { tx.smsSender = s }
                 if tx.smsReference == nil { tx.smsReference = parsed.referenceNumber }
-                if tx.smsRecipientSuffix == nil { tx.smsRecipientSuffix = parsed.recipientSuffix }
-                if tx.smsAccountSuffix == nil { tx.smsAccountSuffix = parsed.accountSuffix }
-                tx.smsBalance = sourceBalance
-                tx.smsToBalance = destBalance
-                tx.balanceAdjustment = 0
-                tx.toBalanceAdjustment = 0
+                tx.smsAccountSuffix = resolved.sourceSuffix
+                tx.smsRecipientSuffix = resolved.destSuffix
+                tx.smsBalance = resolved.sourceBalance
+                tx.smsToBalance = resolved.destBalance
                 tx.isPossibleDuplicate = false
 
                 if (tx.locationName == nil || tx.latitude == nil), let loc = resolvedLocation {
@@ -1475,15 +1493,15 @@ enum SMSImporter {
                 }
 
                 tx.smsConfidence = .high
-                tx.smsClassificationReason = "Merged 2 matching SMS at same date & time (Debit: \(debitBank ?? "Source") → Credit: \(creditBank ?? "Destination"))"
+                tx.smsClassificationReason = "Merged 2 matching SMS at same date & time (Debit: \(resolved.debitBank ?? "Source") → Credit: \(resolved.creditBank ?? "Destination"))"
             }
 
             var syncedBalance: Double? = nil
             if existing.isPending && (forceApprove || AppSettings.smsAutoApprove) && existing.smsBank != nil && existing.accountID != nil {
                 let approveRes = Ledger.approve(existing, context: context)
-                syncedBalance = Ledger.syncBalanceFromSMS(existing, context: context, force: true) ?? approveRes.balanceSynced
+                syncedBalance = approveRes.balanceSynced
             } else if !existing.isPending {
-                syncedBalance = Ledger.syncBalanceFromSMS(existing, context: context, force: true)
+                syncedBalance = Ledger.syncBalanceFromSMS(existing, context: context, force: false)
             }
 
             let code = AppSettings.currency
@@ -1605,7 +1623,140 @@ enum SMSImporter {
                 tx.smsReference = ref
                 modified = true
             }
-            let suffixes = cachedSuffixes(for: tx)
+
+            let legs = raw.components(separatedBy: "\n\n---\n\n")
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+
+            // Repair already-merged 2-SMS internal transfers strictly per leg so counterparty/credit suffixes
+            // are never re-parsed across combined rawText and applied to the wrong account.
+            if legs.count >= 2 && (tx.smsTransactionType == .internalTransfer || tx.category == .internalTransfer) {
+                let idsWereDistinct = tx.accountID != tx.toAccountID
+                let leg1Input = TransferLegInput(
+                    rawText: legs[0],
+                    explicitBank: nil,
+                    sender: nil,
+                    explicitAccountSuffix: nil,
+                    explicitRecipientSuffix: nil,
+                    explicitBalance: nil,
+                    fallbackAccountID: nil,
+                    fallbackToAccountID: nil,
+                    explicitRole: nil,
+                    fallbackIsIncome: nil
+                )
+                let leg2Input = TransferLegInput(
+                    rawText: legs[1],
+                    explicitBank: nil,
+                    sender: nil,
+                    explicitAccountSuffix: nil,
+                    explicitRecipientSuffix: nil,
+                    explicitBalance: nil,
+                    fallbackAccountID: nil,
+                    fallbackToAccountID: nil,
+                    explicitRole: nil,
+                    fallbackIsIncome: nil
+                )
+                if let resolved = resolveTwoLegInternalTransfer(
+                    leg1Input,
+                    leg2Input,
+                    allAccounts: allAccounts,
+                    context: context,
+                    fallbackDebitID: idsWereDistinct ? tx.accountID : nil,
+                    fallbackCreditID: idsWereDistinct ? tx.toAccountID : nil
+                ) {
+                    let srcAcc = accountsByID[resolved.fromID] ?? Ledger.account(resolved.fromID, context: context)
+                    let dstAcc = accountsByID[resolved.toID] ?? Ledger.account(resolved.toID, context: context)
+                    let expectedMerchant: String? = {
+                        if let srcAcc, let dstAcc, srcAcc.id != dstAcc.id {
+                            return "\(srcAcc.name) → \(dstAcc.name)"
+                        }
+                        return nil
+                    }()
+                    let expectedReason = "Merged 2 matching SMS at same date & time (Debit: \(resolved.debitBank ?? "Source") → Credit: \(resolved.creditBank ?? "Destination"))"
+                    let accountsChanged = tx.accountID != resolved.fromID || tx.toAccountID != resolved.toID
+                    let clearWrongSourceSuffix = resolved.sourceSuffix == nil
+                        && (tx.smsAccountSuffix.map { cur in dstAcc.map { SMSParser.digitsMatch(accountMatch: $0.smsMatch, query: cur) } ?? false } ?? false)
+                    let sourceBalChanged: Bool = {
+                        guard let expected = resolved.sourceBalance else { return false }
+                        guard let current = tx.smsBalance else { return true }
+                        return abs(current - expected) >= 0.0005
+                    }()
+                    let destBalChanged: Bool = {
+                        guard let expected = resolved.destBalance else { return false }
+                        guard let current = tx.smsToBalance else { return true }
+                        return abs(current - expected) >= 0.0005
+                    }()
+                    let shouldUpdateReason = accountsChanged || tx.smsClassificationReason.hasPrefix("Merged 2 matching SMS") || tx.smsClassificationReason.isEmpty
+
+                    let needsRepair = accountsChanged
+                        || (resolved.sourceSuffix != nil && tx.smsAccountSuffix != resolved.sourceSuffix)
+                        || clearWrongSourceSuffix
+                        || (resolved.destSuffix != nil && tx.smsRecipientSuffix != resolved.destSuffix)
+                        || sourceBalChanged
+                        || destBalChanged
+                        || (resolved.combinedBank != nil && tx.smsBank != resolved.combinedBank)
+                        || tx.rawText != resolved.combinedRaw
+                        || (accountsChanged && expectedMerchant != nil && tx.merchant != expectedMerchant)
+                        || (shouldUpdateReason && tx.smsClassificationReason != expectedReason)
+
+                    if needsRepair {
+                        if !tx.isPending {
+                            if tx.accountID == resolved.fromID, sourceBalChanged, tx.balanceAdjustment != 0, let srcAcc {
+                                srcAcc.balance -= tx.balanceAdjustment
+                                tx.balanceAdjustment = 0
+                            }
+                            if tx.toAccountID == resolved.toID, destBalChanged, tx.toBalanceAdjustment != 0, let dstAcc {
+                                dstAcc.balance -= tx.toBalanceAdjustment
+                                tx.toBalanceAdjustment = 0
+                            }
+                        }
+                        Ledger.edit(tx, context: context) { target in
+                            target.smsTransactionType = .internalTransfer
+                            target.category = .internalTransfer
+                            target.isIncome = false
+                            target.accountID = resolved.fromID
+                            target.toAccountID = resolved.toID
+                            if let expectedMerchant, (accountsChanged || target.merchant.contains("→") || isGenericSMSMerchant(target.merchant)) {
+                                target.merchant = expectedMerchant
+                            }
+                            if accountsChanged, target.goalID == nil, let gid = resolved.matchedGoalID {
+                                target.goalID = gid
+                            }
+                            target.rawText = resolved.combinedRaw
+                            if let combinedBank = resolved.combinedBank { target.smsBank = combinedBank }
+                            if let s = resolved.sourceSuffix {
+                                target.smsAccountSuffix = s
+                            } else if clearWrongSourceSuffix {
+                                target.smsAccountSuffix = nil
+                            }
+                            if let d = resolved.destSuffix { target.smsRecipientSuffix = d }
+                            if let sb = resolved.sourceBalance { target.smsBalance = sb }
+                            if let db = resolved.destBalance { target.smsToBalance = db }
+                            target.isPossibleDuplicate = false
+                            target.smsConfidence = .high
+                            if shouldUpdateReason {
+                                target.smsClassificationReason = expectedReason
+                            }
+                        }
+                        if !tx.isPending {
+                            _ = Ledger.syncBalanceFromSMS(tx, context: context, force: false, onlyIfLatest: true)
+                        }
+                        modified = true
+                    }
+                }
+                continue
+            }
+
+            let suffixes: (accountSuffix: String?, recipientSuffix: String?) = {
+                if legs.count >= 2 {
+                    let perLeg = legs.map { SMSParser.extractSuffixes(in: $0) }
+                    return (
+                        perLeg.compactMap(\.accountSuffix).first(where: { !$0.isEmpty }),
+                        perLeg.compactMap(\.recipientSuffix).first(where: { !$0.isEmpty })
+                    )
+                }
+                return cachedSuffixes(for: tx)
+            }()
             if let recSuf = suffixes.recipientSuffix, tx.smsRecipientSuffix != recSuf {
                 tx.smsRecipientSuffix = recSuf
                 modified = true
@@ -1646,7 +1797,7 @@ enum SMSImporter {
                 if let q = querySuffix, !q.isEmpty, let m = SMSParser.findMatchingAccount(suffix: q, in: allAccounts) {
                     return m
                 }
-                if let m = SMSParser.findAccountInSMSText(raw, detectedBank: tx.smsBank, in: allAccounts) {
+                if legs.count == 1, let m = SMSParser.findAccountInSMSText(raw, detectedBank: tx.smsBank, in: allAccounts) {
                     if let b = tx.smsBank, !b.isEmpty, m.kind != .creditCard,
                        let accBank = SMSParser.bankName(forAccount: m),
                        accBank.caseInsensitiveCompare(b) != .orderedSame,
@@ -1662,7 +1813,7 @@ enum SMSImporter {
                 return nil
             }()
 
-            if let matchedAcc, tx.accountID != matchedAcc.id {
+            if let matchedAcc, tx.accountID != matchedAcc.id, matchedAcc.id != tx.toAccountID {
                 let currentAcc = tx.accountID.flatMap { accountsByID[$0] }
                 let shouldAssign: Bool = {
                     guard let currentAcc else { return true }
@@ -1738,45 +1889,44 @@ enum SMSImporter {
                     let raw2 = second.rawText ?? ""
                     let suf1 = cachedSuffixes(for: first)
                     let suf2 = cachedSuffixes(for: second)
+                    let leg1Role = originalTransferRole(for: first, context: context) ?? (first.isIncome ? .transferIn : .transferOut)
+                    let leg2Role = originalTransferRole(for: second, context: context) ?? (second.isIncome ? .transferIn : .transferOut)
 
-                    let acc1ID: UUID? = {
-                        if let s = suf1.accountSuffix, let a = SMSParser.findMatchingAccount(suffix: s, in: allAccounts) { return a.id }
-                        if let a = SMSParser.findMatchingAccount(forBank: first.smsBank, senderOrPhone: first.smsSender, digits: nil, in: allAccounts) { return a.id }
-                        if let s = suf2.recipientSuffix ?? second.smsRecipientSuffix, let a = SMSParser.findMatchingAccount(suffix: s, in: allAccounts) { return a.id }
-                        return first.accountID
-                    }()
-                    let acc2ID: UUID? = {
-                        if let s = suf2.accountSuffix, let a = SMSParser.findMatchingAccount(suffix: s, in: allAccounts) { return a.id }
-                        if let a = SMSParser.findMatchingAccount(forBank: second.smsBank, senderOrPhone: second.smsSender, digits: nil, in: allAccounts) { return a.id }
-                        if let s = suf1.recipientSuffix ?? first.smsRecipientSuffix, let a = SMSParser.findMatchingAccount(suffix: s, in: allAccounts) { return a.id }
-                        return second.accountID
-                    }()
+                    let leg1Input = TransferLegInput(
+                        rawText: raw1,
+                        explicitBank: SMSParser.primaryBankName(from: first.smsBank),
+                        sender: first.smsSender,
+                        explicitAccountSuffix: suf1.accountSuffix ?? first.smsAccountSuffix,
+                        explicitRecipientSuffix: suf1.recipientSuffix ?? first.smsRecipientSuffix,
+                        explicitBalance: first.smsBalance,
+                        fallbackAccountID: first.accountID,
+                        fallbackToAccountID: first.toAccountID,
+                        explicitRole: leg1Role,
+                        fallbackIsIncome: leg1Role == .transferIn || first.isIncome
+                    )
+                    let leg2Input = TransferLegInput(
+                        rawText: raw2,
+                        explicitBank: SMSParser.primaryBankName(from: second.smsBank),
+                        sender: second.smsSender,
+                        explicitAccountSuffix: suf2.accountSuffix ?? second.smsAccountSuffix,
+                        explicitRecipientSuffix: suf2.recipientSuffix ?? second.smsRecipientSuffix,
+                        explicitBalance: second.smsBalance,
+                        fallbackAccountID: second.accountID,
+                        fallbackToAccountID: second.toAccountID,
+                        explicitRole: leg2Role,
+                        fallbackIsIncome: leg2Role == .transferIn || second.isIncome
+                    )
 
-                    guard let a1 = acc1ID, let a2 = acc2ID, a1 != a2 else { continue }
+                    guard let resolved = resolveTwoLegInternalTransfer(leg1Input, leg2Input, allAccounts: allAccounts, context: context) else {
+                        continue
+                    }
 
-                    let dir1 = SMSParser.analyzeTransferLegDirection(in: raw1, fallbackIsIncome: first.isIncome)
-                    let dir2 = SMSParser.analyzeTransferLegDirection(in: raw2, fallbackIsIncome: second.isIncome)
-                    let firstIsDebit: Bool = {
-                        if dir1 == .debit && dir2 != .debit { return true }
-                        if dir2 == .debit && dir1 != .debit { return false }
-                        if dir1 == .credit && dir2 != .credit { return false }
-                        if dir2 == .credit && dir1 != .credit { return true }
-                        return !first.isIncome
-                    }()
-
-                    let fromID = firstIsDebit ? a1 : a2
-                    let toID = firstIsDebit ? a2 : a1
-                    let sourceBal = firstIsDebit ? first.smsBalance : second.smsBalance
-                    let destBal = firstIsDebit ? second.smsBalance : first.smsBalance
-                    let debitBank = firstIsDebit ? SMSParser.primaryBankName(from: first.smsBank) : SMSParser.primaryBankName(from: second.smsBank)
-                    let creditBank = firstIsDebit ? SMSParser.primaryBankName(from: second.smsBank) : SMSParser.primaryBankName(from: first.smsBank)
-                    let combinedBank = SMSParser.formatCombinedBanks(debitBank: debitBank, creditBank: creditBank)
-                    let combinedRaw: String = {
-                        let debitText = firstIsDebit ? raw1 : raw2
-                        let creditText = firstIsDebit ? raw2 : raw1
-                        if debitText.isEmpty { return creditText }
-                        if creditText.isEmpty || debitText == creditText || debitText.contains(creditText) { return debitText }
-                        return "\(debitText)\n\n---\n\n\(creditText)"
+                    let safeGoalID: UUID? = {
+                        if let gid = first.goalID ?? second.goalID, let g = Ledger.goal(gid, context: context),
+                           g.linkedAccountID == nil || g.linkedAccountID != resolved.fromID {
+                            return gid
+                        }
+                        return resolved.matchedGoalID
                     }()
 
                     deletedCrossBankIDs.insert(second.id)
@@ -1786,28 +1936,29 @@ enum SMSImporter {
                         tx.smsTransactionType = .internalTransfer
                         tx.category = .internalTransfer
                         tx.isIncome = false
-                        tx.accountID = fromID
-                        tx.toAccountID = toID
-                        if let srcAcc = accountsByID[fromID] ?? Ledger.account(fromID, context: context),
-                           let dstAcc = accountsByID[toID] ?? Ledger.account(toID, context: context) {
+                        tx.accountID = resolved.fromID
+                        tx.toAccountID = resolved.toID
+                        tx.goalID = safeGoalID
+                        if let srcAcc = accountsByID[resolved.fromID] ?? Ledger.account(resolved.fromID, context: context),
+                           let dstAcc = accountsByID[resolved.toID] ?? Ledger.account(resolved.toID, context: context) {
                             tx.merchant = "\(srcAcc.name) → \(dstAcc.name)"
                         }
-                        tx.rawText = combinedRaw
-                        tx.smsBank = combinedBank
-                        tx.smsBalance = sourceBal
-                        tx.smsToBalance = destBal
-                        tx.balanceAdjustment = 0
-                        tx.toBalanceAdjustment = 0
+                        tx.rawText = resolved.combinedRaw
+                        tx.smsBank = resolved.combinedBank
+                        if let s = resolved.debitSender { tx.smsSender = s }
+                        tx.smsAccountSuffix = resolved.sourceSuffix
+                        tx.smsRecipientSuffix = resolved.destSuffix
+                        tx.smsBalance = resolved.sourceBalance
+                        tx.smsToBalance = resolved.destBalance
                         tx.isPossibleDuplicate = false
                         tx.smsConfidence = .high
-                        tx.smsClassificationReason = "Merged 2 matching SMS at same date & time (Debit: \(debitBank ?? "Source") → Credit: \(creditBank ?? "Destination"))"
+                        tx.smsClassificationReason = "Merged 2 matching SMS at same date & time (Debit: \(resolved.debitBank ?? "Source") → Credit: \(resolved.creditBank ?? "Destination"))"
                     }
 
                     if first.isPending && AppSettings.smsAutoApprove {
                         _ = Ledger.approve(first, context: context)
-                        _ = Ledger.syncBalanceFromSMS(first, context: context, force: true)
                     } else if !first.isPending {
-                        _ = Ledger.syncBalanceFromSMS(first, context: context, force: true)
+                        _ = Ledger.syncBalanceFromSMS(first, context: context, force: false, onlyIfLatest: true)
                     }
                     modified = true
                     break

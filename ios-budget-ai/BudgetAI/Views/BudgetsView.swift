@@ -723,8 +723,14 @@ struct GoalSheet: View {
                 if let goal {
                     Section {
                         Button("Delete goal", role: .destructive) {
+                            let deletedID = goal.id
+                            let linkedTxs = (try? context.fetch(FetchDescriptor<MoneyTransaction>())) ?? []
+                            for tx in linkedTxs where tx.goalID == deletedID {
+                                tx.goalID = nil
+                            }
                             context.delete(goal)
                             try? context.save()
+                            Ledger.notifyDataChanged()
                             dismiss()
                         }
                     }
