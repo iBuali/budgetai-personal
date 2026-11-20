@@ -3111,7 +3111,7 @@ struct BudgetAITests {
         // 1. Manual match mode (`smsSyncBalance == false`) must NOT auto-sync account balances
         UserDefaults.standard.set(false, forKey: Keys.smsSyncBalance)
 
-        let olderSMS = "Purchase of BHD 5.000 at Coffee on IBAN 1101 on 19/11/2026 10:00 Ref OLD001 Balance BHD 900.000 Enquiry 17123456"
+        let olderSMS = "Purchase of BHD 5.000 at Coffee on account 1101 on 19/11/2026 10:00 Ref OLD001 Balance BHD 900.000 Enquiry 17123456"
         let olderRes = await SMSImporter.importText(olderSMS, context: context, forceApprove: true)
         let olderTx = try #require(olderRes.transaction)
         #expect(abs(ila.balance - 995.000) < 0.0001) // 1000 - 5, NOT auto-synced to 900
@@ -3151,7 +3151,7 @@ struct BudgetAITests {
 
         // 2. Auto-match mode (`smsSyncBalance == true`) syncs automatically on import
         UserDefaults.standard.set(true, forKey: Keys.smsSyncBalance)
-        let autoSMS = "Purchase of BHD 3.000 at Cafe on IBAN 1101 on 19/11/2026 16:00 Ref AUTO004 Balance BHD 970.000 Enquiry 17123456"
+        let autoSMS = "Purchase of BHD 3.000 at Cafe on account 1101 on 19/11/2026 16:00 Ref AUTO004 Balance BHD 970.000 Enquiry 17123456"
         _ = await SMSImporter.importText(autoSMS, context: context, forceApprove: true)
         #expect(abs(ila.balance - 970.000) < 0.0001)
     }
