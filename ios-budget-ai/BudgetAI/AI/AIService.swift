@@ -1138,7 +1138,7 @@ enum SMSImporter {
         struct ParsedTransferLeg {
             let input: TransferLegInput
             let parsed: ParsedSMS?
-            let direction: TransferLegDirection
+            let direction: SMSParser.TransferLegDirection
             let suffixes: (accountSuffix: String?, recipientSuffix: String?)
             let bank: String?
             let balance: Double?
