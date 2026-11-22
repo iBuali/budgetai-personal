@@ -225,6 +225,31 @@ enum AIService {
         return out
     }
 
+    /// Uses Gemini to check whether an unrecognized merchant name is typically a recurring bill or subscription.
+    static func detectRecurringBillOrSubscription(merchant: String, amount: Double, currency: String) async -> Bool {
+        let trimmed = merchant.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, GeminiAccount.isConfigured, let client = try? GeminiAccount.client() else { return false }
+        let schema: [String: Any] = [
+            "type": "OBJECT",
+            "properties": [
+                "isBillOrSubscription": ["type": "BOOLEAN"]
+            ],
+            "required": ["isBillOrSubscription"]
+        ]
+        let prompt = """
+        Is this merchant typically a recurring bill, utility, telecom package, membership, or digital subscription (Bahrain/GCC & global context)?
+        Merchant: \(trimmed)
+        Amount: \(Money.format(amount, currency))
+        Answer true only for recurring bills/subscriptions (telecom, utilities, streaming, SaaS, cloud storage, gym, insurance, rent). Answer false for restaurants, groceries, retail shops, cafes, fuel, or one-off transfers.
+        """
+        guard let reply = try? await client.generate(system: nil, turns: [GeminiTurn(isUser: true, text: prompt)], schema: schema, temperature: 0.0),
+              let obj = try? GeminiClient.decodeObject(reply),
+              let flag = obj["isBillOrSubscription"] as? Bool else {
+            return false
+        }
+        return flag
+    }
+
     // MARK: Insights
 
     static func findings(context: String) async throws -> [AIFinding] {
@@ -874,6 +899,18 @@ enum SMSImporter {
         }
 
         let result = Ledger.add(tx, context: context)
+        // If not matched to an existing bill and not already flagged by app data or rejected,
+        // ask AI whether the merchant name is a recurring bill or subscription.
+        if !tx.isPending && !tx.isIncome && !tx.isTransfer && tx.billID == nil && tx.billReviewStatusRaw.isEmpty,
+           !isGenericSMSMerchant(tx.merchant), GeminiAccount.isConfigured {
+            let signal = SubscriptionMatchingEngine.extractSignal(from: tx, currency: code)
+            if !SubscriptionLearningStore.shared.isRejected(signal: signal) {
+                let aiIsBill = await AIService.detectRecurringBillOrSubscription(merchant: tx.merchant, amount: tx.amount, currency: code)
+                if aiIsBill {
+                    _ = SubscriptionMatchingEngine.matchAndApply(tx: tx, context: context, currency: code, aiDetectedBill: true)
+                }
+            }
+        }
         let typeLabel = p.transactionType.title
         var summary = "\(typeLabel) \(Money.format(tx.amount, code)) · \(tx.merchant)"
         if p.requiresReview {

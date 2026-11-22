@@ -58,7 +58,7 @@ struct TxFilterState: Equatable {
     func matches(_ tx: MoneyTransaction, interval activeInterval: DateInterval?, ignoringDates: Bool = false) -> Bool {
         switch kind {
         case .all: break
-        case .review: if !tx.isPending && !tx.isPossibleDuplicate { return false }
+        case .review: if !tx.isPending && !tx.isPossibleDuplicate && !tx.needsBillReview { return false }
         case .income: if !tx.isOrdinaryIncome && !(!tx.isTransfer && tx.isIncome) { return false }
         case .expenses: if !tx.isSpending { return false }
         case .transfers: if !tx.isTransfer { return false }
@@ -137,7 +137,7 @@ struct TransactionsView: View {
 
             let passesKindScope: Bool = {
                 switch filters.kind {
-                case .review: return tx.isPending || tx.isPossibleDuplicate
+                case .review: return tx.isPending || tx.isPossibleDuplicate || tx.needsBillReview
                 case .all: return true
                 case .income, .expenses, .transfers: return !tx.isPending
                 }
@@ -970,6 +970,7 @@ struct TransactionDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @Query(sort: \Account.createdAt) private var accounts: [Account]
     @Query(sort: \SavingsGoal.createdAt) private var goals: [SavingsGoal]
+    @Query(sort: \Bill.name) private var bills: [Bill]
     @AppStorage(Keys.currency) private var currency = "BHD"
     @AppStorage(Keys.smsSyncBalance) private var smsSyncBalance = true
     @State private var confirmDelete = false
@@ -1087,6 +1088,9 @@ struct TransactionDetailView: View {
             if tx.isPossibleDuplicate {
                 duplicateSection
             }
+            if tx.needsBillReview {
+                billReviewSection
+            }
             editableFieldsSection
             locationSection
             rulesSection
@@ -1186,10 +1190,25 @@ struct TransactionDetailView: View {
                 }
                 Text(tx.merchant).font(.title3.weight(.semibold)).foregroundStyle(Theme.ink).multilineTextAlignment(.center)
                 let heroAmount = isAccountTransfer ? tx.amount : tx.signedAmount
-                Text(isAccountTransfer ? Money.format(tx.amount, currency) : Money.format(tx.signedAmount, currency, signed: true))
-                    .font(.system(size: 34, weight: .bold).monospacedDigit())
-                    .foregroundStyle(tx.isPending ? Theme.secondaryInk : (tx.isIncome ? Theme.positive : Theme.ink))
-                    .animatedNumber(heroAmount)
+                HStack(spacing: 6) {
+                    if let delta = tx.billPriceDelta {
+                        Image(systemName: delta > 0 ? "arrowtriangle.up.fill" : "arrowtriangle.down.fill")
+                            .font(.system(size: 16, weight: .bold))
+                            .foregroundStyle(delta > 0 ? Theme.negative : Theme.positive)
+                            .accessibilityLabel(delta > 0 ? "Price increased" : "Price decreased")
+                    }
+                    Text(isAccountTransfer ? Money.format(tx.amount, currency) : Money.format(tx.signedAmount, currency, signed: true))
+                        .font(.system(size: 34, weight: .bold).monospacedDigit())
+                        .foregroundStyle(tx.isPending ? Theme.secondaryInk : (tx.isIncome ? Theme.positive : Theme.ink))
+                        .animatedNumber(heroAmount)
+                }
+                if let expected = tx.billExpectedAmount, let delta = tx.billPriceDelta {
+                    Text(delta > 0
+                         ? "Expected \(Money.format(expected, currency)) · +\(Money.format(delta, currency))"
+                         : "Expected \(Money.format(expected, currency)) · −\(Money.format(abs(delta), currency))")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(delta > 0 ? Theme.negative : Theme.positive)
+                }
                 Text(tx.date.formatted(date: .complete, time: .shortened)).font(.subheadline).foregroundStyle(Theme.secondaryInk)
             }
             .frame(maxWidth: .infinity)
@@ -1310,6 +1329,96 @@ struct TransactionDetailView: View {
     }
 
     @ViewBuilder
+    private var billReviewSection: some View {
+        Section {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 12) {
+                    ZStack {
+                        Circle()
+                            .fill(Theme.cobalt.opacity(0.16))
+                            .frame(width: 42, height: 42)
+                        Image(systemName: "calendar.badge.plus")
+                            .font(.system(size: 20, weight: .semibold))
+                            .foregroundStyle(Theme.cobalt)
+                    }
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Detected Bill / Subscription")
+                            .font(.headline)
+                            .foregroundStyle(Theme.ink)
+                        Text(tx.billMatchReason.isEmpty ? "Add this payment as a recurring bill or subscription?" : tx.billMatchReason)
+                            .font(.caption)
+                            .foregroundStyle(Theme.secondaryInk)
+                    }
+                }
+
+                VStack(spacing: 8) {
+                    Button {
+                        commitPendingEdits(silent: true)
+                        let created = SubscriptionMatchingEngine.confirmAsNewRecurringBill(
+                            tx: tx,
+                            isSubscription: tx.category != .bills,
+                            frequency: .monthly,
+                            context: context
+                        )
+                        appState.show("Added \(created.name) as recurring bill & saved rule")
+                    } label: {
+                        HStack {
+                            Spacer()
+                            Label("Confirm & Add as Recurring Bill", systemImage: "checkmark.circle.fill")
+                                .font(.subheadline.weight(.semibold))
+                            Spacer()
+                        }
+                        .padding(.vertical, 4)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Theme.cobalt)
+
+                    if !bills.isEmpty {
+                        Menu {
+                            ForEach(bills) { bill in
+                                Button {
+                                    commitPendingEdits(silent: true)
+                                    SubscriptionMatchingEngine.confirmExistingBill(tx: tx, bill: bill, context: context)
+                                    appState.show("Matched to \(bill.name) & saved learning rule")
+                                } label: {
+                                    Text("\(bill.name) (\(Money.format(bill.amount, currency)))")
+                                }
+                            }
+                        } label: {
+                            HStack {
+                                Spacer()
+                                Label("Match to Existing Bill", systemImage: "link")
+                                    .font(.subheadline.weight(.medium))
+                                Spacer()
+                            }
+                            .padding(.vertical, 3)
+                        }
+                        .buttonStyle(.bordered)
+                    }
+
+                    Button(role: .destructive) {
+                        SubscriptionMatchingEngine.rejectBillSuggestion(tx: tx, context: context)
+                        appState.show("Not a bill · We'll remember this")
+                    } label: {
+                        HStack {
+                            Spacer()
+                            Label("Not a Bill (Don't Ask Again)", systemImage: "xmark.circle")
+                                .font(.subheadline.weight(.medium))
+                            Spacer()
+                        }
+                        .padding(.vertical, 2)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(Theme.negative)
+                }
+            }
+            .padding(.vertical, 4)
+        } header: {
+            Text("Bills & Subscriptions Review")
+        }
+    }
+
+    @ViewBuilder
     private var editableFieldsSection: some View {
         Section("Transaction") {
             HStack(spacing: 8) {
@@ -1406,6 +1515,10 @@ struct TransactionDetailView: View {
                 savingsGoalPicker
             }
 
+            if !tx.isIncome && !tx.isTransfer && !bills.isEmpty {
+                billSubscriptionPicker
+            }
+
             TextField("Note", text: $noteText, axis: .vertical)
                 .focused($focusedField, equals: .note)
         }
@@ -1497,6 +1610,45 @@ struct TransactionDetailView: View {
             ),
             options: [SheetPickerOption(id: "", title: "None", symbol: "minus.circle", color: Theme.secondaryInk)]
                 + goals.map { SheetPickerOption(id: $0.id.uuidString, title: $0.name, symbol: $0.symbol, color: Theme.cobalt) }
+        )
+    }
+
+    @ViewBuilder
+    private var billSubscriptionPicker: some View {
+        SheetPickerRow(
+            title: "Bill / Subscription",
+            selection: Binding(
+                get: { tx.billID?.uuidString ?? "" },
+                set: { newValue in
+                    commitPendingEdits(silent: true)
+                    if let newID = UUID(uuidString: newValue),
+                       let chosen = bills.first(where: { $0.id == newID }) {
+                        SubscriptionMatchingEngine.confirmExistingBill(tx: tx, bill: chosen, context: context)
+                        appState.show("Linked to \(chosen.name) & saved learning rule")
+                    } else {
+                        if let oldID = tx.billID,
+                           let oldBill = bills.first(where: { $0.id == oldID }),
+                           oldBill.lastPaidTxID == tx.id {
+                            oldBill.unmarkPaid()
+                        }
+                        tx.billID = nil
+                        tx.billExpectedAmount = nil
+                        tx.billMatchConfidence = 0
+                        tx.billMatchReason = ""
+                        try? context.save()
+                        appState.show("Unlinked from bill")
+                    }
+                }
+            ),
+            options: [SheetPickerOption(id: "", title: "None", symbol: "minus.circle", color: Theme.secondaryInk)]
+                + bills.map { bill in
+                    SheetPickerOption(
+                        id: bill.id.uuidString,
+                        title: "\(bill.name) (\(Money.format(bill.amount, currency)))",
+                        symbol: bill.isSubscription ? "repeat.circle.fill" : "calendar.badge.clock",
+                        color: bill.category.color
+                    )
+                }
         )
     }
 

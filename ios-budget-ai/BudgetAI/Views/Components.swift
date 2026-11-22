@@ -436,6 +436,18 @@ struct TransactionRow: View {
                     .padding(.horizontal, 7)
                     .padding(.vertical, 2.5)
                     .background(Theme.negative.opacity(0.14), in: Capsule())
+                } else if tx.needsBillReview {
+                    HStack(spacing: 5) {
+                        Image(systemName: "calendar.badge.plus")
+                            .font(.caption2.weight(.bold))
+                        Text("Add as recurring bill?")
+                            .font(.caption.weight(.semibold))
+                            .lineLimit(1)
+                    }
+                    .foregroundStyle(Theme.cobalt)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2.5)
+                    .background(Theme.cobalt.opacity(0.14), in: Capsule())
                 } else {
                     HStack(spacing: 4) {
                         Text(subtitle)
@@ -451,11 +463,19 @@ struct TransactionRow: View {
                 }
             }
             Spacer(minLength: 8)
-            Text(tx.effectiveTransactionType == .internalTransfer ? Money.format(tx.amount, currency) : Money.format(tx.signedAmount, currency, signed: true))
-                .font(.body.weight(.semibold).monospacedDigit())
-                .foregroundStyle(tx.isPending ? Theme.secondaryInk : (tx.isIncome ? Theme.positive : (tx.isTransfer ? Theme.secondaryInk : Theme.negative)))
-                .lineLimit(1)
-                .layoutPriority(1)
+            HStack(spacing: 4) {
+                if let delta = tx.billPriceDelta {
+                    Image(systemName: delta > 0 ? "arrowtriangle.up.fill" : "arrowtriangle.down.fill")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(delta > 0 ? Theme.negative : Theme.positive)
+                        .accessibilityLabel(delta > 0 ? "Price increased" : "Price decreased")
+                }
+                Text(tx.effectiveTransactionType == .internalTransfer ? Money.format(tx.amount, currency) : Money.format(tx.signedAmount, currency, signed: true))
+                    .font(.body.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(tx.isPending ? Theme.secondaryInk : (tx.isIncome ? Theme.positive : (tx.isTransfer ? Theme.secondaryInk : Theme.negative)))
+                    .lineLimit(1)
+            }
+            .layoutPriority(1)
         }
         .padding(.vertical, 4)
         .accessibilityElement(children: .combine)

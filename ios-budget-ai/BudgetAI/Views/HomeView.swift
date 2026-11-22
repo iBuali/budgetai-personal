@@ -1022,10 +1022,18 @@ struct BillRow: View {
 
             Spacer()
 
-            Text(Money.format(isPaid ? (bill.lastPaidAmount ?? bill.amount) : bill.amount, currency))
-                .font(.subheadline.weight(.semibold).monospacedDigit())
-                .foregroundStyle(isPaid ? Theme.secondaryInk : Theme.ink)
-                .animatedNumber(bill.amount)
+            HStack(spacing: 4) {
+                if let delta = bill.lastPaidPriceDelta {
+                    Image(systemName: delta > 0 ? "arrowtriangle.up.fill" : "arrowtriangle.down.fill")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(delta > 0 ? Theme.negative : Theme.positive)
+                        .accessibilityLabel(delta > 0 ? "Price increased" : "Price decreased")
+                }
+                Text(Money.format(isPaid ? (bill.lastPaidAmount ?? bill.amount) : bill.amount, currency))
+                    .font(.subheadline.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(isPaid ? Theme.secondaryInk : Theme.ink)
+                    .animatedNumber(isPaid ? (bill.lastPaidAmount ?? bill.amount) : bill.amount)
+            }
 
             if !isPaid {
                 Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(.tertiary)

@@ -141,6 +141,7 @@ struct BillEditor: View {
     @Environment(\.dismiss) private var dismiss
     @AppStorage(Keys.currency) private var currency = "BHD"
     @State private var name = ""
+    @State private var providerName = ""
     @State private var keywordsText = ""
     @State private var amountText = ""
     @State private var category: SpendCategory = .bills
@@ -153,13 +154,14 @@ struct BillEditor: View {
         NavigationStack {
             Form {
                 Section {
-                    TextField("Name (e.g. Internet Bill)", text: $name)
+                    TextField("Name (e.g. Batelco Package 1)", text: $name)
                         .onChange(of: name) { _, v in
                             guard bill == nil, let g = Categorizer.guess(v), g != .income else { return }
                             category = g
                             isSubscription = g == .subscriptions
                         }
-                    TextField("SMS keywords (e.g. Internet, Fiber)", text: $keywordsText)
+                    TextField("Provider (e.g. Batelco, Netflix)", text: $providerName)
+                    TextField("SMS keywords (e.g. Fiber, Package 1)", text: $keywordsText)
                     HStack {
                         Text("Amount")
                         Spacer()
@@ -213,6 +215,7 @@ struct BillEditor: View {
             .onAppear {
                 guard let bill else { return }
                 name = bill.name
+                providerName = bill.providerName
                 keywordsText = bill.keywordsRaw
                 amountText = Money.number(bill.amount, decimals: Money.digits(currency)).replacingOccurrences(of: ",", with: "")
                 category = bill.category
@@ -232,6 +235,7 @@ struct BillEditor: View {
             return b
         }()
         target.name = name.trimmingCharacters(in: .whitespaces)
+        target.providerName = providerName.trimmingCharacters(in: .whitespacesAndNewlines)
         target.keywordsRaw = keywordsText.trimmingCharacters(in: .whitespacesAndNewlines)
         target.amount = amount
         target.category = category

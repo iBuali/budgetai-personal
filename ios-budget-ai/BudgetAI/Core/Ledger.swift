@@ -535,6 +535,9 @@ enum Ledger {
     static func payBill(_ bill: Bill, accountID: UUID?, context: ModelContext) {
         let tx = MoneyTransaction(amount: bill.amount, isIncome: false, merchant: bill.name, category: bill.category,
                                   date: .now, source: .bill, accountID: accountID)
+        tx.billID = bill.id
+        tx.billExpectedAmount = bill.amount
+        tx.billReviewStatusRaw = "confirmedBill"
         add(tx, context: context, checkDuplicates: false)
         bill.markPaid(date: .now, method: .manual, amount: bill.amount, txID: tx.id)
         try? context.save()
@@ -557,65 +560,11 @@ enum Ledger {
         notifyDataChanged()
     }
 
-    /// Automatically matches an incoming expense or SMS payment to an active bill or subscription.
-    /// Matches keywords in SMS (name) and amounts near the bill's amount.
+    /// Automatically matches an incoming expense or SMS payment to an active bill or subscription
+    /// using the weighted Subscription Matching Engine (or flags unregistered bills for Review).
     @discardableResult
     static func matchAndPayBillFromSMS(_ tx: MoneyTransaction, context: ModelContext) -> Bill? {
-        guard !tx.isIncome, tx.amount > 0 else { return nil }
-        let bills = (try? context.fetch(FetchDescriptor<Bill>())) ?? []
-        guard !bills.isEmpty else { return nil }
-
-        let merchant = tx.merchant.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let raw = (tx.rawText ?? "").lowercased()
-
-        for bill in bills {
-            if bill.isPaidForCurrentCycle(now: tx.date) { continue }
-
-            let billName = bill.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            guard !billName.isEmpty else { continue }
-
-            // 1. Check user's custom keywords (highest priority)
-            let customMatch = bill.keywords.contains { kw in
-                let cleanKw = kw.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !cleanKw.isEmpty else { return false }
-                return merchant.contains(cleanKw) || (!raw.isEmpty && raw.contains(cleanKw)) || (tx.smsReference?.lowercased().contains(cleanKw) ?? false)
-            }
-
-            // 2. Keyword matching on bill name
-            let isNameInMerchant = merchant.contains(billName) || billName.contains(merchant)
-            let isNameInRaw = !raw.isEmpty && raw.contains(billName)
-
-            let ignoredWords: Set<String> = ["the", "bill", "subscription", "monthly", "payment", "fee", "plan", "card", "pay", "services", "bh", "bhd", "app"]
-            let billKeywords = billName.components(separatedBy: CharacterSet.alphanumerics.inverted)
-                .filter { $0.count >= 3 && !ignoredWords.contains($0) }
-
-            let keywordMatch: Bool = {
-                if customMatch { return true }
-                if isNameInMerchant || isNameInRaw { return true }
-                guard !billKeywords.isEmpty else { return false }
-                return billKeywords.contains { kw in
-                    merchant.contains(kw) || (!raw.isEmpty && raw.contains(kw))
-                }
-            }()
-
-            guard keywordMatch else { continue }
-
-            // Amount proximity check: exact or within ±15% (or ±2.0 currency units)
-            let diff = abs(tx.amount - bill.amount)
-            let maxAllowedDiff = max(2.0, bill.amount * 0.15)
-            let isNearAmount = bill.amount <= 0 || diff <= maxAllowedDiff
-
-            guard isNearAmount else { continue }
-
-            bill.markPaid(date: tx.date, method: .autoSMS, amount: tx.amount, txID: tx.id)
-            if tx.category == .bills || tx.category == .other || tx.category == .subscriptions {
-                tx.category = bill.category
-            }
-            try? context.save()
-            Notifier.rescheduleBills(bills)
-            return bill
-        }
-        return nil
+        SubscriptionMatchingEngine.matchAndApply(tx: tx, context: context)
     }
 
     static func contribute(to goal: SavingsGoal, amount: Double, fromAccountID: UUID?, context: ModelContext) {

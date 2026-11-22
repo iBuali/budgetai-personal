@@ -566,6 +566,16 @@ final class MoneyTransaction {
     var smsRecipientSuffix: String?
     /// Linked savings goal that receives this transfer's amount automatically.
     var goalID: UUID?
+    /// Linked recurring bill or subscription matched by the Subscription Matching Engine or user.
+    var billID: UUID?
+    /// Expected bill/subscription price at the time of matching (used to show price increase/decrease indicators).
+    var billExpectedAmount: Double?
+    /// Subscription review state: "", "suggestedNewBill", "confirmedBill", "rejectedBill".
+    var billReviewStatusRaw: String = ""
+    /// Weighted confidence score (0...1) from the Subscription Matching Engine.
+    var billMatchConfidence: Double = 0
+    /// Concise human-readable explanation of the subscription/bill match.
+    var billMatchReason: String = ""
     /// True when `smsBalance` in the SMS represents a credit card's available credit limit rather than a bank deposit balance.
     var smsBalanceIsCardLimit: Bool = false
     /// Name of the place of purchase or location (e.g. "City Centre Bahrain", "Manama").
@@ -707,6 +717,18 @@ final class MoneyTransaction {
             reasons.append("Waiting for approval")
         }
         return reasons
+    }
+
+    /// True if this transaction is flagged in Review to be confirmed or rejected as a recurring bill/subscription.
+    var needsBillReview: Bool {
+        billReviewStatusRaw == "suggestedNewBill" && billID == nil
+    }
+
+    /// Difference between paid amount and expected bill/subscription amount (`> 0` price increase, `< 0` price decrease).
+    var billPriceDelta: Double? {
+        guard let expected = billExpectedAmount, expected > 0 else { return nil }
+        let delta = amount - expected
+        return abs(delta) >= 0.005 ? delta : nil
     }
 
     /// True if this transaction meets the quarantine criteria (unknown bank or unmatched account).
@@ -909,9 +931,14 @@ final class Bill {
     var previousDueDate: Date?
     /// Comma-separated custom keywords to match in incoming bank SMS (e.g. "Batelco, Fiber, SADAD").
     var keywordsRaw: String = ""
+    /// Optional provider / vendor name shared across multiple subscriptions (e.g. "Batelco", "Zain", "Netflix").
+    var providerName: String = ""
+    /// Comma-separated learned reference prefixes, account numbers, or subscriber identifiers.
+    var referenceHintsRaw: String = ""
 
     init(name: String, amount: Double, category: SpendCategory, nextDueDate: Date,
-         frequency: BillFrequency = .monthly, isSubscription: Bool = false, keywords: String = "") {
+         frequency: BillFrequency = .monthly, isSubscription: Bool = false, keywords: String = "",
+         providerName: String = "") {
         self.id = UUID()
         self.name = name
         self.amount = amount
@@ -920,6 +947,25 @@ final class Bill {
         self.frequencyRaw = frequency.rawValue
         self.isSubscription = isSubscription
         self.keywordsRaw = keywords
+        self.providerName = providerName
+    }
+
+    var referenceHints: [String] {
+        get {
+            referenceHintsRaw.split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+        }
+        set {
+            referenceHintsRaw = newValue.joined(separator: ", ")
+        }
+    }
+
+    /// Difference between the paid amount and expected bill price for the current cycle (`> 0` increase, `< 0` decrease).
+    var lastPaidPriceDelta: Double? {
+        guard isPaidForCurrentCycle(), let paid = lastPaidAmount, amount > 0 else { return nil }
+        let delta = paid - amount
+        return abs(delta) >= 0.005 ? delta : nil
     }
 
     var keywords: [String] {

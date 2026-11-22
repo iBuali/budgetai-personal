@@ -3449,4 +3449,138 @@ struct BudgetAITests {
         #expect(abs(finance.totalLiabilities - 455.0) < 0.0001)
         #expect(abs(finance.netWorth - 1045.0) < 0.0001)
     }
+
+    // MARK: - Subscription Matching Engine
+
+    @Test func subscriptionEngineDisambiguatesSameProviderByWeightedScoreAndPriceChange() throws {
+        let context = makeCleanContext()
+        SubscriptionLearningStore.shared.clearAll()
+        defer { SubscriptionLearningStore.shared.clearAll() }
+
+        let now = Date()
+        let pkg1 = Bill(name: "Batelco Package 1", amount: 7.000, category: .subscriptions, nextDueDate: now, frequency: .monthly, isSubscription: true, keywords: "Batelco", providerName: "Batelco")
+        let pkg2 = Bill(name: "Batelco Package 2", amount: 15.000, category: .subscriptions, nextDueDate: now, frequency: .monthly, isSubscription: true, keywords: "Batelco", providerName: "Batelco")
+        context.insert(pkg1)
+        context.insert(pkg2)
+        try context.save()
+
+        // 1. 8 BHD Batelco payment -> matches Package 1 as a possible price increase (+1 BHD)
+        let tx8 = MoneyTransaction(amount: 8.000, isIncome: false, merchant: "BATELCO", category: .bills, date: now, source: .sms)
+        tx8.smsReference = "BAT-REF-001"
+        tx8.rawText = "Your card was used for BHD 8.000 at BATELCO BH Ref: BAT-REF-001"
+        context.insert(tx8)
+        try context.save()
+
+        let matched1 = SubscriptionMatchingEngine.matchAndApply(tx: tx8, context: context)
+        #expect(matched1?.id == pkg1.id)
+        #expect(pkg1.isPaidForCurrentCycle(now: now) == true)
+        #expect(pkg1.lastPaidAmount == 8.000)
+        #expect((pkg1.lastPaidPriceDelta ?? 0) > 0.99)
+        #expect(tx8.billID == pkg1.id)
+        #expect(tx8.billExpectedAmount == 7.000)
+        #expect((tx8.billPriceDelta ?? 0) > 0.99)
+        #expect(pkg2.isPaidForCurrentCycle(now: now) == false)
+
+        // 2. 15 BHD Batelco payment -> matches Package 2 normally (exact match)
+        let tx15 = MoneyTransaction(amount: 15.000, isIncome: false, merchant: "BATELCO", category: .bills, date: now, source: .sms)
+        tx15.smsReference = "BAT-REF-002"
+        tx15.rawText = "Your card was used for BHD 15.000 at BATELCO BH Ref: BAT-REF-002"
+        context.insert(tx15)
+        try context.save()
+
+        let matched2 = SubscriptionMatchingEngine.matchAndApply(tx: tx15, context: context)
+        #expect(matched2?.id == pkg2.id)
+        #expect(pkg2.isPaidForCurrentCycle(now: now) == true)
+        #expect(pkg2.lastPaidAmount == 15.000)
+        #expect(pkg2.lastPaidPriceDelta == nil)
+        #expect(tx15.billID == pkg2.id)
+        #expect(tx15.billPriceDelta == nil)
+    }
+
+    @Test func subscriptionEngineDetectsPriceDecreaseAndNeverMatchesSingleSignalOnly() throws {
+        let context = makeCleanContext()
+        SubscriptionLearningStore.shared.clearAll()
+        defer { SubscriptionLearningStore.shared.clearAll() }
+
+        let now = Date()
+        let farDate = Calendar.current.date(byAdding: .day, value: 18, to: now) ?? now
+        let pkg1 = Bill(name: "Batelco Package 1", amount: 7.000, category: .subscriptions, nextDueDate: farDate, frequency: .monthly, isSubscription: true, keywords: "Batelco", providerName: "Batelco")
+        context.insert(pkg1)
+        try context.save()
+
+        // 1. Same amount (7 BHD) but unrelated merchant -> must NOT match on amount alone
+        let unrelated = MoneyTransaction(amount: 7.000, isIncome: false, merchant: "Lulu Hypermarket", category: .groceries, date: now, source: .sms)
+        context.insert(unrelated)
+        #expect(SubscriptionMatchingEngine.matchAndApply(tx: unrelated, context: context) == nil)
+        #expect(pkg1.isPaidForCurrentCycle(now: now) == false)
+
+        // 2. Same provider (Batelco) but totally different amount (45 BHD) and far from due date -> must NOT match on provider alone
+        let hugeBatelco = MoneyTransaction(amount: 45.000, isIncome: false, merchant: "BATELCO", category: .other, date: now, source: .sms)
+        context.insert(hugeBatelco)
+        #expect(SubscriptionMatchingEngine.matchAndApply(tx: hugeBatelco, context: context) == nil)
+        #expect(pkg1.isPaidForCurrentCycle(now: now) == false)
+
+        // 3. 6 BHD Batelco payment -> matches Package 1 as price decrease (-1 BHD, green triangle down)
+        let tx6 = MoneyTransaction(amount: 6.000, isIncome: false, merchant: "BATELCO", category: .subscriptions, date: now, source: .sms)
+        tx6.smsReference = "BAT-DEC-001"
+        context.insert(tx6)
+        let matched = SubscriptionMatchingEngine.matchAndApply(tx: tx6, context: context)
+        #expect(matched?.id == pkg1.id)
+        #expect((tx6.billPriceDelta ?? 0) < -0.99)
+        #expect((pkg1.lastPaidPriceDelta ?? 0) < -0.99)
+    }
+
+    @Test func subscriptionEngineReviewConfirmLearnRejectAndDuplicatePrevention() throws {
+        let context = makeCleanContext()
+        SubscriptionLearningStore.shared.clearAll()
+        defer { SubscriptionLearningStore.shared.clearAll() }
+
+        let now = Date()
+
+        // 1. Unregistered subscription (Netflix) -> flagged in Review
+        let netflixTx = MoneyTransaction(amount: 4.500, isIncome: false, merchant: "NETFLIX.COM", category: .other, date: now, source: .sms)
+        netflixTx.smsReference = "NFLX-1001"
+        context.insert(netflixTx)
+        try context.save()
+
+        #expect(SubscriptionMatchingEngine.matchAndApply(tx: netflixTx, context: context) == nil)
+        #expect(netflixTx.needsBillReview == true)
+
+        // 2. User confirms -> creates recurring bill and saves learning rule
+        let createdBill = SubscriptionMatchingEngine.confirmAsNewRecurringBill(
+            tx: netflixTx,
+            name: "Netflix",
+            isSubscription: true,
+            frequency: .monthly,
+            context: context
+        )
+        #expect(netflixTx.needsBillReview == false)
+        #expect(netflixTx.billID == createdBill.id)
+        #expect(SubscriptionLearningStore.shared.positiveRules.contains(where: { $0.billID == createdBill.id }))
+
+        // 3. Duplicate SMS with same reference is caught and does not double-match
+        let dupTx = MoneyTransaction(amount: 4.500, isIncome: false, merchant: "NETFLIX.COM", category: .other, date: now, source: .sms)
+        dupTx.smsReference = "NFLX-1001"
+        context.insert(dupTx)
+        let dupOutcome = SubscriptionMatchingEngine.evaluate(tx: dupTx, bills: [createdBill], history: [netflixTx, dupTx])
+        if case .duplicate(let existingID) = dupOutcome {
+            #expect(existingID == netflixTx.id)
+        } else {
+            #expect(Bool(false), "Expected duplicate outcome for matching smsReference")
+        }
+
+        // 4. Rejecting a suggested bill remembers the decision so future transactions from that merchant are not flagged
+        let spotifyTx1 = MoneyTransaction(amount: 2.500, isIncome: false, merchant: "SPOTIFY", category: .other, date: now, source: .sms)
+        context.insert(spotifyTx1)
+        _ = SubscriptionMatchingEngine.matchAndApply(tx: spotifyTx1, context: context)
+        #expect(spotifyTx1.needsBillReview == true)
+
+        SubscriptionMatchingEngine.rejectBillSuggestion(tx: spotifyTx1, context: context)
+        #expect(spotifyTx1.needsBillReview == false)
+
+        let spotifyTx2 = MoneyTransaction(amount: 2.500, isIncome: false, merchant: "SPOTIFY", category: .other, date: now.addingTimeInterval(86400 * 30), source: .sms)
+        context.insert(spotifyTx2)
+        _ = SubscriptionMatchingEngine.matchAndApply(tx: spotifyTx2, context: context)
+        #expect(spotifyTx2.needsBillReview == false)
+    }
 }
