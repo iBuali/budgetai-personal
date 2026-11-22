@@ -1411,7 +1411,9 @@ struct BudgetAITests {
         #expect(captured.first?.field == .originalSMS)
         #expect(captured.contains(where: { $0.field == .recipientIBAN && $0.value == "0846" }))
         #expect(captured.contains(where: { $0.field == .smsSender && $0.value == "17515151" }))
-        #expect(!captured.contains(where: { $0.field == .bank || $0.field == .direction || $0.field == .reference }))
+        let removedFields: Set<RuleConditionField> = [.bank, .direction, .reference]
+        let hasRemovedFields = captured.contains(where: { removedFields.contains($0.field) })
+        #expect(hasRemovedFields == false)
 
         // 3. Create Rule 1 (External Transfer to IBAN 0846) and Rule 2 (Internal Transfer from BisB to ila)
         let ruleExternal = TransactionRule(
@@ -3606,7 +3608,7 @@ struct BudgetAITests {
             isEnabled: true,
             logic: .and,
             conditions: [RuleCondition(field: .merchant, value: "MYSTERY SHOP", displayValue: "MYSTERY SHOP")],
-            actions: RuleActions(category: .dining)
+            actions: RuleActions(setCategoryRaw: SpendCategory.dining.rawValue)
         )
         TransactionRuleStore.shared.addRule(rule)
 
@@ -3672,7 +3674,7 @@ struct BudgetAITests {
             isEnabled: true,
             logic: .and,
             conditions: [RuleCondition(field: .originalSMS, value: sms1, displayValue: sms1, smsMatchMode: .exactTemplate)],
-            actions: RuleActions(category: .dining)
+            actions: RuleActions(setCategoryRaw: SpendCategory.dining.rawValue)
         )
         let tx2 = MoneyTransaction(amount: 3.0, isIncome: false, merchant: "IBAN ending 7878", category: .transfers, date: .now, source: .sms)
         tx2.rawText = sms2SameTemplate
@@ -3688,7 +3690,7 @@ struct BudgetAITests {
             isEnabled: true,
             logic: .and,
             conditions: [RuleCondition(field: .originalSMS, value: "credited to IBAN ending 7878", displayValue: "Contains", smsMatchMode: .contains)],
-            actions: RuleActions(category: .groceries)
+            actions: RuleActions(setCategoryRaw: SpendCategory.groceries.rawValue)
         )
         #expect(TransactionRuleStore.shared.matches(rule: containsRule, context: RuleEvaluationContext(from: tx2)) == true)
         #expect(TransactionRuleStore.shared.matches(rule: containsRule, context: RuleEvaluationContext(from: tx3)) == false)
