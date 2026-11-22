@@ -89,17 +89,14 @@ struct Finance {
 
     var liquidBalance: Double { accounts.filter { $0.kind.isLiquid }.reduce(0) { $0 + $1.balance } }
     var totalAssets: Double { accounts.filter { $0.includeInNetWorth && !$0.kind.isLiability }.reduce(0) { $0 + $1.balance } }
-    var totalLiabilities: Double { accounts.filter { $0.includeInNetWorth && $0.kind.isLiability }.reduce(0) { $0 + $1.balance } }
+    var totalLiabilities: Double { accounts.filter { $0.includeInNetWorth && $0.kind.isLiability }.reduce(0) { $0 + $1.netWorthLiabilityAmount } }
     var netWorth: Double { totalAssets - totalLiabilities }
 
     /// Liability amount deducted in Safe to Spend for an account.
     /// Loans count only their monthly installment payment rather than the full remaining loan balance.
     func safeToSpendLiability(for account: Account) -> Double {
-        guard account.includeInNetWorth, account.kind.isLiability, account.balance > 0 else { return 0 }
-        if account.kind == .loan {
-            return min(account.balance, max(0, account.loanMonthlyInstallment))
-        }
-        return max(0, account.balance)
+        guard account.includeInNetWorth else { return 0 }
+        return account.netWorthLiabilityAmount
     }
 
     var safeToSpendLiabilities: Double {

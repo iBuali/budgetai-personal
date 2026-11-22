@@ -646,7 +646,7 @@ enum Ledger {
         let accounts = (try? context.fetch(FetchDescriptor<Account>())) ?? []
         let included = accounts.filter(\.includeInNetWorth)
         let assets = included.filter { !$0.kind.isLiability }.reduce(0) { $0 + $1.balance }
-        let liabilities = included.filter { $0.kind.isLiability }.reduce(0) { $0 + $1.balance }
+        let liabilities = included.filter { $0.kind.isLiability }.reduce(0) { $0 + $1.netWorthLiabilityAmount }
         let day = Calendar.current.startOfDay(for: .now)
         let existing = (try? context.fetch(FetchDescriptor<NetWorthSnapshot>(predicate: #Predicate { $0.day == day }))) ?? []
         if let snap = existing.first {

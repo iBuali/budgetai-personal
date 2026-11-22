@@ -54,11 +54,12 @@ struct SpendCategory: Hashable, Identifiable {
     static let visaTransfer = SpendCategory(key: "visa_transfer")
     static let internalTransfer = SpendCategory(key: "internal_transfer")
     static let transfers = SpendCategory(key: "transfers")
+    static let transferIn = SpendCategory(key: "transfer_in")
     static let income = SpendCategory(key: "income")
     static let other = SpendCategory(key: "other")
 
     static let builtIns: [SpendCategory] = [.groceries, .dining, .transport, .shopping, .bills, .housing, .health,
-                                            .entertainment, .subscriptions, .education, .travel, .visaTransfer, .internalTransfer, .transfers, .income, .other]
+                                            .entertainment, .subscriptions, .education, .travel, .transfers, .transferIn, .internalTransfer, .visaTransfer, .income, .other]
 
     struct Info {
         var title: String
@@ -87,9 +88,12 @@ struct SpendCategory: Hashable, Identifiable {
         "visa_transfer": 0xF08A24,
         "internal_transfer": 0x1E3FAE,
         "transfers": 0x6B7385,
+        "transfer_in": 0x0EA5A4,
         "income": 0x2BB673,
         "other": 0x8A93A6,
     ]
+
+    static let internalTransferColor = Color(light: Color(hex: 0x2563EB), dark: Color(hex: 0xB44CFF))
 
     static let builtInInfo: [String: Info] = [
         "groceries": Info(title: "Groceries", shortTitle: "Groceries", symbol: "cart.fill", emoji: "", color: Color(hex: 0x22A565), isEssential: true, isIncome: false, parentKey: ""),
@@ -104,8 +108,9 @@ struct SpendCategory: Hashable, Identifiable {
         "education": Info(title: "Education", shortTitle: "Education", symbol: "graduationcap.fill", emoji: "", color: Color(hex: 0x0891B2), isEssential: true, isIncome: false, parentKey: ""),
         "travel": Info(title: "Travel", shortTitle: "Travel", symbol: "airplane", emoji: "", color: Color(hex: 0x0EA5E9), isEssential: false, isIncome: false, parentKey: ""),
         "visa_transfer": Info(title: "Transfer to Visa Card", shortTitle: "Visa Card", symbol: "creditcard.fill", emoji: "", color: Color(hex: 0xF08A24), isEssential: false, isIncome: false, isTransfer: true, parentKey: ""),
-        "internal_transfer": Info(title: "Internal Transfer", shortTitle: "Internal", symbol: "arrow.left.arrow.right.circle.fill", emoji: "", color: Theme.cobalt, isEssential: false, isIncome: false, isTransfer: true, parentKey: ""),
-        "transfers": Info(title: "Transfers", shortTitle: "Transfers", symbol: "arrow.left.arrow.right", emoji: "", color: Color(hex: 0x6B7385), isEssential: false, isIncome: false, isTransfer: true, parentKey: ""),
+        "internal_transfer": Info(title: "Internal Transfer", shortTitle: "Internal", symbol: "arrow.left.arrow.right.circle.fill", emoji: "", color: internalTransferColor, isEssential: false, isIncome: false, isTransfer: true, parentKey: ""),
+        "transfers": Info(title: "Transfer Out", shortTitle: "Transfer Out", symbol: "arrow.up.right", emoji: "", color: Color(hex: 0x6B7385), isEssential: false, isIncome: false, isTransfer: true, parentKey: ""),
+        "transfer_in": Info(title: "Transfer In", shortTitle: "Transfer In", symbol: "arrow.down.left", emoji: "", color: Color(hex: 0x0EA5A4), isEssential: false, isIncome: false, isTransfer: true, parentKey: ""),
         "income": Info(title: "Income", shortTitle: "Income", symbol: "arrow.down", emoji: "", color: Color(hex: 0x2BB673), isEssential: false, isIncome: true, parentKey: ""),
         "other": Info(title: "Other", shortTitle: "Other", symbol: "square.grid.2x2.fill", emoji: "", color: Color(hex: 0x8A93A6), isEssential: false, isIncome: false, parentKey: ""),
     ]
@@ -134,7 +139,7 @@ struct SpendCategory: Hashable, Identifiable {
         builtIns + CategoryRegistry.shared.topLevel.filter { c in SpendCategory.builtInInfo[c.rawValue] == nil && !c.isIncomeCategory } + CategoryRegistry.shared.topLevel.filter { c in SpendCategory.builtInInfo[c.rawValue] == nil && c.isIncomeCategory }
     }
     static func isTransferKey(_ raw: String) -> Bool {
-        if raw == "transfers" || raw == "internal_transfer" || raw == "visa_transfer" {
+        if raw == "transfers" || raw == "transfer_in" || raw == "internal_transfer" || raw == "visa_transfer" {
             return true
         }
         return CategoryRegistry.shared.info(raw)?.isTransfer ?? false
@@ -413,6 +418,16 @@ final class Account {
             }
         }
     }
+
+    /// Liability amount counted toward Net Worth and Safe to Spend.
+    /// Loans count only their monthly installment (capped at remaining balance) rather than the full remaining loan balance.
+    var netWorthLiabilityAmount: Double {
+        guard kind.isLiability, balance > 0 else { return 0 }
+        if kind == .loan {
+            return min(balance, max(0, loanMonthlyInstallment))
+        }
+        return max(0, balance)
+    }
 }
 
 // MARK: - Transactions
@@ -607,6 +622,7 @@ final class MoneyTransaction {
 
     var effectiveTransactionType: SMSTransactionType {
         if category == .internalTransfer || category == .visaTransfer { return .internalTransfer }
+        if category == .transferIn { return .transferIn }
         if let t = smsTransactionType { return t }
         if category.isTransferCategory {
             if toAccountID != nil { return .internalTransfer }
@@ -628,6 +644,23 @@ final class MoneyTransaction {
         return false
     }
 
+    /// External outgoing transfer (Transfer Out or custom outgoing transfer category — excludes Internal Transfer & Visa Card Transfer).
+    var isTransferOut: Bool {
+        guard isTransfer, category != .internalTransfer, category != .visaTransfer, effectiveTransactionType != .internalTransfer else {
+            return false
+        }
+        if category == .transferIn || effectiveTransactionType == .transferIn { return false }
+        return category == .transfers || effectiveTransactionType == .transferOut || !isIncome
+    }
+
+    /// External incoming transfer (Transfer In — excludes Internal Transfer & Visa Card Transfer).
+    var isTransferIn: Bool {
+        guard isTransfer, category != .internalTransfer, category != .visaTransfer, effectiveTransactionType != .internalTransfer else {
+            return false
+        }
+        return category == .transferIn || effectiveTransactionType == .transferIn || isIncome
+    }
+
     var source: TxSource {
         get { TxSource(rawValue: sourceRaw) ?? .manual }
         set { sourceRaw = newValue.rawValue }
@@ -637,13 +670,19 @@ final class MoneyTransaction {
 
     var isSpending: Bool {
         if SpendCategory.isTransferKey(categoryRaw) { return false }
-        if !smsTransactionTypeRaw.isEmpty, let t = SMSTransactionType(rawValue: smsTransactionTypeRaw) { return t.countsAsExpense }
+        if !smsTransactionTypeRaw.isEmpty, let t = SMSTransactionType(rawValue: smsTransactionTypeRaw) {
+            if t == .unknown { return !isIncome }
+            return t.countsAsExpense
+        }
         return !isIncome
     }
 
     var isOrdinaryIncome: Bool {
         if SpendCategory.isTransferKey(categoryRaw) { return false }
-        if !smsTransactionTypeRaw.isEmpty, let t = SMSTransactionType(rawValue: smsTransactionTypeRaw) { return t.countsAsIncome }
+        if !smsTransactionTypeRaw.isEmpty, let t = SMSTransactionType(rawValue: smsTransactionTypeRaw) {
+            if t == .unknown { return isIncome }
+            return t.countsAsIncome
+        }
         return isIncome
     }
 

@@ -553,8 +553,9 @@ private struct HomeSpendingCard: View {
 
         var totals: [SpendCategory: Double] = [:]
         var total = 0.0
-        for tx in transactions where !tx.isPending && tx.isSpending && tx.date >= interval.start && tx.date < interval.end {
-            totals[tx.category, default: 0] += tx.amount
+        for tx in transactions where !tx.isPending && (tx.isSpending || tx.isTransferOut) && tx.date >= interval.start && tx.date < interval.end {
+            let cat = tx.isTransferOut && !tx.category.isTransferCategory ? SpendCategory.transfers : tx.category
+            totals[cat, default: 0] += tx.amount
             total += tx.amount
         }
         breakdown = totals.map { ($0.key, $0.value) }.sorted { $0.1 > $1.1 }

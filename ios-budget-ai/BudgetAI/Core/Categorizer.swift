@@ -883,7 +883,9 @@ enum SMSParser {
         switch txType {
         case .internalTransfer:
             category = .internalTransfer
-        case .transferIn, .transferOut:
+        case .transferIn:
+            category = .transferIn
+        case .transferOut:
             category = .transfers
         case .income:
             if let context, let learned = Categorizer.learnedMatch(for: extractedMerchant, in: context, isIncome: true) {

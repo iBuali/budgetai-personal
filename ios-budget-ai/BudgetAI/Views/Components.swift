@@ -388,7 +388,7 @@ struct TransactionRow: View {
     var body: some View {
         HStack(spacing: 12) {
             if tx.isTransfer && tx.toAccountID != nil {
-                IconBadge(symbol: "arrow.left.arrow.right", color: Theme.cobalt)
+                IconBadge(symbol: "arrow.left.arrow.right", color: SpendCategory.internalTransferColor)
             } else {
                 CategoryIcon(category: tx.isIncome && tx.category == .other ? .income : tx.displayCategory)
             }

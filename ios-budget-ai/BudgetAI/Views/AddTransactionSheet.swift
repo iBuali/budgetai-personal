@@ -28,14 +28,18 @@ struct AddTransactionSheet: View {
     @State private var locationData: TransactionLocationData?
     @State private var showLocationPicker = false
     @State private var isCapturingGPS = false
+    @State private var transferCategoryEditor: CategoryEditorTarget?
     @FocusState private var amountFocused: Bool
 
     private var amount: Double { Money.parse(amountText) ?? 0 }
     private var isIncome: Bool { kind == .income }
+    private var isBetweenOwnAccounts: Bool { category == .internalTransfer || category == .visaTransfer }
 
     private var canSave: Bool {
         guard amount > 0 else { return false }
-        if kind == .transfer { return accountID != nil && toAccountID != nil && accountID != toAccountID }
+        if kind == .transfer && isBetweenOwnAccounts {
+            return accountID != nil && toAccountID != nil && accountID != toAccountID
+        }
         return true
     }
 
@@ -152,7 +156,13 @@ struct AddTransactionSheet: View {
             .onChange(of: kind) { _, newKind in
                 subcategory = nil
                 userPickedCategory = false
-                category = newKind == .income ? .income : .other
+                if newKind == .income {
+                    category = .income
+                } else if newKind == .transfer {
+                    category = .internalTransfer
+                } else {
+                    category = .other
+                }
             }
             .onAppear {
                 accountID = Ledger.defaultAccountID(context: context)
@@ -165,6 +175,13 @@ struct AddTransactionSheet: View {
                     initialLongitude: locationData?.longitude
                 ) { loc in
                     locationData = loc
+                }
+            }
+            .sheet(item: $transferCategoryEditor) { target in
+                CategoryEditor(target: target) { created in
+                    category = created
+                    subcategory = nil
+                    userPickedCategory = true
                 }
             }
         }
@@ -187,27 +204,101 @@ struct AddTransactionSheet: View {
 
     @ViewBuilder
     private var transferSections: some View {
-        Section("From") {
-            ForEach(accounts) { a in
-                accountChoice(a, selected: accountID == a.id, disabled: false) {
-                    accountID = a.id
-                    if toAccountID == a.id { toAccountID = nil }
+        let registry = CategoryRegistry.shared
+        let transferOptions = SpendCategory.transferCases
+
+        Section("Transfer type") {
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 4), spacing: 12) {
+                ForEach(transferOptions) { c in
+                    Button {
+                        withAnimation(.snappy) {
+                            category = c
+                            subcategory = nil
+                            userPickedCategory = true
+                            if c == .visaTransfer {
+                                let cards = accounts.filter { $0.kind == .creditCard && $0.id != accountID }
+                                if let firstCard = cards.first, !cards.contains(where: { $0.id == toAccountID }) {
+                                    toAccountID = firstCard.id
+                                }
+                            }
+                        }
+                    } label: {
+                        VStack(spacing: 6) {
+                            CategoryIcon(category: c, size: 44)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 13, style: .continuous)
+                                        .stroke(category == c ? c.color : .clear, lineWidth: 2)
+                                )
+                            Text(c.shortTitle)
+                                .font(.caption2.weight(category == c ? .semibold : .regular))
+                                .foregroundStyle(category == c ? Theme.ink : Theme.secondaryInk)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.75)
+                        }
+                    }
+                    .buttonStyle(PressableStyle())
+                }
+                Button {
+                    transferCategoryEditor = .new(parent: nil, income: false, transfer: true)
+                } label: {
+                    VStack(spacing: 6) {
+                        Image(systemName: "plus")
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundStyle(Theme.cobalt)
+                            .frame(width: 44, height: 44)
+                            .background(RoundedRectangle(cornerRadius: 13, style: .continuous).strokeBorder(Theme.cobalt.opacity(0.4), style: StrokeStyle(lineWidth: 1.5, dash: [4, 3])))
+                        Text("New").font(.caption2).foregroundStyle(Theme.cobalt)
+                    }
+                }
+                .buttonStyle(PressableStyle())
+            }
+            .id(registry.order)
+            .padding(.vertical, 4)
+        }
+
+        if isBetweenOwnAccounts {
+            let destinationAccounts: [Account] = {
+                if category == .visaTransfer {
+                    let cards = accounts.filter { $0.kind == .creditCard }
+                    return cards.isEmpty ? accounts : cards
+                }
+                return accounts
+            }()
+            Section("From") {
+                ForEach(accounts) { a in
+                    accountChoice(a, selected: accountID == a.id, disabled: false) {
+                        accountID = a.id
+                        if toAccountID == a.id { toAccountID = nil }
+                    }
                 }
             }
-        }
-        Section("To") {
-            ForEach(accounts) { a in
-                accountChoice(a, selected: toAccountID == a.id, disabled: a.id == accountID) { toAccountID = a.id }
+            Section(category == .visaTransfer ? "To Visa card" : "To") {
+                ForEach(destinationAccounts) { a in
+                    accountChoice(a, selected: toAccountID == a.id, disabled: a.id == accountID) { toAccountID = a.id }
+                }
             }
-        }
-        Section {
-            DatePicker("Date", selection: $date, in: ...Date.now.addingTimeInterval(86_400 * 365))
-            TextField("Note", text: $note, axis: .vertical)
-        } footer: {
-            if let from = accounts.first(where: { $0.id == accountID }), let to = accounts.first(where: { $0.id == toAccountID }), amount > 0 {
-                Text("\(from.name) \(Money.format(balance(from), currency)) → \(Money.format(balance(from) - amount, currency)). \(to.name) \(Money.format(balance(to), currency)) → \(Money.format(balance(to) + amount, currency)).")
-            } else {
-                Text("Transfers move money between your accounts and don't count as spending.")
+            Section {
+                DatePicker("Date", selection: $date, in: ...Date.now.addingTimeInterval(86_400 * 365))
+                TextField("Note", text: $note, axis: .vertical)
+            } footer: {
+                if let from = accounts.first(where: { $0.id == accountID }), let to = accounts.first(where: { $0.id == toAccountID }), amount > 0 {
+                    Text("\(from.name) \(Money.format(balance(from), currency)) → \(Money.format(balance(from) - amount, currency)). \(to.name) \(Money.format(balance(to), currency)) → \(Money.format(balance(to) + amount, currency)).")
+                } else {
+                    Text("Transfers move money between your accounts and don't count as spending.")
+                }
+            }
+        } else {
+            Section {
+                TextField(category == .transferIn ? "From (e.g. Sender name)" : "To (e.g. Recipient name)", text: $merchant)
+                    .textInputAutocapitalization(.words)
+                AccountPickerRow(
+                    title: "Account",
+                    selection: $accountID,
+                    accounts: accounts,
+                    noneLabel: "None"
+                )
+                DatePicker("Date", selection: $date, in: ...Date.now.addingTimeInterval(86_400 * 365))
+                TextField("Note", text: $note, axis: .vertical)
             }
         }
     }
@@ -241,12 +332,44 @@ struct AddTransactionSheet: View {
 
     private func save() {
         if kind == .transfer {
-            guard let from = accounts.first(where: { $0.id == accountID }), let to = accounts.first(where: { $0.id == toAccountID }) else { return }
-            Ledger.transfer(amount: amount, from: from, to: to, date: date, note: note, context: context)
-            saved = true
-            appState.show("Moved \(Money.format(amount, currency)) to \(to.name)")
-            dismiss()
-            return
+            if category == .internalTransfer {
+                guard let from = accounts.first(where: { $0.id == accountID }), let to = accounts.first(where: { $0.id == toAccountID }) else { return }
+                Ledger.transfer(amount: amount, from: from, to: to, date: date, note: note, context: context)
+                saved = true
+                appState.show("Moved \(Money.format(amount, currency)) to \(to.name)")
+                dismiss()
+                return
+            } else if category == .visaTransfer {
+                guard let from = accounts.first(where: { $0.id == accountID }), let to = accounts.first(where: { $0.id == toAccountID }) else { return }
+                let tx = MoneyTransaction(amount: amount, isIncome: false, merchant: "\(from.name) → \(to.name)",
+                                          category: .visaTransfer, date: date, note: note, source: .transfer, accountID: from.id)
+                tx.toAccountID = to.id
+                tx.smsTransactionType = .internalTransfer
+                Ledger.add(tx, context: context, checkDuplicates: false)
+                saved = true
+                appState.show("Paid \(Money.format(amount, currency)) to \(to.name)")
+                dismiss()
+                return
+            } else {
+                let incoming = category == .transferIn
+                let name = merchant.trimmingCharacters(in: .whitespaces)
+                let tx = MoneyTransaction(
+                    amount: amount,
+                    isIncome: incoming,
+                    merchant: name.isEmpty ? category.title : name,
+                    category: category,
+                    date: date,
+                    note: note,
+                    source: .transfer,
+                    accountID: accountID
+                )
+                tx.smsTransactionType = incoming ? .transferIn : .transferOut
+                let result = Ledger.add(tx, context: context)
+                saved = true
+                appState.report(result, base: "Saved \(Money.format(amount, currency))")
+                dismiss()
+                return
+            }
         }
         let name = merchant.trimmingCharacters(in: .whitespaces)
         let cat: SpendCategory = isIncome && !category.isIncomeCategory ? .income : category

@@ -18,6 +18,7 @@ enum Keys {
     static let iCloudLastBackupStatus = "iCloudLastBackupStatus"
     static let homeAccountOrder = "homeAccountOrder"
     static let homeHiddenAccounts = "homeHiddenAccounts"
+    static let netWorthChartExcludedAccounts = "netWorthChartExcludedAccounts"
     static let appearanceMode = "appearanceMode"
 }
 

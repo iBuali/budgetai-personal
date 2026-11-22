@@ -59,7 +59,7 @@ struct TxFilterState: Equatable {
         switch kind {
         case .all: break
         case .review: if !tx.isPending && !tx.isPossibleDuplicate { return false }
-        case .income: if !tx.isOrdinaryIncome { return false }
+        case .income: if !tx.isOrdinaryIncome && !(!tx.isTransfer && tx.isIncome) { return false }
         case .expenses: if !tx.isSpending { return false }
         case .transfers: if !tx.isTransfer { return false }
         }
@@ -108,7 +108,7 @@ struct TransactionsView: View {
         var pending: [MoneyTransaction] = []
         var needsReview: [MoneyTransaction] = []
         var grouped: [(day: Date, items: [MoneyTransaction])] = []
-        var totals: (income: Double, spent: Double) = (0, 0)
+        var totals: (income: Double, spent: Double, transferIn: Double, transferOut: Double) = (0, 0, 0, 0)
         var hasUncategorizedOther = false
     }
 
@@ -153,6 +153,10 @@ struct TransactionsView: View {
                     snap.totals.income += tx.amount
                 } else if tx.isSpending {
                     snap.totals.spent += tx.amount
+                } else if tx.isTransferIn {
+                    snap.totals.transferIn += tx.amount
+                } else if tx.isTransferOut {
+                    snap.totals.transferOut += tx.amount
                 }
             }
 
@@ -484,7 +488,7 @@ struct TransactionsView: View {
         }
     }
 
-    private func summaryRow(count: Int, totals: (income: Double, spent: Double)) -> some View {
+    private func summaryRow(count: Int, totals: (income: Double, spent: Double, transferIn: Double, transferOut: Double)) -> some View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
                 Text("\(count) transaction\(count == 1 ? "" : "s")")
@@ -494,17 +498,39 @@ struct TransactionsView: View {
                 Text(filters.rangeLabel).font(.subheadline.weight(.semibold)).foregroundStyle(Theme.ink)
             }
             Spacer()
-            VStack(alignment: .trailing, spacing: 2) {
-                if totals.income > 0 {
-                    Text(Money.format(totals.income, currency, signed: true))
-                        .foregroundStyle(Theme.positive)
-                        .animatedNumber(totals.income)
+            if filters.kind == .transfers {
+                VStack(alignment: .trailing, spacing: 2) {
+                    HStack(spacing: 4) {
+                        Text("In")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(Theme.secondaryInk)
+                        Text(Money.format(totals.transferIn, currency, signed: true))
+                            .foregroundStyle(Theme.positive)
+                            .animatedNumber(totals.transferIn)
+                    }
+                    HStack(spacing: 4) {
+                        Text("Out")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(Theme.secondaryInk)
+                        Text(Money.format(-totals.transferOut, currency, signed: true))
+                            .foregroundStyle(Theme.ink)
+                            .animatedNumber(-totals.transferOut)
+                    }
                 }
-                Text(Money.format(-totals.spent, currency, signed: true))
-                    .foregroundStyle(Theme.ink)
-                    .animatedNumber(-totals.spent)
+                .font(.subheadline.weight(.semibold).monospacedDigit())
+            } else {
+                VStack(alignment: .trailing, spacing: 2) {
+                    if totals.income > 0 {
+                        Text(Money.format(totals.income, currency, signed: true))
+                            .foregroundStyle(Theme.positive)
+                            .animatedNumber(totals.income)
+                    }
+                    Text(Money.format(-totals.spent, currency, signed: true))
+                        .foregroundStyle(Theme.ink)
+                        .animatedNumber(-totals.spent)
+                }
+                .font(.subheadline.weight(.semibold).monospacedDigit())
             }
-            .font(.subheadline.weight(.semibold).monospacedDigit())
         }
     }
 
@@ -678,6 +704,9 @@ struct TransactionsView: View {
                 if let cat = map[tx.merchant], cat != .other {
                     tx.category = cat
                     tx.aiCategorized = true
+                    if tx.source == .sms && tx.smsTransactionType == .unknown {
+                        tx.smsTransactionType = tx.isIncome ? .income : .expense
+                    }
                     count += 1
                 }
             }
@@ -976,8 +1005,12 @@ struct TransactionDetailView: View {
     private var recipientDisplayText: String {
         let suffix = (tx.smsRecipientSuffix?.isEmpty == false ? tx.smsRecipientSuffix : nil)
             ?? (tx.smsAccountSuffix?.isEmpty == false ? tx.smsAccountSuffix : nil)
+        let isTwoSMSInternalTransfer = rawSMSMessages.count > 1 && (tx.category == .internalTransfer || tx.effectiveTransactionType == .internalTransfer)
         let matchedDest = toAccount ?? ((tx.category == .internalTransfer || tx.effectiveTransactionType == .internalTransfer) ? matchedRecipientAccount : nil)
         if let suffix {
+            if isTwoSMSInternalTransfer {
+                return "••\(suffix)"
+            }
             if let matchedDest {
                 return "\(matchedDest.name) · ••\(suffix)"
             }
@@ -1147,7 +1180,7 @@ struct TransactionDetailView: View {
         Section {
             VStack(spacing: 10) {
                 if isAccountTransfer {
-                    IconBadge(symbol: "arrow.left.arrow.right", color: Theme.cobalt, size: 64)
+                    IconBadge(symbol: "arrow.left.arrow.right", color: SpendCategory.internalTransferColor, size: 64)
                 } else {
                     CategoryIcon(category: tx.isIncome && tx.category == .other ? .income : tx.displayCategory, size: 64)
                 }
@@ -1319,20 +1352,23 @@ struct TransactionDetailView: View {
             Button {
                 editingCategory = true
             } label: {
-                HStack(spacing: 12) {
-                    Text("Category").foregroundStyle(Theme.ink)
-                    Spacer()
+                HStack(spacing: 8) {
+                    Text("Category")
+                        .foregroundStyle(Theme.ink)
+                    Spacer(minLength: 8)
                     HStack(spacing: 6) {
                         CategoryIcon(category: tx.category, size: 22)
                         Text(tx.category.title)
                             .font(.subheadline.weight(.medium))
                             .foregroundStyle(Theme.ink)
                             .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
                         if tx.aiCategorized { AIBadge() }
                         Image(systemName: "chevron.up.chevron.down")
                             .font(.caption2.weight(.semibold))
                             .foregroundStyle(Theme.secondaryInk)
                     }
+                    .layoutPriority(1)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)
                     .background(Theme.track.opacity(0.65), in: Capsule())
@@ -1505,28 +1541,41 @@ struct TransactionDetailView: View {
                     }
                 }
             }
-        } else if tx.category == .internalTransfer || tx.category == .visaTransfer || tx.smsTransactionType == .internalTransfer || tx.isIncome != new.isIncomeCategory {
-            let wasInternal = tx.category == .internalTransfer || tx.smsTransactionType == .internalTransfer
-            Ledger.edit(tx, context: context) { target in
-                target.subcategory = nil
-                target.category = new
-                target.toAccountID = nil
-                if wasInternal {
-                    target.goalID = nil
-                }
-                target.smsBalanceIsCardLimit = false
-                target.isIncome = new.isIncomeCategory
-                if isSMSTransaction {
-                    target.smsTransactionType = new.isIncomeCategory ? .income : (new == .transfers ? .transferOut : .expense)
-                }
-                target.aiCategorized = false
-            }
         } else {
-            if new != tx.category { tx.subcategory = nil }
-            tx.category = new
-            tx.aiCategorized = false
-            try? context.save()
-            Ledger.notifyDataChanged()
+            let newIsIncome = new.isIncomeCategory || new == .transferIn
+            let wasInternal = tx.category == .internalTransfer || tx.category == .visaTransfer || tx.smsTransactionType == .internalTransfer
+            let directionOrTransferChanged = wasInternal || tx.isIncome != newIsIncome || tx.category.isTransferCategory != new.isTransferCategory
+            if directionOrTransferChanged {
+                Ledger.edit(tx, context: context) { target in
+                    target.subcategory = nil
+                    target.category = new
+                    target.toAccountID = nil
+                    if wasInternal {
+                        target.goalID = nil
+                    }
+                    target.smsBalanceIsCardLimit = false
+                    target.isIncome = newIsIncome
+                    if isSMSTransaction || new.isTransferCategory {
+                        if new == .transferIn {
+                            target.smsTransactionType = .transferIn
+                        } else if new.isTransferCategory {
+                            target.smsTransactionType = .transferOut
+                        } else if isSMSTransaction {
+                            target.smsTransactionType = new.isIncomeCategory ? .income : .expense
+                        }
+                    }
+                    target.aiCategorized = false
+                }
+            } else {
+                if new != tx.category { tx.subcategory = nil }
+                tx.category = new
+                if isSMSTransaction && (tx.smsTransactionType == nil || tx.smsTransactionType == .unknown) {
+                    tx.smsTransactionType = new == .transferIn ? .transferIn : (new.isTransferCategory ? .transferOut : (new.isIncomeCategory ? .income : .expense))
+                }
+                tx.aiCategorized = false
+                try? context.save()
+                Ledger.notifyDataChanged()
+            }
         }
     }
 
@@ -1701,13 +1750,13 @@ struct TransactionDetailView: View {
             if let toBal = tx.smsToBalance, let toID = tx.toAccountID, toID != tx.accountID, let destAcc = toAccount {
                 let toEffectiveBal = effectiveAccountBalance(destAcc)
 
-                LabeledContent("Destination previous balance") {
+                LabeledContent("To prev. balance") {
                     let destPrev = max(0, toBal - tx.amount)
                     Text(Money.format(destPrev, currency))
                         .monospacedDigit()
                 }
 
-                LabeledContent("Destination new balance") {
+                LabeledContent("To new balance") {
                     if (!destAcc.kind.isLiability || destAcc.kind == .creditCard) && abs(toEffectiveBal - toBal) >= 0.0005 {
                         VStack(alignment: .trailing, spacing: 2) {
                             Text("\(destAcc.name) (\(Money.format(toEffectiveBal, currency)))")

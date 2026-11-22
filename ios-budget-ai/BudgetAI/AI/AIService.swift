@@ -657,52 +657,72 @@ enum SMSImporter {
             return mergedOutcome
         }
 
-        // If the SMS was not previously recognized by a saved user rule:
-        // - Any Transfer Out is added as an Expense
-        // - Any Transfer In is added as Income
-        if !p.matchedUserRule {
-            if p.transactionType == .transferOut {
-                p.transactionType = .expense
-                p.isIncome = false
-                if p.category == .transfers {
-                    if let guessed = Categorizer.guess(p.merchant), guessed != .income, guessed != .transfers, guessed != .internalTransfer {
-                        p.category = guessed
-                    } else {
-                        p.category = .other
-                    }
-                }
-            } else if p.transactionType == .transferIn {
-                p.transactionType = .income
-                p.isIncome = true
-                if p.category == .transfers || !p.category.isIncomeCategory {
-                    p.category = .income
-                }
-            }
-        }
-
+        // Keep unidentified transfers / debit / credit / Visa payments in the Transfers tab
+        // unless a user rule, learned history, or AI identifies a specific expense/income category.
         var learnedMerchant = false
-        if !p.matchedUserRule && !p.transactionType.isTransferType && p.transactionType != .unknown,
+        if !p.matchedUserRule && p.transactionType != .internalTransfer && !isCardPayment,
            let learned = Categorizer.learnedMatch(for: p.merchant, in: context, isIncome: p.isIncome) {
             p.category = learned.category
             if learned.subcategory != nil { p.subcategory = learned.subcategory }
+            if learned.category == .transferIn {
+                p.transactionType = .transferIn
+                p.isIncome = true
+            } else if learned.category == .transfers || learned.category.isTransferCategory {
+                p.transactionType = .transferOut
+                p.isIncome = false
+            } else if learned.category.isIncomeCategory {
+                p.transactionType = .income
+                p.isIncome = true
+            } else {
+                p.transactionType = .expense
+                p.isIncome = false
+            }
             learnedMerchant = true
         }
 
-        // If there is no user rule and categorization is uncertain (.other or low confidence):
-        // Let AI search for their categorization, or fallback to .other if no information is found.
-        // Transactions with uncertain categorization are NOT put on the list waiting for review.
-        if !p.matchedUserRule && !learnedMerchant && !p.transactionType.isTransferType && p.transactionType != .unknown && !p.isIncome {
-            if p.category == .other || p.confidence == .low {
-                if GeminiAccount.isConfigured {
+        // If there is no user rule and no learned history:
+        // Let AI identify a specific expense category if the merchant is a real name (not generic IBAN/transfer wording).
+        // Otherwise, keep transfers and unidentified debit/credit alerts in the Transfers tab.
+        if !p.matchedUserRule && !learnedMerchant && p.transactionType != .internalTransfer && !isCardPayment {
+            let needsAICheck = p.category == .other
+                || p.confidence == .low
+                || p.transactionType == .transferOut
+                || p.transactionType == .transferIn
+                || p.transactionType == .unknown
+            if needsAICheck {
+                let isGenericTransferLabel = isGenericSMSMerchant(p.merchant)
+                    || p.merchant.lowercased().hasPrefix("iban ")
+                    || p.merchant.lowercased().hasPrefix("fawri")
+                if !p.isIncome && !isGenericTransferLabel && GeminiAccount.isConfigured {
                     if let aiCats = try? await AIService.categorize(merchants: [p.merchant]),
-                       let aiCat = aiCats[p.merchant], aiCat != .income, aiCat != .transfers {
+                       let aiCat = aiCats[p.merchant],
+                       aiCat != .other, !aiCat.isTransferCategory, !aiCat.isIncomeCategory {
                         p.category = aiCat
+                        p.transactionType = .expense
+                        p.isIncome = false
                         p.confidence = .high
                         usedAI = true
                     }
                 }
-                if p.category == .transfers || p.category.isIncomeCategory {
-                    p.category = .other
+                if !usedAI {
+                    if p.transactionType == .transferOut {
+                        p.isIncome = false
+                        if !p.category.isTransferCategory { p.category = .transfers }
+                    } else if p.transactionType == .transferIn {
+                        p.isIncome = true
+                        if !p.category.isTransferCategory { p.category = .transferIn }
+                    } else if p.transactionType == .unknown {
+                        let lowerSMS = trimmed.lowercased()
+                        let looksLikeTransferOrGenericDebitCredit =
+                            lowerSMS.contains("transfer") || lowerSMS.contains("fawri") || lowerSMS.contains("iban")
+                            || lowerSMS.contains("debit") || lowerSMS.contains("credit") || lowerSMS.contains("visa")
+                            || lowerSMS.contains("تحويل") || lowerSMS.contains("حوالة")
+                            || lowerSMS.contains("خصم") || lowerSMS.contains("إيداع") || lowerSMS.contains("ايداع")
+                        if looksLikeTransferOrGenericDebitCredit {
+                            p.transactionType = p.isIncome ? .transferIn : .transferOut
+                            p.category = p.isIncome ? .transferIn : .transfers
+                        }
+                    }
                 }
             }
         }

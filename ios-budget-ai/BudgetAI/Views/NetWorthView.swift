@@ -9,8 +9,10 @@ struct NetWorthView: View {
     @Query(sort: \Account.createdAt) private var accounts: [Account]
     @Query(sort: \NetWorthSnapshot.day) private var snapshots: [NetWorthSnapshot]
     @AppStorage(Keys.currency) private var currency = "BHD"
+    @AppStorage(Keys.netWorthChartExcludedAccounts) private var chartExcludedRaw = ""
     @State private var editing: Account?
     @State private var showNew = false
+    @State private var showChartAccountsPicker = false
     @State private var didOpenInitialAccount = false
 
     private var finance: Finance { Finance(transactions: [], accounts: accounts) }
@@ -20,9 +22,12 @@ struct NetWorthView: View {
         ScrollViewReader { proxy in
             List {
             NetWorthChartSection(
+                accounts: accounts,
                 snapshots: snapshots,
                 currentNetWorth: f.netWorth,
-                currency: currency
+                currency: currency,
+                chartExcludedRaw: $chartExcludedRaw,
+                onOpenPicker: { showChartAccountsPicker = true }
             )
 
             Section {
@@ -79,6 +84,13 @@ struct NetWorthView: View {
         }
         .sheet(item: $editing) { AccountEditor(account: $0) }
         .sheet(isPresented: $showNew) { AccountEditor(account: nil) }
+        .sheet(isPresented: $showChartAccountsPicker) {
+            NetWorthChartAccountsSheet(
+                accounts: accounts,
+                currency: currency,
+                excludedRaw: $chartExcludedRaw
+            )
+        }
         .onAppear {
             guard !didOpenInitialAccount, let targetID = initialAccountID else { return }
             didOpenInitialAccount = true
@@ -91,16 +103,26 @@ struct NetWorthView: View {
     }
 
     private func accountRow(_ account: Account) -> some View {
-        Button { editing = account } label: {
+        let isExcluded = !account.includeInNetWorth
+        return Button { editing = account } label: {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 12) {
                     AccountIcon(account: account, size: 40)
+                        .saturation(isExcluded ? 0 : 1)
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: 6) {
                             Text(account.name)
-                                .foregroundStyle(Theme.ink)
+                                .foregroundStyle(isExcluded ? Theme.secondaryInk : Theme.ink)
                                 .lineLimit(1)
                                 .minimumScaleFactor(0.85)
+                            if isExcluded {
+                                Image(systemName: "eye.slash.fill")
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundStyle(Theme.secondaryInk)
+                                    .padding(.horizontal, 5)
+                                    .padding(.vertical, 3)
+                                    .background(Theme.track, in: Capsule())
+                            }
                             if account.kind.isLiability {
                                 dueBadge(for: account)
                             }
@@ -114,7 +136,7 @@ struct NetWorthView: View {
                     let signedBalance = account.kind.isLiability ? -account.balance : account.balance
                     Text(Money.format(signedBalance, currency))
                         .font(.body.weight(.medium).monospacedDigit())
-                        .foregroundStyle(!account.includeInNetWorth ? Theme.secondaryInk : (account.kind.isLiability ? Theme.negative : Theme.ink))
+                        .foregroundStyle(isExcluded ? Theme.secondaryInk : (account.kind.isLiability ? Theme.negative : Theme.ink))
                         .lineLimit(1)
                         .minimumScaleFactor(0.75)
                         .layoutPriority(1)
@@ -124,14 +146,14 @@ struct NetWorthView: View {
                 if account.kind == .creditCard && account.cardLimit > 0 {
                     LiabilityProgressBar(
                         progress: account.cardUsedProgress,
-                        tint: account.cardUsedProgress >= 0.9 ? Theme.negative : (account.cardUsedProgress >= 0.7 ? Theme.warning : Theme.cobalt),
+                        tint: isExcluded ? Theme.secondaryInk : (account.cardUsedProgress >= 0.9 ? Theme.negative : (account.cardUsedProgress >= 0.7 ? Theme.warning : Theme.cobalt)),
                         leadingText: "Used \(Money.format(account.cardUsedBalance, currency))",
                         trailingText: "Remaining \(Money.format(account.cardRemainingBalance, currency))"
                     )
                 } else if account.kind == .loan && account.loanOriginalAmount > 0 {
                     LiabilityProgressBar(
                         progress: account.loanPaidProgress,
-                        tint: Theme.positive,
+                        tint: isExcluded ? Theme.secondaryInk : Theme.positive,
                         leadingText: "Paid \(Money.format(account.loanPaidAmount, currency))",
                         trailingText: account.loanMonthlyInstallment > 0
                             ? "\(Money.format(account.loanMonthlyInstallment, currency))/mo"
@@ -139,9 +161,11 @@ struct NetWorthView: View {
                     )
                 }
             }
+            .opacity(isExcluded ? 0.48 : 1.0)
             .padding(.vertical, 2)
         }
         .buttonStyle(.plain)
+        .listRowBackground(isExcluded ? Theme.track.opacity(0.45) : Theme.surface)
         .id(account.id)
         .swipeActions(edge: .leading) {
             Button {
@@ -351,7 +375,7 @@ struct AccountEditor: View {
                     } else if kind == .creditCard {
                         Text("Used balance updates automatically from linked Visa transactions and payments. Subtracted from net worth.")
                     } else if kind == .loan {
-                        Text("Remaining balance updates automatically from recorded loan payments. Subtracted from net worth.")
+                        Text("Remaining balance updates automatically from recorded loan payments. Only the monthly installment is subtracted from net worth.")
                     } else {
                         Text("Counts toward your assets, net worth, and Spendable balance in Safe to Spend.")
                     }
@@ -510,75 +534,391 @@ struct AccountEditor: View {
     }
 }
 
+private enum NetWorthChartSelection {
+    static func excludedIDs(from raw: String) -> Set<UUID> {
+        Set(raw.split(separator: ",").compactMap { UUID(uuidString: String($0)) })
+    }
+
+    static func toggle(_ id: UUID, in raw: String) -> String {
+        var set = excludedIDs(from: raw)
+        if set.contains(id) {
+            set.remove(id)
+        } else {
+            set.insert(id)
+        }
+        return set.map(\.uuidString).sorted().joined(separator: ",")
+    }
+
+    static func setAllExcluded(_ accounts: [Account]) -> String {
+        accounts.map(\.id.uuidString).sorted().joined(separator: ",")
+    }
+}
+
+private enum NetWorthChartMode: String, CaseIterable, Identifiable {
+    case breakdown = "Breakdown"
+    case trend = "Trend"
+    var id: String { rawValue }
+}
+
+private struct NetWorthChartItem: Identifiable {
+    let id: UUID
+    let name: String
+    let value: Double
+    let isLiability: Bool
+    let color: Color
+    let kindTitle: String
+}
+
 private struct NetWorthChartSection: View {
+    let accounts: [Account]
     let snapshots: [NetWorthSnapshot]
     let currentNetWorth: Double
     let currency: String
+    @Binding var chartExcludedRaw: String
+    let onOpenPicker: () -> Void
 
+    @State private var chartMode: NetWorthChartMode = .breakdown
     @State private var range = 2
     @State private var selectedDate: Date?
+    @State private var selectedItemID: UUID?
 
     private let ranges = [(label: "3M", months: 3), (label: "6M", months: 6), (label: "1Y", months: 12), (label: "All", months: 1200)]
 
-    private var points: [ChartPoint] {
+    private var selectedAccounts: [Account] {
+        let excluded = NetWorthChartSelection.excludedIDs(from: chartExcludedRaw)
+        return accounts.filter { !excluded.contains($0.id) }
+    }
+
+    private var chartAssets: Double {
+        selectedAccounts.filter { !$0.kind.isLiability }.reduce(0) { $0 + $1.balance }
+    }
+
+    private var chartLiabilities: Double {
+        selectedAccounts.filter { $0.kind.isLiability }.reduce(0) { $0 + $1.netWorthLiabilityAmount }
+    }
+
+    private var chartNetWorth: Double {
+        chartAssets - chartLiabilities
+    }
+
+    private var breakdownItems: [NetWorthChartItem] {
+        selectedAccounts.compactMap { acc in
+            let amt = acc.kind.isLiability ? acc.netWorthLiabilityAmount : max(0, acc.balance)
+            guard amt > 0.0005 else { return nil }
+            let col: Color = {
+                switch acc.kind {
+                case .bank: return Color(hex: 0x2563EB)
+                case .cash: return Color(hex: 0x16A34A)
+                case .investment: return Color(hex: 0x0EA5A4)
+                case .property: return Color(hex: 0x8B5CF6)
+                case .otherAsset: return Color(hex: 0x0891B2)
+                case .creditCard: return Color(hex: 0xDC2626)
+                case .loan: return Color(hex: 0xF08A24)
+                }
+            }()
+            return NetWorthChartItem(
+                id: acc.id,
+                name: acc.name,
+                value: amt,
+                isLiability: acc.kind.isLiability,
+                color: col,
+                kindTitle: acc.kind == .loan ? "Loan installment" : acc.kind.title
+            )
+        }
+        .sorted { $0.value > $1.value }
+    }
+
+    private var trendPoints: [ChartPoint] {
         let start = Calendar.current.date(byAdding: .month, value: -ranges[range].months, to: .now) ?? .distantPast
-        return snapshots.filter { $0.day >= start }.map { ChartPoint(date: $0.day, value: $0.netWorth) }
+        let offset = chartNetWorth - currentNetWorth
+        return snapshots.filter { $0.day >= start }.map { ChartPoint(date: $0.day, value: $0.netWorth + offset) }
     }
 
     var body: some View {
-        let pts = points
-        let change = (pts.last?.value ?? currentNetWorth) - (pts.first?.value ?? currentNetWorth)
-        let selected = selectedDate.flatMap { d in pts.min(by: { abs($0.date.timeIntervalSince(d)) < abs($1.date.timeIntervalSince(d)) }) }
+        let pts = trendPoints
+        let change = (pts.last?.value ?? chartNetWorth) - (pts.first?.value ?? chartNetWorth)
+        let selectedPoint = selectedDate.flatMap { d in pts.min(by: { abs($0.date.timeIntervalSince(d)) < abs($1.date.timeIntervalSince(d)) }) }
+        let selectedItem = selectedItemID.flatMap { id in breakdownItems.first(where: { $0.id == id }) }
+        let totalMagnitude = chartAssets + chartLiabilities
 
         Section {
-            VStack(alignment: .leading, spacing: 6) {
-                let heroValue = selected?.value ?? currentNetWorth
-                Text(selected.map { $0.date.formatted(date: .abbreviated, time: .omitted) } ?? "Net worth")
-                    .font(.subheadline).foregroundStyle(Theme.secondaryInk)
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .center, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        let heroLabel: String = {
+                            if chartMode == .trend, let p = selectedPoint {
+                                return p.date.formatted(date: .abbreviated, time: .omitted)
+                            }
+                            if chartMode == .breakdown, let item = selectedItem {
+                                return "\(item.name) · \(item.kindTitle)"
+                            }
+                            return selectedAccounts.count == accounts.count ? "Net worth" : "Chart net worth"
+                        }()
+                        Text(heroLabel)
+                            .font(.subheadline)
+                            .foregroundStyle(Theme.secondaryInk)
+                            .lineLimit(1)
+                    }
+                    Spacer()
+                    Button(action: onOpenPicker) {
+                        HStack(spacing: 5) {
+                            Image(systemName: "slider.horizontal.3")
+                                .font(.caption2.weight(.semibold))
+                            Text("\(selectedAccounts.count)/\(accounts.count)")
+                                .font(.caption.weight(.semibold).monospacedDigit())
+                        }
+                        .foregroundStyle(Theme.cobalt)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(Theme.cobaltSoft, in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Choose chart accounts")
+                }
+
+                let heroValue: Double = {
+                    if chartMode == .trend, let p = selectedPoint { return p.value }
+                    if chartMode == .breakdown, let item = selectedItem { return item.isLiability ? -item.value : item.value }
+                    return chartNetWorth
+                }()
                 Text(Money.format(heroValue, currency))
-                    .font(.system(size: 36, weight: .bold).monospacedDigit())
-                    .foregroundStyle(Theme.ink)
+                    .font(.system(size: 34, weight: .bold).monospacedDigit())
+                    .foregroundStyle(heroValue < 0 ? Theme.negative : Theme.ink)
                     .minimumScaleFactor(0.6).lineLimit(1)
                     .animatedNumber(heroValue)
-                Text("\(Money.format(change, currency, signed: true)) in \(ranges[range].label == "All" ? "total" : ranges[range].label)")
-                    .font(.subheadline.weight(.medium).monospacedDigit())
-                    .foregroundStyle(change >= 0 ? Theme.positive : Theme.negative)
-                    .animatedNumber(change)
-                Chart(pts) { p in
-                    AreaMark(x: .value("Date", p.date), y: .value("Net worth", p.value))
-                        .interpolationMethod(.catmullRom)
-                        .foregroundStyle(LinearGradient(colors: [Theme.cobalt.opacity(0.16), Theme.cobalt.opacity(0.01)], startPoint: .top, endPoint: .bottom))
-                    LineMark(x: .value("Date", p.date), y: .value("Net worth", p.value))
-                        .interpolationMethod(.catmullRom)
-                        .foregroundStyle(Theme.cobalt)
-                        .lineStyle(StrokeStyle(lineWidth: 2.5, lineCap: .round))
-                    if let selected, selected.date == p.date {
-                        RuleMark(x: .value("Date", p.date)).foregroundStyle(Theme.ink.opacity(0.2))
-                        PointMark(x: .value("Date", p.date), y: .value("Net worth", p.value)).foregroundStyle(Theme.cobalt)
+
+                HStack(spacing: 12) {
+                    HStack(spacing: 5) {
+                        Circle().fill(Theme.positive).frame(width: 7, height: 7)
+                        Text(Money.format(chartAssets, currency))
+                            .font(.caption.weight(.semibold).monospacedDigit())
+                            .foregroundStyle(Theme.positive)
+                    }
+                    HStack(spacing: 5) {
+                        Circle().fill(Theme.negative).frame(width: 7, height: 7)
+                        Text(Money.format(-chartLiabilities, currency))
+                            .font(.caption.weight(.semibold).monospacedDigit())
+                            .foregroundStyle(Theme.negative)
+                    }
+                    Spacer()
+                    if chartMode == .trend {
+                        Text("\(Money.format(change, currency, signed: true)) · \(ranges[range].label)")
+                            .font(.caption.weight(.semibold).monospacedDigit())
+                            .foregroundStyle(change >= 0 ? Theme.positive : Theme.negative)
                     }
                 }
-                .chartXSelection(value: $selectedDate)
-                .chartYScale(domain: .automatic(includesZero: false))
-                .chartYAxis {
-                    AxisMarks(position: .trailing) { v in
-                        AxisGridLine().foregroundStyle(Theme.track)
-                        AxisValueLabel { if let d = v.as(Double.self) { Text(Money.short(d)) } }
-                    }
-                }
-                .frame(height: 180)
-                .padding(.top, 8)
-                .overlay {
-                    if pts.count < 2 {
-                        Text("History builds up as you use the app").font(.footnote).foregroundStyle(Theme.secondaryInk)
-                    }
-                }
-                Picker("Range", selection: $range) {
-                    ForEach(ranges.indices, id: \.self) { Text(ranges[$0].label).tag($0) }
+
+                Picker("Chart mode", selection: $chartMode) {
+                    ForEach(NetWorthChartMode.allCases) { Text($0.rawValue).tag($0) }
                 }
                 .pickerStyle(.segmented)
-                .padding(.top, 6)
+
+                if chartMode == .breakdown {
+                    if breakdownItems.isEmpty {
+                        VStack(spacing: 6) {
+                            Image(systemName: "chart.bar.xaxis")
+                                .font(.title2)
+                                .foregroundStyle(Theme.secondaryInk.opacity(0.6))
+                            Text(selectedAccounts.isEmpty ? "No accounts selected for chart" : "No balances to chart")
+                                .font(.footnote)
+                                .foregroundStyle(Theme.secondaryInk)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 150)
+                    } else {
+                        // Assets vs Liabilities proportion bar
+                        if totalMagnitude > 0 {
+                            GeometryReader { geo in
+                                let assetRatio = min(1, max(0, chartAssets / totalMagnitude))
+                                HStack(spacing: 3) {
+                                    if chartAssets > 0 {
+                                        Capsule()
+                                            .fill(Theme.positive)
+                                            .frame(width: max(8, (geo.size.width - (chartLiabilities > 0 ? 3 : 0)) * assetRatio))
+                                    }
+                                    if chartLiabilities > 0 {
+                                        Capsule()
+                                            .fill(Theme.negative)
+                                    }
+                                }
+                            }
+                            .frame(height: 8)
+                            .padding(.top, 2)
+                        }
+
+                        Chart(breakdownItems) { item in
+                            BarMark(
+                                x: .value("Amount", item.value),
+                                y: .value("Account", item.name)
+                            )
+                            .foregroundStyle(item.color.opacity(selectedItemID == nil || selectedItemID == item.id ? 0.92 : 0.32))
+                            .cornerRadius(6)
+                            .annotation(position: .trailing, alignment: .center, spacing: 6) {
+                                Text(Money.short(item.isLiability ? -item.value : item.value))
+                                    .font(.caption2.weight(.semibold).monospacedDigit())
+                                    .foregroundStyle(item.isLiability ? Theme.negative : Theme.secondaryInk)
+                            }
+                        }
+                        .chartXAxis(.hidden)
+                        .chartYAxis {
+                            AxisMarks(position: .leading) { _ in
+                                AxisValueLabel()
+                                    .font(.caption.weight(.medium))
+                                    .foregroundStyle(Theme.ink)
+                            }
+                        }
+                        .frame(height: CGFloat(max(120, min(breakdownItems.count, 8) * 34)))
+                        .padding(.trailing, 32)
+                        .padding(.top, 4)
+
+                        // Interactive quick-select chips
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 6) {
+                                ForEach(breakdownItems) { item in
+                                    let isSelected = selectedItemID == item.id
+                                    Button {
+                                        withAnimation(.snappy(duration: 0.2)) {
+                                            selectedItemID = isSelected ? nil : item.id
+                                        }
+                                    } label: {
+                                        HStack(spacing: 5) {
+                                            Circle().fill(item.color).frame(width: 7, height: 7)
+                                            Text(item.name).lineLimit(1)
+                                        }
+                                        .font(.caption2.weight(.semibold))
+                                        .foregroundStyle(isSelected ? .white : Theme.ink)
+                                        .padding(.horizontal, 9)
+                                        .padding(.vertical, 5)
+                                        .background(isSelected ? item.color : Theme.track.opacity(0.7), in: Capsule())
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    Chart(pts) { p in
+                        AreaMark(x: .value("Date", p.date), y: .value("Net worth", p.value))
+                            .interpolationMethod(.catmullRom)
+                            .foregroundStyle(LinearGradient(colors: [Theme.cobalt.opacity(0.22), Theme.cobalt.opacity(0.01)], startPoint: .top, endPoint: .bottom))
+                        LineMark(x: .value("Date", p.date), y: .value("Net worth", p.value))
+                            .interpolationMethod(.catmullRom)
+                            .foregroundStyle(Theme.cobalt)
+                            .lineStyle(StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                        if let selectedPoint, selectedPoint.date == p.date {
+                            RuleMark(x: .value("Date", p.date)).foregroundStyle(Theme.ink.opacity(0.2))
+                            PointMark(x: .value("Date", p.date), y: .value("Net worth", p.value)).foregroundStyle(Theme.cobalt)
+                        }
+                    }
+                    .chartXSelection(value: $selectedDate)
+                    .chartYScale(domain: .automatic(includesZero: false))
+                    .chartYAxis {
+                        AxisMarks(position: .trailing) { v in
+                            AxisGridLine().foregroundStyle(Theme.track)
+                            AxisValueLabel { if let d = v.as(Double.self) { Text(Money.short(d)) } }
+                        }
+                    }
+                    .frame(height: 180)
+                    .padding(.top, 4)
+                    .overlay {
+                        if pts.count < 2 {
+                            Text("History builds up as you use the app").font(.footnote).foregroundStyle(Theme.secondaryInk)
+                        }
+                    }
+                    Picker("Range", selection: $range) {
+                        ForEach(ranges.indices, id: \.self) { Text(ranges[$0].label).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .padding(.top, 2)
+                }
             }
             .padding(.vertical, 6)
         }
+    }
+}
+
+private struct NetWorthChartAccountsSheet: View {
+    let accounts: [Account]
+    let currency: String
+    @Binding var excludedRaw: String
+    @Environment(\.dismiss) private var dismiss
+
+    private var excludedSet: Set<UUID> {
+        NetWorthChartSelection.excludedIDs(from: excludedRaw)
+    }
+
+    var body: some View {
+        let assets = accounts.filter { !$0.kind.isLiability }
+        let liabilities = accounts.filter { $0.kind.isLiability }
+
+        NavigationStack {
+            List {
+                if !assets.isEmpty {
+                    Section("Assets") {
+                        ForEach(assets) { acc in
+                            chartToggleRow(acc)
+                        }
+                    }
+                }
+                if !liabilities.isEmpty {
+                    Section("Loans & liabilities") {
+                        ForEach(liabilities) { acc in
+                            chartToggleRow(acc)
+                        }
+                    }
+                }
+            }
+            .scrollContentBackground(.hidden)
+            .canvasBackground()
+            .navigationTitle("Chart Accounts")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(excludedSet.isEmpty ? "Clear all" : "Select all") {
+                        withAnimation(.snappy) {
+                            excludedRaw = excludedSet.isEmpty ? NetWorthChartSelection.setAllExcluded(accounts) : ""
+                        }
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }.fontWeight(.semibold)
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+    }
+
+    private func chartToggleRow(_ account: Account) -> some View {
+        let isIncluded = !excludedSet.contains(account.id)
+        let displayAmount = account.kind.isLiability ? -account.netWorthLiabilityAmount : account.balance
+        return Button {
+            withAnimation(.snappy(duration: 0.2)) {
+                excludedRaw = NetWorthChartSelection.toggle(account.id, in: excludedRaw)
+            }
+        } label: {
+            HStack(spacing: 12) {
+                AccountIcon(account: account, size: 34)
+                    .saturation(isIncluded ? 1 : 0)
+                    .opacity(isIncluded ? 1 : 0.45)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(account.name)
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(isIncluded ? Theme.ink : Theme.secondaryInk)
+                    Text(account.kind == .loan ? "Loan · Monthly installment" : account.kind.title)
+                        .font(.caption)
+                        .foregroundStyle(Theme.secondaryInk)
+                }
+                Spacer()
+                Text(Money.format(displayAmount, currency))
+                    .font(.subheadline.weight(.medium).monospacedDigit())
+                    .foregroundStyle(isIncluded ? (account.kind.isLiability ? Theme.negative : Theme.ink) : Theme.secondaryInk)
+                Image(systemName: isIncluded ? "checkmark.circle.fill" : "circle")
+                    .font(.title3)
+                    .foregroundStyle(isIncluded ? Theme.cobalt : Color(hex: 0xC7CCD6))
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }

@@ -61,15 +61,18 @@ struct BudgetAITests {
         #expect(comps.hour == 15)
         #expect(comps.minute == 26)
 
-        // When imported without a prior user rule, Transfer Out is added as an Expense
+        // When imported without a prior user rule, learned history, or AI expense match, Transfer Out stays in Transfers
         let outcome = await SMSImporter.importText(sms, context: context, forceApprove: true)
         let tx = try #require(outcome.transaction)
-        #expect(tx.smsTransactionType == .expense)
+        #expect(tx.smsTransactionType == .transferOut)
+        #expect(tx.category == .transfers)
         #expect(tx.smsBank == "BisB")
         #expect(tx.smsReference == "BIB103KAK000KZUM")
         #expect(tx.smsRecipientSuffix == "0846")
         #expect(tx.isIncome == false)
-        #expect(tx.isSpending == true)
+        #expect(tx.isTransfer == true)
+        #expect(tx.isTransferOut == true)
+        #expect(tx.isSpending == false)
         #expect(tx.isOrdinaryIncome == false)
         #expect(abs(bisbAccount.balance - 263.195) < 0.0001)
     }
@@ -92,13 +95,16 @@ struct BudgetAITests {
         #expect(parsed.accountSuffix == "1234")
         #expect(parsed.isIncome == true)
         #expect(parsed.isOrdinaryExpense == false)
-        #expect(parsed.category == .transfers)
+        #expect(parsed.category == .transferIn)
 
-        // When imported without a prior user rule, Transfer In is added as Income
+        // When imported without a prior user rule or learned history, Transfer In stays in Transfers
         let outcome = await SMSImporter.importText(sms, context: context, forceApprove: true)
         let tx = try #require(outcome.transaction)
-        #expect(tx.smsTransactionType == .income)
-        #expect(tx.isOrdinaryIncome == true)
+        #expect(tx.smsTransactionType == .transferIn)
+        #expect(tx.category == .transferIn)
+        #expect(tx.isTransfer == true)
+        #expect(tx.isTransferIn == true)
+        #expect(tx.isOrdinaryIncome == false)
         #expect(tx.isSpending == false)
         #expect(abs(nbb.balance - 145.500) < 0.0001)
     }
@@ -120,7 +126,7 @@ struct BudgetAITests {
         let sms1 = "Fawri+ payment BHD3.000, ref: BIB103KAK000KZUM was credited to IBAN ending 0846 on 2026/10/27 15:26. Balance BHD263.195. Tel: 17515151"
         let outcome1 = await SMSImporter.importText(sms1, context: context, forceApprove: true)
         let tx = try #require(outcome1.transaction)
-        #expect(tx.smsTransactionType == .expense)
+        #expect(tx.smsTransactionType == .transferOut)
         #expect(tx.toAccountID == nil)
 
         // 2. When matched with a second SMS at the same date & time (2026/10/27 15:26), Rule 6 applies:
@@ -384,7 +390,7 @@ struct BudgetAITests {
         let outcome1 = await SMSImporter.importText(sms1, context: context, forceApprove: true)
         let tx1 = try #require(outcome1.transaction)
 
-        #expect(tx1.smsTransactionType == .expense)
+        #expect(tx1.smsTransactionType == .transferOut)
         #expect(tx1.category != .internalTransfer)
         #expect(tx1.goalID == nil)
         #expect(abs(emergencyGoal.saved - 100.000) < 0.0001)
@@ -637,9 +643,9 @@ struct BudgetAITests {
         // monthly = max(0, 1000 - 50 - 0 - 0 - 200) = 750.0
         #expect(safe.monthly == 750.0)
         #expect(safe.isShort == false)
-        // Net worth / total liabilities still preserve the full remaining loan balance
-        #expect(f.totalLiabilities == 4000.0)
-        #expect(f.netWorth == -3000.0)
+        // Net worth / total liabilities count only the monthly loan installment (200), not full remaining balance (4000)
+        #expect(f.totalLiabilities == 200.0)
+        #expect(f.netWorth == 800.0)
     }
 
     // MARK: - Financial Time Machine engine
@@ -903,7 +909,7 @@ struct BudgetAITests {
         let sms1 = "Fawri+ Transfer of BHD 75.000 from account 9001 to IBAN BH29ILAB00000000000846 Ref: REF1025X on 2026/10/25 14:15. Available Balance BHD 925.000. Tel: 17515151"
         let res1 = await SMSImporter.importText(sms1, context: context, forceApprove: true)
         let tx1 = try #require(res1.transaction)
-        #expect(tx1.smsTransactionType == .expense)
+        #expect(tx1.smsTransactionType == .transferOut)
         #expect(tx1.category != .internalTransfer)
         #expect(tx1.accountID == bisb.id)
         #expect(tx1.toAccountID == nil)
@@ -936,7 +942,7 @@ struct BudgetAITests {
         let smsBisBSecond = "Fawri+ payment BHD 25.000, ref: BIB555KZUM was credited to IBAN ending 0846 on 2026/10/26 09:30. Balance BHD 890.000. Tel: 17515151"
 
         let resIlaFirst = await SMSImporter.importText(smsIlaFirst, context: context, forceApprove: true)
-        #expect(resIlaFirst.transaction?.smsTransactionType == .income)
+        #expect(resIlaFirst.transaction?.smsTransactionType == .transferIn)
         _ = await SMSImporter.importText(smsBisBSecond, context: context, forceApprove: true)
 
         let allSMSAfterReverse = try context.fetch(FetchDescriptor<MoneyTransaction>()).filter { $0.source == .sms }
@@ -1396,7 +1402,7 @@ struct BudgetAITests {
         let sampleSMS = "Fawri+ payment BHD 40.000, ref: BIB103KAK999111 was credited to IBAN ending 0846 on 2026/11/01 10:00. Balance BHD 960.000. Tel: 17515151"
         let sampleOut = await SMSImporter.importText(sampleSMS, context: context, forceApprove: true)
         let sampleTx = try #require(sampleOut.transaction)
-        #expect(sampleTx.smsTransactionType == .expense)
+        #expect(sampleTx.smsTransactionType == .transferOut)
         #expect(sampleTx.toAccountID == nil)
 
         // 2. Capture available fields from the selected transaction
@@ -2870,7 +2876,8 @@ struct BudgetAITests {
         #expect(f.safeToSpendLiability(for: zeroInstallmentLoan) == 0.0)
         #expect(f.safeToSpendLiability(for: cappedLoan) == 90.0)
         #expect(f.safeToSpend.liabilities == 240.0)
-        #expect(f.totalLiabilities == 3240.0)
+        #expect(f.totalLiabilities == 240.0)
+        #expect(f.netWorth == 1760.0)
     }
 
     @Test func transactionFilterDefaultsToThisCycle() throws {
@@ -3333,5 +3340,113 @@ struct BudgetAITests {
         #expect(unknownSMSTx.goalID == goalB.id)
         #expect(abs(goalB.saved - 22.000) < 0.0001)
         #expect(abs(goalB.contributedThisMonth(now: now) - 12.000) < 0.0001)
+    }
+
+    @Test func unknownSMSTypeCategorizedAsExpenseOrIncomeAppearsInFilters() async throws {
+        let expenseUnknown = MoneyTransaction(
+            amount: 0.500,
+            isIncome: false,
+            merchant: "Tap*Amakin Main Al Manamah",
+            category: .shopping,
+            date: .now,
+            source: .sms
+        )
+        expenseUnknown.smsTransactionType = .unknown
+        expenseUnknown.aiCategorized = true
+
+        #expect(expenseUnknown.isSpending == true)
+        #expect(expenseUnknown.isOrdinaryIncome == false)
+        #expect(expenseUnknown.isTransfer == false)
+
+        let incomeUnknown = MoneyTransaction(
+            amount: 10.000,
+            isIncome: true,
+            merchant: "Unknown Credit",
+            category: .income,
+            date: .now,
+            source: .sms
+        )
+        incomeUnknown.smsTransactionType = .unknown
+
+        #expect(incomeUnknown.isOrdinaryIncome == true)
+        #expect(incomeUnknown.isSpending == false)
+        #expect(incomeUnknown.isTransfer == false)
+    }
+
+    @Test func transferCategoryCatalogAndDirectionHelpers() throws {
+        #expect(SpendCategory.transfers.title == "Transfer Out")
+        #expect(SpendCategory.transferIn.title == "Transfer In")
+        #expect(SpendCategory.internalTransfer.title == "Internal Transfer")
+        #expect(SpendCategory.visaTransfer.title == "Transfer to Visa Card")
+
+        let transferCases = SpendCategory.transferCases
+        #expect(transferCases.contains(.transfers))
+        #expect(transferCases.contains(.transferIn))
+        #expect(transferCases.contains(.internalTransfer))
+        #expect(transferCases.contains(.visaTransfer))
+
+        let outTx = MoneyTransaction(amount: 20.0, isIncome: false, merchant: "External Recipient", category: .transfers, date: .now)
+        outTx.smsTransactionType = .transferOut
+        #expect(outTx.isTransfer == true)
+        #expect(outTx.isTransferOut == true)
+        #expect(outTx.isTransferIn == false)
+
+        let inTx = MoneyTransaction(amount: 35.0, isIncome: true, merchant: "External Sender", category: .transferIn, date: .now)
+        inTx.smsTransactionType = .transferIn
+        #expect(inTx.isTransfer == true)
+        #expect(inTx.isTransferIn == true)
+        #expect(inTx.isTransferOut == false)
+
+        let internalTx = MoneyTransaction(amount: 50.0, isIncome: false, merchant: "Own Account", category: .internalTransfer, date: .now)
+        internalTx.smsTransactionType = .internalTransfer
+        #expect(internalTx.isTransfer == true)
+        #expect(internalTx.isTransferOut == false)
+        #expect(internalTx.isTransferIn == false)
+    }
+
+    @Test func smsTransferFallsBackToTransfersUnlessLearnedOrRuled() async throws {
+        let context = makeCleanContext()
+        let bisb = Account(name: "BisB Account", kind: .bank, institution: "BisB", balance: 500.000)
+        bisb.smsMatch = "9001"
+        context.insert(bisb)
+
+        // Prior learned transaction for "ALMANAR NURSERY" categorized as Education
+        let learnedSeed = MoneyTransaction(amount: 120.000, isIncome: false, merchant: "ALMANAR NURSERY", category: .education, date: .now.addingTimeInterval(-86400 * 7), source: .manual, accountID: bisb.id)
+        context.insert(learnedSeed)
+        try context.save()
+
+        // 1. Learned recipient overrides transferOut to the learned expense category
+        let learnedSMS = "Your account ending 9001 has been debited BHD 120.000 via Fawri+ to ALMANAR NURSERY on 2026/11/20 11:00. Ref: LRN9001. Balance BHD 380.000. Tel: 17515151"
+        let learnedRes = await SMSImporter.importText(learnedSMS, context: context, forceApprove: true)
+        let learnedTx = try #require(learnedRes.transaction)
+        #expect(learnedTx.category == .education)
+        #expect(learnedTx.smsTransactionType == .expense)
+        #expect(learnedTx.isSpending == true)
+
+        // 2. Unidentified recipient stays in Transfers as Transfer Out
+        let unknownSMS = "Your account ending 9001 has been debited BHD 15.000 via Fawri+ to IBAN ending 7744 on 2026/11/20 12:30. Ref: UNK9002. Balance BHD 365.000. Tel: 17515151"
+        let unknownRes = await SMSImporter.importText(unknownSMS, context: context, forceApprove: true)
+        let unknownTx = try #require(unknownRes.transaction)
+        #expect(unknownTx.category == .transfers)
+        #expect(unknownTx.smsTransactionType == .transferOut)
+        #expect(unknownTx.isTransfer == true)
+        #expect(unknownTx.isTransferOut == true)
+    }
+
+    @Test func loanNetWorthCountsMonthlyInstallmentOnly() throws {
+        let bank = Account(name: "Checking", kind: .bank, balance: 1500.0)
+        let card = Account(name: "Visa Card", kind: .creditCard, balance: 200.0)
+        let carLoan = Account(name: "Car Loan", kind: .loan, balance: 6000.0)
+        carLoan.loanMonthlyInstallment = 180.0
+        let almostPaidLoan = Account(name: "Final Loan", kind: .loan, balance: 75.0)
+        almostPaidLoan.loanMonthlyInstallment = 150.0
+
+        #expect(carLoan.netWorthLiabilityAmount == 180.0)
+        #expect(almostPaidLoan.netWorthLiabilityAmount == 75.0)
+        #expect(card.netWorthLiabilityAmount == 200.0)
+
+        let finance = Finance(transactions: [], accounts: [bank, card, carLoan, almostPaidLoan])
+        #expect(abs(finance.totalLiabilities - 455.0) < 0.0001)
+        #expect(abs(finance.netWorth - 1045.0) < 0.0001)
     }
 }
