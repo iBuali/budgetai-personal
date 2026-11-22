@@ -684,15 +684,30 @@ enum SMSImporter {
         // Let AI identify a specific expense category if the merchant is a real name (not generic IBAN/transfer wording).
         // Otherwise, keep transfers and unidentified debit/credit alerts in the Transfers tab.
         if !p.matchedUserRule && !learnedMerchant && p.transactionType != .internalTransfer && !isCardPayment {
+            let lowerSMS = trimmed.lowercased()
+            let isGenericTransferLabel = isGenericSMSMerchant(p.merchant)
+                || p.merchant.lowercased().hasPrefix("iban ")
+                || p.merchant.lowercased().hasPrefix("fawri")
+            let hasExplicitIncomeCue =
+                lowerSMS.contains("salary") || lowerSMS.contains("payroll") || lowerSMS.contains("wage")
+                || lowerSMS.contains("bonus") || lowerSMS.contains("dividend") || lowerSMS.contains("interest")
+                || lowerSMS.contains("profit") || lowerSMS.contains("cashback") || lowerSMS.contains("commission")
+                || lowerSMS.contains("allowance") || lowerSMS.contains("pension") || lowerSMS.contains("stipend")
+                || lowerSMS.contains("راتب") || lowerSMS.contains("مكافأة") || lowerSMS.contains("أرباح")
+                || lowerSMS.contains("ارباح")
+            let looksLikeGenericCredit = p.transactionType == .income && isGenericTransferLabel && !hasExplicitIncomeCue
+            let looksLikeGenericDebit = p.transactionType == .expense && p.category == .other && isGenericTransferLabel
+                && (lowerSMS.contains("debit") || lowerSMS.contains("transfer") || lowerSMS.contains("fawri")
+                    || lowerSMS.contains("iban") || lowerSMS.contains("خصم") || lowerSMS.contains("تحويل"))
+
             let needsAICheck = p.category == .other
                 || p.confidence == .low
                 || p.transactionType == .transferOut
                 || p.transactionType == .transferIn
                 || p.transactionType == .unknown
+                || looksLikeGenericCredit
+                || looksLikeGenericDebit
             if needsAICheck {
-                let isGenericTransferLabel = isGenericSMSMerchant(p.merchant)
-                    || p.merchant.lowercased().hasPrefix("iban ")
-                    || p.merchant.lowercased().hasPrefix("fawri")
                 if !p.isIncome && !isGenericTransferLabel && GeminiAccount.isConfigured {
                     if let aiCats = try? await AIService.categorize(merchants: [p.merchant]),
                        let aiCat = aiCats[p.merchant],
@@ -705,14 +720,15 @@ enum SMSImporter {
                     }
                 }
                 if !usedAI {
-                    if p.transactionType == .transferOut {
+                    if p.transactionType == .transferOut || looksLikeGenericDebit {
+                        p.transactionType = .transferOut
                         p.isIncome = false
                         if !p.category.isTransferCategory { p.category = .transfers }
-                    } else if p.transactionType == .transferIn {
+                    } else if p.transactionType == .transferIn || looksLikeGenericCredit {
+                        p.transactionType = .transferIn
                         p.isIncome = true
                         if !p.category.isTransferCategory { p.category = .transferIn }
-                    } else if p.transactionType == .unknown {
-                        let lowerSMS = trimmed.lowercased()
+                    } else if p.transactionType == .unknown && !p.requiresReview {
                         let looksLikeTransferOrGenericDebitCredit =
                             lowerSMS.contains("transfer") || lowerSMS.contains("fawri") || lowerSMS.contains("iban")
                             || lowerSMS.contains("debit") || lowerSMS.contains("credit") || lowerSMS.contains("visa")
