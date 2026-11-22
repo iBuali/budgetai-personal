@@ -1277,32 +1277,61 @@ struct TransactionDetailView: View {
                         let result = Ledger.approve(tx, context: context)
                         appState.report(result, base: "Approved \(Money.format(tx.amount, currency))")
                     } label: {
-                        HStack {
-                            Spacer()
-                            Label("Approve and update account", systemImage: "checkmark.circle.fill")
-                                .font(.body.weight(.semibold))
-                            Spacer()
+                        HStack(spacing: 8) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.system(size: 18, weight: .semibold))
+                            Text("Approve and update account")
+                                .font(.subheadline.weight(.semibold))
                         }
-                        .padding(.vertical, 4)
+                        .foregroundStyle(Color.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 13)
+                        .background(
+                            LinearGradient(
+                                colors: [
+                                    Color(light: Color(hex: 0x16A34A), dark: Color(hex: 0x10B981)),
+                                    Color(light: Color(hex: 0x15803D), dark: Color(hex: 0x059669))
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .strokeBorder(Color.white.opacity(0.18), lineWidth: 1)
+                        )
+                        .shadow(color: Color(light: Color(hex: 0x16A34A).opacity(0.24), dark: Color(hex: 0x10B981).opacity(0.22)), radius: 8, y: 3)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(Theme.positive)
+                    .buttonStyle(PressableStyle())
 
                     Button(role: .destructive) {
                         Ledger.delete(tx, context: context)
                         appState.show("Transaction rejected and removed")
                         dismiss()
                     } label: {
-                        HStack {
-                            Spacer()
-                            Label("Reject", systemImage: "xmark.circle")
-                                .font(.body.weight(.medium))
-                            Spacer()
+                        HStack(spacing: 8) {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 17, weight: .semibold))
+                            Text("Reject")
+                                .font(.subheadline.weight(.semibold))
                         }
-                        .padding(.vertical, 2)
+                        .foregroundStyle(Color(light: Color(hex: 0xDC2626), dark: Color(hex: 0xFCA5A5)))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                        .background(
+                            Color(light: Color(hex: 0xFEF2F2), dark: Color(hex: 0xEF4444).opacity(0.14)),
+                            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .strokeBorder(
+                                    Color(light: Color(hex: 0xDC2626).opacity(0.28), dark: Color(hex: 0xF87171).opacity(0.34)),
+                                    lineWidth: 1
+                                )
+                        )
                     }
-                    .buttonStyle(.bordered)
-                    .tint(Theme.negative)
+                    .buttonStyle(PressableStyle())
                 }
                 .padding(.top, 4)
             }
@@ -1351,7 +1380,7 @@ struct TransactionDetailView: View {
                     }
                 }
 
-                VStack(spacing: 8) {
+                VStack(spacing: 10) {
                     Button {
                         commitPendingEdits(silent: true)
                         let created = SubscriptionMatchingEngine.confirmAsNewRecurringBill(
@@ -1362,16 +1391,32 @@ struct TransactionDetailView: View {
                         )
                         appState.show("Added \(created.name) as recurring bill & saved rule")
                     } label: {
-                        HStack {
-                            Spacer()
-                            Label("Confirm & Add as Recurring Bill", systemImage: "checkmark.circle.fill")
+                        HStack(spacing: 8) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.system(size: 17, weight: .semibold))
+                            Text("Confirm & Add as Recurring Bill")
                                 .font(.subheadline.weight(.semibold))
-                            Spacer()
                         }
-                        .padding(.vertical, 4)
+                        .foregroundStyle(Color.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 13)
+                        .background(
+                            LinearGradient(
+                                colors: [
+                                    Color(light: Color(hex: 0x1A1A18), dark: Color(hex: 0xB44CFF)),
+                                    Color(light: Color(hex: 0x32322E), dark: Color(hex: 0x8B2CE6))
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .strokeBorder(Color.white.opacity(0.16), lineWidth: 1)
+                        )
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(Theme.cobalt)
+                    .buttonStyle(PressableStyle())
 
                     if !bills.isEmpty {
                         Menu {
@@ -1385,31 +1430,50 @@ struct TransactionDetailView: View {
                                 }
                             }
                         } label: {
-                            HStack {
-                                Spacer()
-                                Label("Match to Existing Bill", systemImage: "link")
-                                    .font(.subheadline.weight(.medium))
-                                Spacer()
+                            HStack(spacing: 8) {
+                                Image(systemName: "link")
+                                    .font(.system(size: 16, weight: .semibold))
+                                Text("Match to Existing Bill")
+                                    .font(.subheadline.weight(.semibold))
                             }
-                            .padding(.vertical, 3)
+                            .foregroundStyle(Theme.ink)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 12)
+                            .background(Theme.track.opacity(0.7), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .strokeBorder(Theme.secondaryInk.opacity(0.22), lineWidth: 1)
+                            )
                         }
-                        .buttonStyle(.bordered)
+                        .buttonStyle(.plain)
                     }
 
                     Button(role: .destructive) {
                         SubscriptionMatchingEngine.rejectBillSuggestion(tx: tx, context: context)
                         appState.show("Not a bill · We'll remember this")
                     } label: {
-                        HStack {
-                            Spacer()
-                            Label("Not a Bill (Don't Ask Again)", systemImage: "xmark.circle")
-                                .font(.subheadline.weight(.medium))
-                            Spacer()
+                        HStack(spacing: 8) {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 16, weight: .semibold))
+                            Text("Not a Bill (Don't Ask Again)")
+                                .font(.subheadline.weight(.semibold))
                         }
-                        .padding(.vertical, 2)
+                        .foregroundStyle(Color(light: Color(hex: 0xDC2626), dark: Color(hex: 0xFCA5A5)))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                        .background(
+                            Color(light: Color(hex: 0xFEF2F2), dark: Color(hex: 0xEF4444).opacity(0.14)),
+                            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .strokeBorder(
+                                    Color(light: Color(hex: 0xDC2626).opacity(0.28), dark: Color(hex: 0xF87171).opacity(0.34)),
+                                    lineWidth: 1
+                                )
+                        )
                     }
-                    .buttonStyle(.bordered)
-                    .tint(Theme.negative)
+                    .buttonStyle(PressableStyle())
                 }
             }
             .padding(.vertical, 4)
@@ -1717,6 +1781,9 @@ struct TransactionDetailView: View {
                         }
                     }
                     target.aiCategorized = false
+                    if target.smsClassificationReason.hasPrefix("Matched:") || target.smsClassificationReason.hasPrefix("Matched Rule") {
+                        target.smsClassificationReason = ""
+                    }
                 }
             } else {
                 if new != tx.category { tx.subcategory = nil }
@@ -1725,9 +1792,13 @@ struct TransactionDetailView: View {
                     tx.smsTransactionType = new == .transferIn ? .transferIn : (new.isTransferCategory ? .transferOut : (new.isIncomeCategory ? .income : .expense))
                 }
                 tx.aiCategorized = false
+                if tx.smsClassificationReason.hasPrefix("Matched:") || tx.smsClassificationReason.hasPrefix("Matched Rule") {
+                    tx.smsClassificationReason = ""
+                }
                 try? context.save()
                 Ledger.notifyDataChanged()
             }
+            Categorizer.recordUserCategoryChoice(for: tx, category: new)
         }
     }
 

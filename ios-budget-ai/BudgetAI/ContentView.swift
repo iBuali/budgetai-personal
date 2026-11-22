@@ -138,6 +138,7 @@ struct RootView: View {
             Task { @MainActor in
                 await Task.yield()
                 SMSImporter.reconcileExistingTransactions(context: context)
+                _ = Ledger.processScheduledLoanInstallments(context: context)
                 Ledger.recordSnapshot(context: context)
                 Ledger.refreshCardReminders(context: context)
                 ICloudBackupService.shared.performAutoBackupIfDue(context: context)
@@ -151,6 +152,7 @@ struct RootView: View {
                 Task { @MainActor in
                     await Task.yield()
                     SMSImporter.reconcileExistingTransactions(context: context)
+                    _ = Ledger.processScheduledLoanInstallments(context: context)
                     ICloudBackupService.shared.performAutoBackupIfDue(context: context)
                     appState.refreshAlerts(context: context)
                 }

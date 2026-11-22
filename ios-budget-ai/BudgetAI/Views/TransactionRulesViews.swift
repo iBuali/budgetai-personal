@@ -44,6 +44,10 @@ struct TransactionRuleBuilderSheet: View {
     @State private var availableConditions: [RuleCondition] = []
     @State private var selectedFields: Set<RuleConditionField> = []
     @State private var locationRadius: Double = 15.0
+    @State private var originalSMSMatchMode: RuleSMSMatchMode = .contains
+    @State private var originalSMSText: String = ""
+    @State private var manualConditionValues: [RuleConditionField: String] = [:]
+    @State private var manualAccountConditionID: UUID? = nil
 
     // THEN – Actions
     @State private var enableSetCategory: Bool = false
@@ -84,6 +88,10 @@ struct TransactionRuleBuilderSheet: View {
         let availableConditions: [RuleCondition]
         let selectedFields: Set<RuleConditionField>
         let locationRadius: Double
+        let originalSMSMatchMode: RuleSMSMatchMode
+        let originalSMSText: String
+        let manualConditionValues: [RuleConditionField: String]
+        let manualAccountConditionID: UUID?
         let enableSetCategory: Bool
         let selectedCategoryRaw: String
         let fromAccountID: UUID?
@@ -112,6 +120,10 @@ struct TransactionRuleBuilderSheet: View {
             availableConditions: availableConditions,
             selectedFields: selectedFields,
             locationRadius: locationRadius,
+            originalSMSMatchMode: originalSMSMatchMode,
+            originalSMSText: originalSMSText,
+            manualConditionValues: manualConditionValues,
+            manualAccountConditionID: manualAccountConditionID,
             enableSetCategory: enableSetCategory,
             selectedCategoryRaw: selectedCategory.rawValue,
             fromAccountID: fromAccountID,
@@ -137,12 +149,33 @@ struct TransactionRuleBuilderSheet: View {
 
     private var store: TransactionRuleStore { TransactionRuleStore.shared }
 
+    private var isManualCreation: Bool {
+        sourceTransaction == nil && existingRule == nil
+    }
+
     private var selectedConditionsList: [RuleCondition] {
         availableConditions.filter { selectedFields.contains($0.field) }
     }
 
     private var canSave: Bool {
-        !selectedConditionsList.isEmpty
+        guard !selectedConditionsList.isEmpty else { return false }
+        return selectedConditionsList.allSatisfy { cond in
+            if cond.field == .originalSMS {
+                let text = originalSMSText.trimmingCharacters(in: .whitespacesAndNewlines)
+                return !text.isEmpty || !cond.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }
+            if isManualCreation {
+                if cond.field == .accountID {
+                    return manualAccountConditionID != nil
+                }
+                let raw = (manualConditionValues[cond.field] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                if cond.field == .amount {
+                    return (Money.parse(raw) ?? 0) > 0
+                }
+                return !raw.isEmpty
+            }
+            return !cond.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
     }
 
     private func computeAffectedTransactions() -> [(tx: MoneyTransaction, changes: [(label: String, before: String, after: String)])] {
@@ -284,6 +317,63 @@ struct TransactionRuleBuilderSheet: View {
             }
             .buttonStyle(.plain)
 
+            // If this is the Original SMS condition and it is selected, offer Contains vs Exactly match
+            if cond.field == .originalSMS && isSelected {
+                VStack(alignment: .leading, spacing: 8) {
+                    Picker("SMS Match Mode", selection: $originalSMSMatchMode) {
+                        ForEach(RuleSMSMatchMode.allCases) { mode in
+                            Text(mode.title).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+
+                    if originalSMSMatchMode == .contains || isManualCreation {
+                        TextField(
+                            originalSMSMatchMode == .contains ? "Text the SMS must contain" : "Paste full example SMS",
+                            text: $originalSMSText,
+                            axis: .vertical
+                        )
+                            .font(.caption)
+                            .lineLimit(2...4)
+                            .padding(8)
+                            .background(Theme.track.opacity(0.65), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    }
+                    if originalSMSMatchMode == .exactTemplate {
+                        Text("Matches this exact SMS structure while ignoring date, time, reference number, and balance.")
+                            .font(.caption2)
+                            .foregroundStyle(Theme.secondaryInk)
+                    }
+                }
+                .padding(.leading, 36)
+                .padding(.top, 2)
+            }
+
+            // Inline manual inputs when creating a rule from scratch in Settings
+            if isManualCreation && isSelected && cond.field != .originalSMS {
+                Group {
+                    if cond.field == .accountID {
+                        Picker("Match Account", selection: $manualAccountConditionID) {
+                            Text("Select Account").tag(UUID?.none)
+                            ForEach(accounts) { acc in
+                                Text(acc.name).tag(UUID?.some(acc.id))
+                            }
+                        }
+                        .font(.caption)
+                    } else {
+                        TextField(manualPlaceholder(for: cond.field), text: Binding(
+                            get: { manualConditionValues[cond.field] ?? "" },
+                            set: { manualConditionValues[cond.field] = $0 }
+                        ))
+                        .font(.caption)
+                        .keyboardType(cond.field == .amount ? .decimalPad : .default)
+                        .padding(8)
+                        .background(Theme.track.opacity(0.65), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    }
+                }
+                .padding(.leading, 36)
+                .padding(.top, 2)
+            }
+
             // If this is the Location condition and it is selected with GPS coordinates, offer radius customization
             if cond.field == .location && isSelected && (cond.latitude != nil || actionLatitude != nil) {
                 VStack(alignment: .leading, spacing: 6) {
@@ -421,32 +511,7 @@ struct TransactionRuleBuilderSheet: View {
                     .textFieldStyle(.roundedBorder)
             }
 
-            // 4. Set SMS Bank (Choose from Bahrain/regional banks or custom text)
-            Toggle(isOn: $enableSetBank) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Label("Set SMS Bank", systemImage: "building.columns.fill")
-                    Text("Designate SMS sender bank")
-                        .font(.caption2)
-                        .foregroundStyle(Theme.secondaryInk)
-                }
-            }
-            if enableSetBank {
-                Picker("Bank List", selection: $selectedBankPicker) {
-                    ForEach(regionalBanksList, id: \.self) { bank in
-                        Text(bank).tag(bank)
-                    }
-                    Text("Custom / Other").tag("Custom")
-                }
-                .onChange(of: selectedBankPicker) { _, newChoice in
-                    if newChoice != "Custom" {
-                        actionBank = newChoice
-                    }
-                }
-                TextField("Bank Name", text: $actionBank)
-                    .textFieldStyle(.roundedBorder)
-            }
-
-            // 5. Set Location (Transaction Location Editor: Search + Interactive Movable Pin Map)
+            // 4. Set Location (Transaction Location Editor: Search + Interactive Movable Pin Map)
             Toggle(isOn: $enableSetLocation) {
                 VStack(alignment: .leading, spacing: 2) {
                     Label("Set Location", systemImage: "mappin.and.ellipse")
@@ -526,6 +591,11 @@ struct TransactionRuleBuilderSheet: View {
         Section("Rule Info") {
             TextField("Rule Name (optional)", text: $ruleName)
             Toggle("Enable Rule for Future Transactions", isOn: $isEnabled)
+                .onChange(of: isEnabled) { _, enabled in
+                    if !enabled {
+                        applyToExisting = false
+                    }
+                }
         }
     }
 
@@ -533,6 +603,7 @@ struct TransactionRuleBuilderSheet: View {
         if let existingRule {
             ruleName = existingRule.name
             isEnabled = existingRule.isEnabled
+            applyToExisting = existingRule.isEnabled
             logic = existingRule.logic
 
             if let tx = sourceTransaction {
@@ -548,6 +619,13 @@ struct TransactionRuleBuilderSheet: View {
 
             if let locCond = existingRule.conditions.first(where: { $0.field == .location }) {
                 locationRadius = locCond.radiusMeters > 0 ? locCond.radiusMeters : 15.0
+            }
+            if let smsCond = existingRule.conditions.first(where: { $0.field == .originalSMS }) {
+                originalSMSMatchMode = smsCond.smsMatchMode ?? .contains
+                originalSMSText = smsCond.value
+            } else if let capturedSMS = availableConditions.first(where: { $0.field == .originalSMS }) {
+                originalSMSMatchMode = .contains
+                originalSMSText = capturedSMS.value
             }
 
             let act = existingRule.actions
@@ -601,6 +679,10 @@ struct TransactionRuleBuilderSheet: View {
             }
         } else if let tx = sourceTransaction {
             availableConditions = TransactionRuleStore.captureAvailableConditions(from: tx, accounts: accounts)
+            if let smsCond = availableConditions.first(where: { $0.field == .originalSMS }) {
+                originalSMSMatchMode = .contains
+                originalSMSText = smsCond.value
+            }
 
             // Pre-select the primary identifying condition(s) for convenience
             if availableConditions.contains(where: { $0.field == .recipientIBAN }) {
@@ -617,6 +699,37 @@ struct TransactionRuleBuilderSheet: View {
             toAccountID = tx.toAccountID
             overrideAccountID = tx.accountID
             populateFallbackActionValues(from: tx)
+        } else {
+            // Creating a new rule from scratch in Settings -> Transaction Rules
+            availableConditions = [
+                RuleCondition(field: .originalSMS, value: "", displayValue: "Match SMS text", smsMatchMode: .contains),
+                RuleCondition(field: .merchant, value: "", displayValue: "Enter merchant or recipient"),
+                RuleCondition(field: .recipientIBAN, value: "", displayValue: "Enter recipient IBAN digits"),
+                RuleCondition(field: .accountDigits, value: "", displayValue: "Enter card or account digits"),
+                RuleCondition(field: .smsSender, value: "", displayValue: "Enter bank phone number"),
+                RuleCondition(field: .accountID, value: "", displayValue: "Choose account"),
+                RuleCondition(field: .amount, value: "", displayValue: "Enter exact amount"),
+                RuleCondition(field: .note, value: "", displayValue: "Enter note text")
+            ]
+            selectedFields = [.originalSMS]
+            originalSMSMatchMode = .contains
+            originalSMSText = ""
+            enableSetCategory = true
+            selectedCategory = .other
+            isEnabled = true
+        }
+    }
+
+    private func manualPlaceholder(for field: RuleConditionField) -> String {
+        switch field {
+        case .originalSMS:   return "Paste SMS text or keyword"
+        case .merchant:      return "e.g. Talabat, Batelco, Lulu"
+        case .recipientIBAN: return "Last digits, e.g. 7878"
+        case .accountDigits: return "Last digits, e.g. 9001"
+        case .smsSender:     return "e.g. 17515151"
+        case .amount:        return "e.g. 3.000"
+        case .note:          return "Note text to match"
+        default:             return "Enter value"
         }
     }
 
@@ -644,6 +757,45 @@ struct TransactionRuleBuilderSheet: View {
 
     private func buildRule() -> TransactionRule {
         var chosenConditions = selectedConditionsList
+
+        // Synchronize Original SMS match mode and text
+        for idx in chosenConditions.indices where chosenConditions[idx].field == .originalSMS {
+            chosenConditions[idx].smsMatchMode = originalSMSMatchMode
+            let trimmed = originalSMSText.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                chosenConditions[idx].value = trimmed
+            }
+            if originalSMSMatchMode == .contains {
+                chosenConditions[idx].displayValue = "Contains \"\(chosenConditions[idx].value)\""
+            } else {
+                chosenConditions[idx].displayValue = "Exact SMS (ignores date, time, ref & balance)"
+            }
+        }
+
+        // Synchronize manual condition values when creating a rule from scratch in Settings
+        if isManualCreation {
+            let cur = UserDefaults.standard.string(forKey: Keys.currency) ?? "BHD"
+            for idx in chosenConditions.indices where chosenConditions[idx].field != .originalSMS {
+                let field = chosenConditions[idx].field
+                if field == .accountID, let accID = manualAccountConditionID {
+                    chosenConditions[idx].value = accID.uuidString
+                    chosenConditions[idx].displayValue = accounts.first(where: { $0.id == accID })?.name ?? "Account"
+                } else {
+                    let raw = (manualConditionValues[field] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                    if field == .amount, let parsed = Money.parse(raw), parsed > 0 {
+                        chosenConditions[idx].value = String(format: "%.3f", parsed)
+                        chosenConditions[idx].displayValue = Money.format(parsed, cur)
+                    } else if field == .recipientIBAN || field == .accountDigits {
+                        let digits = raw.replacingOccurrences(of: "*", with: "")
+                        chosenConditions[idx].value = digits
+                        chosenConditions[idx].displayValue = digits.isEmpty ? "" : "**\(digits)"
+                    } else {
+                        chosenConditions[idx].value = raw
+                        chosenConditions[idx].displayValue = raw
+                    }
+                }
+            }
+        }
 
         // Synchronize custom radius and display for location condition
         for idx in chosenConditions.indices where chosenConditions[idx].field == .location {
@@ -675,7 +827,7 @@ struct TransactionRuleBuilderSheet: View {
             fromAccountID: (effectiveCat == .internalTransfer || effectiveCat == .transfers) ? fromAccountID : nil,
             toAccountID: (effectiveCat == .internalTransfer) ? toAccountID : nil,
             setMerchant: enableSetMerchant && !actionMerchant.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? actionMerchant.trimmingCharacters(in: .whitespacesAndNewlines) : nil,
-            setBank: enableSetBank && !actionBank.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? actionBank.trimmingCharacters(in: .whitespacesAndNewlines) : nil,
+            setBank: nil,
             setLocationName: effectiveLocationName,
             setLocationAddress: enableSetLocation ? actionLocationAddress : nil,
             setLatitude: enableSetLocation ? actionLatitude : nil,
@@ -729,7 +881,7 @@ struct TransactionRuleBuilderSheet: View {
             savedRule = store.addRule(candidate)
         }
 
-        if applyToExisting {
+        if applyToExisting && savedRule.isEnabled {
             let affected = computeAffectedTransactions()
             if !affected.isEmpty {
                 let priority = store.priorityNumber(for: savedRule.id) ?? 1
@@ -870,18 +1022,20 @@ struct TransactionRuleBuilderSheet: View {
             Divider()
 
             Button {
+                guard isEnabled else { return }
                 applyToExisting.toggle()
             } label: {
                 HStack {
                     Text("Apply to \(affectedCount) existing transaction\(affectedCount == 1 ? "" : "s")")
                         .font(.subheadline)
-                        .foregroundStyle(Theme.ink)
+                        .foregroundStyle(isEnabled ? Theme.ink : Theme.secondaryInk)
                     Spacer()
+                    let checked = applyToExisting && isEnabled
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(applyToExisting ? Theme.cobalt : Color.clear)
+                        .fill(checked ? Theme.cobalt : Color.clear)
                         .frame(width: 22, height: 22)
                         .overlay {
-                            if applyToExisting {
+                            if checked {
                                 Image(systemName: "checkmark")
                                     .font(.caption.weight(.bold))
                                     .foregroundStyle(.white)
@@ -892,8 +1046,10 @@ struct TransactionRuleBuilderSheet: View {
                         }
                 }
                 .contentShape(Rectangle())
+                .opacity(isEnabled ? 1 : 0.45)
             }
             .buttonStyle(.plain)
+            .disabled(!isEnabled)
 
             Button {
                 attemptSave()
@@ -1111,6 +1267,15 @@ struct TransactionRuleRowCard: View {
 
                 Spacer(minLength: 8)
 
+                if !rule.isEnabled {
+                    Text("Off")
+                        .font(.caption2.weight(.bold))
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(Theme.track, in: Capsule())
+                        .foregroundStyle(Theme.secondaryInk)
+                }
+
                 if showControls {
                     Toggle("", isOn: Binding(
                         get: { rule.isEnabled },
@@ -1199,6 +1364,7 @@ struct TransactionRuleRowCard: View {
 struct TransactionRulesListView: View {
     @Query(sort: \Account.createdAt) private var accounts: [Account]
     @State private var editingRule: TransactionRule?
+    @State private var showCreateRule = false
     @State private var confirmDeleteAll = false
 
     private var store: TransactionRuleStore { TransactionRuleStore.shared }
@@ -1207,16 +1373,31 @@ struct TransactionRulesListView: View {
         List {
             if store.rules.isEmpty {
                 Section {
-                    VStack(spacing: 12) {
+                    VStack(spacing: 14) {
                         Image(systemName: "slider.horizontal.3")
                             .font(.system(size: 34))
                             .foregroundStyle(Theme.brand)
                         Text("No Transaction Rules Yet")
                             .font(.headline)
-                        Text("Open any transaction in the Transactions tab and tap \"Create Rule\" to automatically capture its fields and classify similar future transactions.")
+                        Text("Create a rule here or from any transaction to automatically classify similar future transactions.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
+                        Button {
+                            showCreateRule = true
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: "plus.circle.fill")
+                                Text("Create Rule")
+                                    .fontWeight(.semibold)
+                            }
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 18)
+                            .padding(.vertical, 10)
+                            .background(Theme.brand, in: Capsule())
+                        }
+                        .buttonStyle(PressableStyle())
+                        .padding(.top, 4)
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 28)
@@ -1283,11 +1464,20 @@ struct TransactionRulesListView: View {
         .navigationTitle("Transaction Rules")
         .navigationBarTitleDisplayMode(.large)
         .toolbar {
-            if !store.rules.isEmpty {
-                ToolbarItem(placement: .topBarTrailing) {
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                if !store.rules.isEmpty {
                     EditButton()
                 }
+                Button {
+                    showCreateRule = true
+                } label: {
+                    Image(systemName: "plus")
+                }
+                .accessibilityLabel("Create rule")
             }
+        }
+        .sheet(isPresented: $showCreateRule) {
+            TransactionRuleBuilderSheet(sourceTransaction: nil, existingRule: nil)
         }
         .sheet(item: $editingRule) { rule in
             TransactionRuleBuilderSheet(sourceTransaction: nil, existingRule: rule)

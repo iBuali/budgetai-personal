@@ -35,6 +35,9 @@ enum Ledger {
         if !tx.isIncome && (tx.source == .sms || tx.source == .manual) {
             _ = matchAndPayBillFromSMS(tx, context: context)
         }
+        if !tx.isIncome && (tx.source == .sms || tx.source == .manual || tx.source == .transfer) {
+            _ = matchAndApplyLoanInstallment(for: tx, context: context)
+        }
         recordSnapshot(context: context)
         try? context.save()
         if tx.category == .visaTransfer { refreshCardReminders(context: context) }
@@ -61,6 +64,7 @@ enum Ledger {
         if tx.isSpending { result.alerts = checkBudgetAlerts(for: tx.category, context: context) }
         if !tx.isIncome {
             _ = matchAndPayBillFromSMS(tx, context: context)
+            _ = matchAndApplyLoanInstallment(for: tx, context: context)
         }
         recordSnapshot(context: context)
         try? context.save()
@@ -82,6 +86,16 @@ enum Ledger {
             }
             if tx.toBalanceAdjustment != 0, let toId = tx.toAccountID, let toAccount = account(toId, context: context) {
                 toAccount.balance -= tx.toBalanceAdjustment
+            }
+            // If this transaction was the recorded installment for a loan, reverse the loan payment state
+            let loans = ((try? context.fetch(FetchDescriptor<Account>())) ?? []).filter { $0.kind == .loan && $0.lastLoanInstallmentTxID == tx.id }
+            for loan in loans {
+                if tx.toAccountID != loan.id {
+                    loan.balance += tx.amount
+                }
+                loan.lastLoanInstallmentPaidAt = nil
+                loan.lastLoanInstallmentTxID = nil
+                loan.lastLoanInstallmentWasAuto = false
             }
         }
         context.delete(tx)
@@ -567,6 +581,130 @@ enum Ledger {
         SubscriptionMatchingEngine.matchAndApply(tx: tx, context: context)
     }
 
+    // MARK: - Loan Installment Matching & Scheduled Auto-Deduction
+
+    /// Matches an incoming SMS or manual transaction against Loan accounts using loan keywords/numbers
+    /// (or explicit `toAccountID == loan.id`). Marks the loan installment paid for the current cycle
+    /// and deduplicates against any automatic date-based installment so it is never deducted twice.
+    @discardableResult
+    static func matchAndApplyLoanInstallment(for tx: MoneyTransaction, context: ModelContext) -> Account? {
+        guard !tx.isIncome, !tx.isPending, tx.amount > 0 else { return nil }
+        let loans = ((try? context.fetch(FetchDescriptor<Account>())) ?? []).filter { $0.kind == .loan && $0.balance > 0.0005 }
+        guard !loans.isEmpty else { return nil }
+
+        let merchantLower = tx.merchant.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let rawLower = (tx.rawText ?? "").lowercased()
+        let refLower = (tx.smsReference ?? "").lowercased()
+        let suffixLower = (tx.smsAccountSuffix ?? "").lowercased()
+
+        let matchedLoan: Account? = loans.first { loan in
+            if tx.toAccountID == loan.id { return true }
+            let keywords = loan.loanKeywords
+            guard !keywords.isEmpty else { return false }
+            let keywordHit = keywords.contains { kw in
+                let k = kw.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !k.isEmpty else { return false }
+                return merchantLower.contains(k) || rawLower.contains(k) || refLower.contains(k) || suffixLower.contains(k)
+            }
+            guard keywordHit else { return false }
+            if loan.loanMonthlyInstallment > 0 {
+                let diff = abs(tx.amount - loan.loanMonthlyInstallment)
+                let maxAllowed = max(5.0, loan.loanMonthlyInstallment * 0.25)
+                return diff <= maxAllowed
+            }
+            return true
+        }
+
+        guard let loan = matchedLoan else { return nil }
+
+        // Deduplication: if this cycle was already paid...
+        if loan.isLoanInstallmentPaidForCurrentCycle(now: tx.date) {
+            if loan.lastLoanInstallmentWasAuto,
+               let autoTxID = loan.lastLoanInstallmentTxID,
+               autoTxID != tx.id {
+                // Replace the earlier automatic date-based installment with this real SMS/manual transaction
+                // so the installment is NEVER deducted twice!
+                let desc = FetchDescriptor<MoneyTransaction>(predicate: #Predicate { $0.id == autoTxID })
+                if let autoTx = try? context.fetch(desc).first {
+                    delete(autoTx, context: context)
+                }
+            } else {
+                // Already paid via SMS or manual payment in this cycle -> do not deduct a second time
+                return loan
+            }
+        }
+
+        if tx.toAccountID != loan.id {
+            loan.balance = max(0, loan.balance - tx.amount)
+        }
+        loan.lastLoanInstallmentPaidAt = tx.date
+        loan.lastLoanInstallmentTxID = tx.id
+        loan.lastLoanInstallmentWasAuto = false
+        loan.advanceDueDateIfPaid(on: tx.date, paymentAmount: tx.amount)
+        try? context.save()
+        refreshCardReminders(context: context)
+        return loan
+    }
+
+    /// Processes all Loan accounts with `loanAutoDeduct == true`.
+    /// When today is on or after the chosen installment date for the current cycle and no installment
+    /// has been paid yet (via SMS or manual transaction), records the installment once and marks it paid.
+    @discardableResult
+    static func processScheduledLoanInstallments(context: ModelContext, now: Date = .now) -> [Account] {
+        let loans = ((try? context.fetch(FetchDescriptor<Account>())) ?? []).filter {
+            $0.kind == .loan && $0.loanAutoDeduct && $0.loanMonthlyInstallment > 0 && $0.balance > 0.0005
+        }
+        guard !loans.isEmpty else { return [] }
+
+        let cal = Calendar.current
+        let today = cal.startOfDay(for: now)
+        var processed: [Account] = []
+
+        for loan in loans {
+            // Never double-deduct if already paid this cycle (e.g. via SMS or previous auto-deduct)
+            if loan.isLoanInstallmentPaidForCurrentCycle(now: now) { continue }
+
+            // Check if the chosen installment day for this month has arrived
+            let anchorDay = cal.component(.day, from: loan.paymentDueDate)
+            let maxDay = cal.range(of: .day, in: .month, for: today)?.upperBound.advanced(by: -1) ?? 28
+            var comps = cal.dateComponents([.year, .month], from: today)
+            comps.day = min(max(1, anchorDay), maxDay)
+            let scheduledThisMonth = cal.date(from: comps) ?? today
+            guard today >= scheduledThisMonth || today >= cal.startOfDay(for: loan.paymentDueDate) else { continue }
+
+            let payment = min(loan.balance, loan.loanMonthlyInstallment)
+            guard payment > 0.0005 else { continue }
+
+            let tx = MoneyTransaction(
+                amount: payment,
+                isIncome: false,
+                merchant: "\(loan.name) Installment",
+                category: .bills,
+                date: now,
+                note: "Automatic monthly loan installment",
+                source: .bill,
+                accountID: loan.loanAutoDeductAccountID
+            )
+            // Pre-mark loan state before inserting so no re-entrant matching occurs
+            loan.balance = max(0, loan.balance - payment)
+            loan.lastLoanInstallmentPaidAt = now
+            loan.lastLoanInstallmentTxID = tx.id
+            loan.lastLoanInstallmentWasAuto = true
+            loan.advanceDueDateIfPaid(on: now, paymentAmount: payment)
+
+            add(tx, context: context, checkDuplicates: false)
+            processed.append(loan)
+        }
+
+        if !processed.isEmpty {
+            recordSnapshot(context: context)
+            try? context.save()
+            refreshCardReminders(context: context)
+            notifyDataChanged()
+        }
+        return processed
+    }
+
     static func contribute(to goal: SavingsGoal, amount: Double, fromAccountID: UUID?, context: ModelContext) {
         if let fromAccountID {
             let tx = MoneyTransaction(amount: amount, isIncome: false, merchant: "Saved to \(goal.name)",
@@ -617,6 +755,8 @@ enum Ledger {
         try? context.delete(model: CustomCategory.self)
         try? context.save()
         TransactionRuleStore.shared.deleteAll()
+        Categorizer.UserCategoryLearningStore.shared.clearAll()
+        SubscriptionLearningStore.shared.clearAll()
         CategoryRegistry.shared.reload(context: context)
         Notifier.rescheduleBills([])
         notifyDataChanged()

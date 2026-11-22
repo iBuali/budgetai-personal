@@ -26,7 +26,22 @@ enum RuleConditionLogic: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+enum RuleSMSMatchMode: String, Codable, CaseIterable, Identifiable, Hashable {
+    case contains = "contains"
+    case exactTemplate = "exact"
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .contains:      return "Contains"
+        case .exactTemplate: return "Exactly match"
+        }
+    }
+}
+
 enum RuleConditionField: String, Codable, CaseIterable, Identifiable {
+    case originalSMS     = "originalSMS"
     case merchant        = "merchant"
     case recipientIBAN   = "recipientIBAN"
     case accountDigits   = "accountDigits"
@@ -43,11 +58,12 @@ enum RuleConditionField: String, Codable, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
+        case .originalSMS:   return "Original SMS"
         case .merchant:      return "Merchant / Recipient"
         case .recipientIBAN: return "IBAN / Recipient Digits"
         case .accountDigits: return "Card / Account Digits"
         case .bank:          return "SMS Bank"
-        case .smsSender:     return "SMS Sender"
+        case .smsSender:     return "Phone Number"
         case .accountID:     return "Account"
         case .location:      return "Location"
         case .amount:        return "Amount"
@@ -59,11 +75,12 @@ enum RuleConditionField: String, Codable, CaseIterable, Identifiable {
 
     var symbol: String {
         switch self {
+        case .originalSMS:   return "text.quote"
         case .merchant:      return "storefront.fill"
         case .recipientIBAN: return "number.square.fill"
         case .accountDigits: return "creditcard.fill"
         case .bank:          return "building.columns.fill"
-        case .smsSender:     return "bubble.left.and.bubble.right.fill"
+        case .smsSender:     return "phone.fill"
         case .accountID:     return "wallet.bifold.fill"
         case .location:      return "mappin.and.ellipse"
         case .amount:        return "banknote.fill"
@@ -87,6 +104,8 @@ struct RuleCondition: Codable, Hashable, Identifiable {
     var longitude: Double?
     /// Radius in meters for coordinate-based matching. Default is 15 meters.
     var radiusMeters: Double = 15.0
+    /// Optional match mode for `.originalSMS` (`contains` or `exactTemplate`).
+    var smsMatchMode: RuleSMSMatchMode? = nil
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -96,6 +115,7 @@ struct RuleCondition: Codable, Hashable, Identifiable {
         case latitude
         case longitude
         case radiusMeters
+        case smsMatchMode
     }
 
     init(
@@ -105,7 +125,8 @@ struct RuleCondition: Codable, Hashable, Identifiable {
         displayValue: String,
         latitude: Double? = nil,
         longitude: Double? = nil,
-        radiusMeters: Double = 15.0
+        radiusMeters: Double = 15.0,
+        smsMatchMode: RuleSMSMatchMode? = nil
     ) {
         self.id = id
         self.field = field
@@ -114,6 +135,7 @@ struct RuleCondition: Codable, Hashable, Identifiable {
         self.latitude = latitude
         self.longitude = longitude
         self.radiusMeters = radiusMeters
+        self.smsMatchMode = smsMatchMode
     }
 
     init(from decoder: Decoder) throws {
@@ -125,6 +147,7 @@ struct RuleCondition: Codable, Hashable, Identifiable {
         self.latitude = try container.decodeIfPresent(Double.self, forKey: .latitude)
         self.longitude = try container.decodeIfPresent(Double.self, forKey: .longitude)
         self.radiusMeters = try container.decodeIfPresent(Double.self, forKey: .radiusMeters) ?? 15.0
+        self.smsMatchMode = try container.decodeIfPresent(RuleSMSMatchMode.self, forKey: .smsMatchMode)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -138,6 +161,7 @@ struct RuleCondition: Codable, Hashable, Identifiable {
         if radiusMeters != 15.0 || latitude != nil {
             try container.encode(radiusMeters, forKey: .radiusMeters)
         }
+        try container.encodeIfPresent(smsMatchMode, forKey: .smsMatchMode)
     }
 }
 
@@ -317,6 +341,13 @@ struct TransactionRule: Codable, Hashable, Identifiable {
                 if cond.field == .location, let lat = cond.latitude, let lon = cond.longitude {
                     return "location=geo:\(String(format: "%.4f,%.4f,%.0fm", lat, lon, cond.radiusMeters))"
                 }
+                if cond.field == .originalSMS {
+                    let mode = (cond.smsMatchMode ?? .contains).rawValue
+                    let val = cond.smsMatchMode == .exactTemplate
+                        ? TransactionRuleStore.normalizeOriginalSMSForExactMatch(cond.value)
+                        : cond.value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                    return "originalSMS:\(mode)=\(val)"
+                }
                 return "\(cond.field.rawValue)=\(cond.value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())"
             }
             .sorted()
@@ -426,6 +457,21 @@ final class TransactionRuleStore {
     /// Automatically captures all non-empty fields available in the selected transaction.
     static func captureAvailableConditions(from tx: MoneyTransaction, accounts: [Account]) -> [RuleCondition] {
         var captured: [RuleCondition] = []
+
+        // 1. Original SMS (first option)
+        if let raw = tx.rawText?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty {
+            let primarySMS = raw.components(separatedBy: "\n\n---\n\n").first?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? raw
+            if !primarySMS.isEmpty {
+                captured.append(RuleCondition(
+                    field: .originalSMS,
+                    value: primarySMS,
+                    displayValue: primarySMS,
+                    smsMatchMode: .contains
+                ))
+            }
+        }
+
         let cleanMerchant = tx.merchant.trimmingCharacters(in: .whitespacesAndNewlines)
         if !cleanMerchant.isEmpty {
             captured.append(RuleCondition(
@@ -448,14 +494,6 @@ final class TransactionRuleStore {
                 field: .accountDigits,
                 value: acctDigits,
                 displayValue: "**\(acctDigits)"
-            ))
-        }
-
-        if let bank = tx.smsBank?.trimmingCharacters(in: .whitespacesAndNewlines), !bank.isEmpty {
-            captured.append(RuleCondition(
-                field: .bank,
-                value: bank,
-                displayValue: bank
             ))
         }
 
@@ -503,20 +541,6 @@ final class TransactionRuleStore {
                 field: .amount,
                 value: String(format: "%.3f", tx.amount),
                 displayValue: Money.format(tx.amount, cur)
-            ))
-        }
-
-        captured.append(RuleCondition(
-            field: .direction,
-            value: tx.isIncome ? "in" : "out",
-            displayValue: tx.isIncome ? "Money In (Income / Credit)" : "Money Out (Expense / Debit)"
-        ))
-
-        if let ref = tx.smsReference?.trimmingCharacters(in: .whitespacesAndNewlines), !ref.isEmpty {
-            captured.append(RuleCondition(
-                field: .reference,
-                value: ref,
-                displayValue: ref
             ))
         }
 
@@ -658,6 +682,29 @@ final class TransactionRuleStore {
         firstMatchingRule(for: RuleEvaluationContext(from: tx))
     }
 
+    /// Returns true if `tx` was previously classified by a Transaction Rule that is currently switched OFF.
+    /// Prevents `Categorizer.learnedMatch` from re-applying a disabled rule's category to future transactions.
+    func wasClassifiedByDisabledRule(_ tx: MoneyTransaction) -> Bool {
+        let disabledRules = rules.filter { !$0.isEnabled }
+        guard !disabledRules.isEmpty else { return false }
+        let reason = tx.smsClassificationReason.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !reason.isEmpty else { return false }
+
+        for rule in disabledRules {
+            let cleanName = rule.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !cleanName.isEmpty && (reason == "Matched: \(cleanName)" || reason.contains("(\(cleanName))")) {
+                return true
+            }
+        }
+        if reason.hasPrefix("Matched:") || reason.hasPrefix("Matched Rule") {
+            let ctx = RuleEvaluationContext(from: tx)
+            if disabledRules.contains(where: { matches(rule: $0, context: ctx, ignoreEnabledState: true) }) {
+                return true
+            }
+        }
+        return false
+    }
+
     func matches(rule: TransactionRule, context: RuleEvaluationContext, ignoreEnabledState: Bool = false) -> Bool {
         if !ignoreEnabledState && !rule.isEnabled { return false }
         guard !rule.conditions.isEmpty else { return false }
@@ -677,6 +724,21 @@ final class TransactionRuleStore {
         let rawLower = (context.rawText ?? "").lowercased()
 
         switch condition.field {
+        case .originalSMS:
+            guard !rawLower.isEmpty else { return false }
+            let mode = condition.smsMatchMode ?? .contains
+            switch mode {
+            case .contains:
+                return rawLower.contains(targetLower)
+            case .exactTemplate:
+                let normTarget = Self.normalizeOriginalSMSForExactMatch(target)
+                guard !normTarget.isEmpty else { return false }
+                let rawParts = (context.rawText ?? "").components(separatedBy: "\n\n---\n\n")
+                return rawParts.contains { part in
+                    Self.normalizeOriginalSMSForExactMatch(part) == normTarget
+                }
+            }
+
         case .merchant:
             let m = context.merchant.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             if !m.isEmpty && (m == targetLower || m.contains(targetLower) || targetLower.contains(m)) {
@@ -851,6 +913,46 @@ final class TransactionRuleStore {
         tx.smsConfidence = .high
         tx.smsClassificationReason = "Matched: \(rule.name)"
         tx.aiCategorized = false
+    }
+
+    /// Normalizes an SMS message for "Exactly match" comparisons by masking dynamic fields
+    /// that change on every alert: balances, reference codes, dates, and times.
+    static func normalizeOriginalSMSForExactMatch(_ sms: String) -> String {
+        // Convert Arabic-Indic / Persian digits to ASCII digits first
+        let digitMap: [Character: Character] = [
+            "٠": "0", "١": "1", "٢": "2", "٣": "3", "٤": "4",
+            "٥": "5", "٦": "6", "٧": "7", "٨": "8", "٩": "9",
+            "۰": "0", "۱": "1", "۲": "2", "۳": "3", "۴": "4",
+            "۵": "5", "۶": "6", "۷": "7", "۸": "8", "۹": "9"
+        ]
+        var s = String(sms.map { digitMap[$0] ?? $0 })
+            .lowercased()
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let replacements: [(pattern: String, token: String)] = [
+            // 1. Balance clauses (English & Arabic)
+            ("(?i)\\b(?:available\\s+balance|avail(?:able)?\\s+bal\\.?|avl\\.?\\s*bal\\.?|new\\s+balance|curr(?:ent)?\\s+bal(?:ance)?|bal(?:ance)?)\\s*(?:is|:)?\\s*(?:bhd|bd|usd|eur|gbp|sar|aed|kwd|qar|omr)?\\s*[0-9][0-9,]*(?:\\.[0-9]+)?\\s*(?:bhd|bd|usd|eur|gbp|sar|aed|kwd|qar|omr)?", "<BALANCE>"),
+            ("(?:الرصيد\\s+المتاح|رصيدك\\s+المتاح|الرصيد\\s+الحالي|الرصيد)\\s*[:\\-]?\\s*[0-9][0-9,]*(?:\\.[0-9]+)?\\s*(?:د\\.ب|دب|ب\\.د|bhd|bd)?", "<BALANCE>"),
+            // 2. Reference codes / transaction IDs (English & Arabic)
+            ("(?i)\\b(?:ref(?:erence)?\\s*(?:no\\.?|number|id)?|txn\\s*id|trans(?:action)?\\s*id|rrn|auth\\s*(?:code)?)\\s*[:\\.#\\-]?\\s*[a-z0-9\\-]{4,32}", "<REF>"),
+            ("(?:رقم\\s+المرجع|المرجع)\\s*[:\\-]?\\s*[a-z0-9\\-]{4,32}", "<REF>"),
+            // 3. Dates (YYYY/MM/DD, DD/MM/YYYY, DD-MM-YY, DD Mon YYYY, DD-Mon, DD/MM)
+            ("\\b\\d{4}[/\\-]\\d{1,2}[/\\-]\\d{1,2}\\b", "<DATE>"),
+            ("\\b\\d{1,2}[/\\-]\\d{1,2}[/\\-]\\d{2,4}\\b", "<DATE>"),
+            ("(?i)\\b\\d{1,2}[\\s\\-]+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*(?:[\\s,\\-]+\\d{2,4})?\\b", "<DATE>"),
+            ("\\b\\d{1,2}/\\d{1,2}\\b", "<DATE>"),
+            // 4. Times (HH:MM:SS, HH:MM AM/PM, HH:MM)
+            ("(?i)\\b\\d{1,2}:\\d{2}(?::\\d{2})?(?:\\s*(?:am|pm))?\\b", "<TIME>")
+        ]
+
+        for (pattern, token) in replacements {
+            s = s.replacingOccurrences(of: pattern, with: token, options: .regularExpression)
+        }
+
+        s = s.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return s
     }
 
     // MARK: - Distance Calculation Helper

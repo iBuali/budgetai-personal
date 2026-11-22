@@ -123,7 +123,18 @@ struct NetWorthView: View {
                                     .padding(.vertical, 3)
                                     .background(Theme.track, in: Capsule())
                             }
-                            if account.kind.isLiability {
+                            if account.kind == .loan && account.isLoanInstallmentPaidForCurrentCycle() {
+                                HStack(spacing: 3) {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .font(.system(size: 10, weight: .bold))
+                                    Text("Paid this month")
+                                        .font(.caption2.weight(.semibold))
+                                }
+                                .foregroundStyle(Theme.positive)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2.5)
+                                .background(Theme.positive.opacity(0.14), in: Capsule())
+                            } else if account.kind.isLiability {
                                 dueBadge(for: account)
                             }
                         }
@@ -251,6 +262,7 @@ struct AccountEditor: View {
     let account: Account?
     @Environment(\.modelContext) private var context
     @Environment(\.dismiss) private var dismiss
+    @Query(sort: \Account.createdAt) private var allAccounts: [Account]
     @AppStorage(Keys.currency) private var currency = "BHD"
     @State private var name = ""
     @State private var kind: AccountKind = .bank
@@ -259,6 +271,9 @@ struct AccountEditor: View {
     @State private var creditLimitText = ""
     @State private var loanTotalAmountText = ""
     @State private var loanMonthlyInstallmentText = ""
+    @State private var loanKeywordsText = ""
+    @State private var loanAutoDeduct = false
+    @State private var loanAutoDeductAccountID: UUID? = nil
     @State private var emoji = ""
     @State private var smsMatch = ""
     @State private var includeInNetWorth = true
@@ -375,7 +390,7 @@ struct AccountEditor: View {
                     } else if kind == .creditCard {
                         Text("Used balance updates automatically from linked Visa transactions and payments. Subtracted from net worth.")
                     } else if kind == .loan {
-                        Text("Remaining balance updates automatically from recorded loan payments. Only the monthly installment is subtracted from net worth.")
+                        Text("Loan installments are not deducted from net worth directly before the installment transaction is received via SMS, manual entry, or automatic deduction.")
                     } else {
                         Text("Counts toward your assets, net worth, and Spendable balance in Safe to Spend.")
                     }
@@ -395,9 +410,38 @@ struct AccountEditor: View {
                         Text(kind == .creditCard ? "Bank SMS messages mentioning this card number or its last digits will be routed to this credit card automatically." : "Bank messages mentioning these IBAN, account, or card digits are filed to this account automatically. Separate multiple numbers with a comma (e.g. 3876, 4821).")
                     }
                 }
+                if kind == .loan {
+                    Section {
+                        TextField("Loan number or SMS keywords, e.g. 400001377387, Murabaha", text: $loanKeywordsText)
+                            .autocorrectionDisabled()
+                    } header: {
+                        Text("Loan keyword / number in SMS")
+                    } footer: {
+                        Text("Incoming bank SMS containing this loan number or keyword will automatically match this loan, reduce its remaining balance, and mark this month's installment as paid.")
+                    }
+                }
                 if kind.isLiability {
                     Section {
-                        DatePicker("Payment due date", selection: $paymentDueDate, displayedComponents: .date)
+                        DatePicker(kind == .loan ? "Installment due date" : "Payment due date", selection: $paymentDueDate, displayedComponents: .date)
+                        if kind == .loan {
+                            Toggle(isOn: $loanAutoDeduct.animation(.snappy)) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Label("Auto-add installment on due date", systemImage: "calendar.badge.checkmark")
+                                    Text("Record monthly installment even without SMS")
+                                        .font(.caption2)
+                                        .foregroundStyle(Theme.secondaryInk)
+                                }
+                            }
+                            if loanAutoDeduct {
+                                let liquidAccounts = allAccounts.filter { $0.kind.isLiquid }
+                                Picker("Deduct from account", selection: $loanAutoDeductAccountID) {
+                                    Text("None (loan balance only)").tag(UUID?.none)
+                                    ForEach(liquidAccounts) { acc in
+                                        Text(acc.name).tag(UUID?.some(acc.id))
+                                    }
+                                }
+                            }
+                        }
                         Toggle(isOn: $paymentDueReminder.animation(.snappy)) {
                             Label("Payment due reminder", systemImage: "bell.badge.fill")
                         }
@@ -413,11 +457,15 @@ struct AccountEditor: View {
                             }
                         }
                     } header: {
-                        Text(kind == .loan ? "Loan payment reminder" : "Visa payment reminder")
+                        Text(kind == .loan ? "Loan installment schedule" : "Visa payment reminder")
                     } footer: {
-                        Text(paymentDueReminder
-                             ? "You'll get a notification at 9:00 AM \(reminderDaysBefore == 0 ? "on the due date" : "\(reminderDaysBefore) day\(reminderDaysBefore == 1 ? "" : "s") before it and again on the due date") every month."
-                             : "Turn on to get a monthly reminder before your \(kind == .loan ? "loan installment" : "card payment") is due.")
+                        if kind == .loan && loanAutoDeduct {
+                            Text("Automatically records the monthly installment on the chosen date if no bank SMS has arrived. If an SMS arrives before or after, it will never be deducted twice.")
+                        } else {
+                            Text(paymentDueReminder
+                                 ? "You'll get a notification at 9:00 AM \(reminderDaysBefore == 0 ? "on the due date" : "\(reminderDaysBefore) day\(reminderDaysBefore == 1 ? "" : "s") before it and again on the due date") every month."
+                                 : "Turn on to get a monthly reminder before your \(kind == .loan ? "loan installment" : "card payment") is due.")
+                        }
                     }
                 }
                 if let account {
@@ -465,6 +513,9 @@ struct AccountEditor: View {
                 if account.loanMonthlyInstallment > 0 {
                     loanMonthlyInstallmentText = Money.number(account.loanMonthlyInstallment, decimals: decimals).replacingOccurrences(of: ",", with: "")
                 }
+                loanKeywordsText = account.loanKeywordsRaw
+                loanAutoDeduct = account.loanAutoDeduct
+                loanAutoDeductAccountID = account.loanAutoDeductAccountID
             }
         }
     }
@@ -493,6 +544,9 @@ struct AccountEditor: View {
         target.creditLimit = kind == .creditCard ? parsedCreditLimit : 0
         target.loanTotalAmount = kind == .loan ? max(parsedLoanTotal, balance) : 0
         target.loanMonthlyInstallment = kind == .loan ? parsedInstallment : 0
+        target.loanKeywordsRaw = kind == .loan ? loanKeywordsText.trimmingCharacters(in: .whitespacesAndNewlines) : ""
+        target.loanAutoDeduct = kind == .loan && loanAutoDeduct
+        target.loanAutoDeductAccountID = (kind == .loan && loanAutoDeduct) ? loanAutoDeductAccountID : nil
         target.paymentDueReminder = kind.isLiability && paymentDueReminder
         target.paymentDueDate = paymentDueDate
         target.paymentReminderDaysBefore = reminderDaysBefore
@@ -519,6 +573,9 @@ struct AccountEditor: View {
             }
         }
         SMSImporter.reconcileExistingTransactions(context: context)
+        if target.kind == .loan && target.loanAutoDeduct {
+            _ = Ledger.processScheduledLoanInstallments(context: context)
+        }
         Ledger.recordSnapshot(context: context)
         try? context.save()
         let all = (try? context.fetch(FetchDescriptor<Account>())) ?? []

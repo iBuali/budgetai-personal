@@ -686,7 +686,7 @@ enum SMSImporter {
         // unless a user rule, learned history, or AI identifies a specific expense/income category.
         var learnedMerchant = false
         if !p.matchedUserRule && p.transactionType != .internalTransfer && !isCardPayment,
-           let learned = Categorizer.learnedMatch(for: p.merchant, in: context, isIncome: p.isIncome) {
+           let learned = Categorizer.learnedMatch(for: p.merchant, recipientIBAN: p.recipientIBANSuffix, in: context, isIncome: p.isIncome) {
             p.category = learned.category
             if learned.subcategory != nil { p.subcategory = learned.subcategory }
             if learned.category == .transferIn {

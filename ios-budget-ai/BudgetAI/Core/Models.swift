@@ -292,6 +292,18 @@ final class Account {
     var loanTotalAmount: Double = 0
     /// Scheduled monthly installment amount for a loan account.
     var loanMonthlyInstallment: Double = 0
+    /// Comma-separated keywords or loan numbers to match in bank SMS (e.g. "400001377387, Murabaha").
+    var loanKeywordsRaw: String = ""
+    /// Automatically record and deduct the monthly loan installment on the chosen due date even without SMS.
+    var loanAutoDeduct: Bool = false
+    /// Optional source bank/cash account to deduct the automatic monthly loan installment from.
+    var loanAutoDeductAccountID: UUID? = nil
+    /// Timestamp when the current cycle's loan installment was paid (via SMS, manual payment, or auto-deduct).
+    var lastLoanInstallmentPaidAt: Date? = nil
+    /// Transaction ID of the recorded loan installment for the current cycle (prevents double deduction).
+    var lastLoanInstallmentTxID: UUID? = nil
+    /// True if the current cycle's loan installment was created by automatic date-based deduction.
+    var lastLoanInstallmentWasAuto: Bool = false
 
     init(name: String, kind: AccountKind, institution: String = "", balance: Double, emoji: String = "", includeInNetWorth: Bool = true) {
         self.id = UUID()
@@ -419,11 +431,42 @@ final class Account {
         }
     }
 
-    /// Liability amount counted toward Net Worth and Safe to Spend.
-    /// Loans count only their monthly installment (capped at remaining balance) rather than the full remaining loan balance.
+    /// Parsed SMS keywords / loan numbers for matching incoming loan installment SMS.
+    var loanKeywords: [String] {
+        get {
+            let parts = (loanKeywordsRaw + "," + smsMatch)
+                .split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            var seen = Set<String>()
+            return parts.filter { seen.insert($0.lowercased()).inserted }
+        }
+        set {
+            loanKeywordsRaw = newValue.joined(separator: ", ")
+        }
+    }
+
+    /// Returns true if this loan's monthly installment has already been paid for the current cycle.
+    func isLoanInstallmentPaidForCurrentCycle(now: Date = .now) -> Bool {
+        guard kind == .loan, let paidAt = lastLoanInstallmentPaidAt else { return false }
+        return Cycle.interval(containing: now).contains(paidAt)
+    }
+
+    /// Liability amount counted directly toward Net Worth.
+    /// Loans are NOT deducted directly from Net Worth before the installment transaction is received (via SMS, manual payment, or auto-deduct).
     var netWorthLiabilityAmount: Double {
         guard kind.isLiability, balance > 0 else { return 0 }
         if kind == .loan {
+            return 0
+        }
+        return max(0, balance)
+    }
+
+    /// Liability amount reserved in Safe to Spend (unpaid monthly loan installment or credit card balance).
+    func safeToSpendLiabilityAmount(now: Date = .now) -> Double {
+        guard kind.isLiability, balance > 0 else { return 0 }
+        if kind == .loan {
+            if isLoanInstallmentPaidForCurrentCycle(now: now) { return 0 }
             return min(balance, max(0, loanMonthlyInstallment))
         }
         return max(0, balance)

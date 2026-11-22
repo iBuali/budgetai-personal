@@ -93,10 +93,10 @@ struct Finance {
     var netWorth: Double { totalAssets - totalLiabilities }
 
     /// Liability amount deducted in Safe to Spend for an account.
-    /// Loans count only their monthly installment payment rather than the full remaining loan balance.
+    /// Loans reserve their unpaid monthly installment (0 once paid for this cycle).
     func safeToSpendLiability(for account: Account) -> Double {
         guard account.includeInNetWorth else { return 0 }
-        return account.netWorthLiabilityAmount
+        return account.safeToSpendLiabilityAmount(now: now)
     }
 
     var safeToSpendLiabilities: Double {

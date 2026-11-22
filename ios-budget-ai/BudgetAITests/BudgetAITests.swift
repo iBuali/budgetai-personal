@@ -9,6 +9,7 @@ struct BudgetAITests {
 
     private func makeCleanContext() -> ModelContext {
         let context = DataStore.shared.mainContext
+        Categorizer.UserCategoryLearningStore.shared.clearAll()
         let txs = (try? context.fetch(FetchDescriptor<MoneyTransaction>())) ?? []
         for t in txs { context.delete(t) }
         let accs = (try? context.fetch(FetchDescriptor<Account>())) ?? []
@@ -643,9 +644,9 @@ struct BudgetAITests {
         // monthly = max(0, 1000 - 50 - 0 - 0 - 200) = 750.0
         #expect(safe.monthly == 750.0)
         #expect(safe.isShort == false)
-        // Net worth / total liabilities count only the monthly loan installment (200), not full remaining balance (4000)
-        #expect(f.totalLiabilities == 200.0)
-        #expect(f.netWorth == 800.0)
+        // Loans are NOT deducted directly from Net Worth before an installment transaction is received
+        #expect(f.totalLiabilities == 0.0)
+        #expect(f.netWorth == 1000.0)
     }
 
     // MARK: - Financial Time Machine engine
@@ -1407,9 +1408,10 @@ struct BudgetAITests {
 
         // 2. Capture available fields from the selected transaction
         let captured = TransactionRuleStore.captureAvailableConditions(from: sampleTx, accounts: [bisb, ila])
+        #expect(captured.first?.field == .originalSMS)
         #expect(captured.contains(where: { $0.field == .recipientIBAN && $0.value == "0846" }))
-        #expect(captured.contains(where: { $0.field == .bank && $0.value == "BisB" }))
         #expect(captured.contains(where: { $0.field == .smsSender && $0.value == "17515151" }))
+        #expect(!captured.contains(where: { $0.field == .bank || $0.field == .direction || $0.field == .reference }))
 
         // 3. Create Rule 1 (External Transfer to IBAN 0846) and Rule 2 (Internal Transfer from BisB to ila)
         let ruleExternal = TransactionRule(
@@ -2876,8 +2878,9 @@ struct BudgetAITests {
         #expect(f.safeToSpendLiability(for: zeroInstallmentLoan) == 0.0)
         #expect(f.safeToSpendLiability(for: cappedLoan) == 90.0)
         #expect(f.safeToSpend.liabilities == 240.0)
-        #expect(f.totalLiabilities == 240.0)
-        #expect(f.netWorth == 1760.0)
+        // Net worth counts credit card owed (150), not unpaid loan installments before payment
+        #expect(f.totalLiabilities == 150.0)
+        #expect(f.netWorth == 1850.0)
     }
 
     @Test func transactionFilterDefaultsToThisCycle() throws {
@@ -3441,13 +3444,17 @@ struct BudgetAITests {
         let almostPaidLoan = Account(name: "Final Loan", kind: .loan, balance: 75.0)
         almostPaidLoan.loanMonthlyInstallment = 150.0
 
-        #expect(carLoan.netWorthLiabilityAmount == 180.0)
-        #expect(almostPaidLoan.netWorthLiabilityAmount == 75.0)
+        // Unpaid loans are not deducted directly from Net Worth before payment, but are reserved in Safe to Spend
+        #expect(carLoan.netWorthLiabilityAmount == 0.0)
+        #expect(almostPaidLoan.netWorthLiabilityAmount == 0.0)
         #expect(card.netWorthLiabilityAmount == 200.0)
+        #expect(carLoan.safeToSpendLiabilityAmount() == 180.0)
+        #expect(almostPaidLoan.safeToSpendLiabilityAmount() == 75.0)
 
         let finance = Finance(transactions: [], accounts: [bank, card, carLoan, almostPaidLoan])
-        #expect(abs(finance.totalLiabilities - 455.0) < 0.0001)
-        #expect(abs(finance.netWorth - 1045.0) < 0.0001)
+        #expect(abs(finance.totalLiabilities - 200.0) < 0.0001)
+        #expect(abs(finance.netWorth - 1300.0) < 0.0001)
+        #expect(abs(finance.safeToSpend.liabilities - 455.0) < 0.0001)
     }
 
     // MARK: - Subscription Matching Engine
@@ -3582,5 +3589,215 @@ struct BudgetAITests {
         context.insert(spotifyTx2)
         _ = SubscriptionMatchingEngine.matchAndApply(tx: spotifyTx2, context: context)
         #expect(spotifyTx2.needsBillReview == false)
+    }
+
+    @Test func disabledRuleStopsMatchingAndDoesNotLeakThroughLearnedHistory() async throws {
+        let context = makeCleanContext()
+        TransactionRuleStore.shared.clearAll()
+        defer { TransactionRuleStore.shared.clearAll() }
+
+        let bisb = Account(name: "BisB", kind: .bank, institution: "BisB", balance: 500.000)
+        bisb.smsMatch = "9001"
+        context.insert(bisb)
+
+        // Create an enabled rule that turns "MYSTERY SHOP" into Dining
+        let rule = TransactionRule(
+            name: "Mystery Shop Dining",
+            isEnabled: true,
+            logic: .and,
+            conditions: [RuleCondition(field: .merchant, value: "MYSTERY SHOP", displayValue: "MYSTERY SHOP")],
+            actions: RuleActions(category: .dining)
+        )
+        TransactionRuleStore.shared.addRule(rule)
+
+        // Prior transaction classified by the rule while it was enabled
+        let prevTx = MoneyTransaction(amount: 3.000, isIncome: false, merchant: "MYSTERY SHOP", category: .dining, date: .now.addingTimeInterval(-3600), source: .sms, accountID: bisb.id)
+        prevTx.smsClassificationReason = "Matched: Mystery Shop Dining"
+        context.insert(prevTx)
+        try context.save()
+
+        // Switch the rule OFF
+        TransactionRuleStore.shared.setRuleEnabled(id: rule.id, isEnabled: false)
+
+        // Disabled rule must not match directly and must not leak via Categorizer.learnedMatch
+        #expect(TransactionRuleStore.shared.wasClassifiedByDisabledRule(prevTx) == true)
+        #expect(Categorizer.learnedMatch(for: "MYSTERY SHOP", in: context, isIncome: false) == nil)
+    }
+
+    @Test func ibanAndGenericTransferMerchantsDoNotBleedLearnedCategoriesAcrossDifferentIBANs() async throws {
+        let context = makeCleanContext()
+        TransactionRuleStore.shared.clearAll()
+        defer { TransactionRuleStore.shared.clearAll() }
+
+        let bisb = Account(name: "BisB", kind: .bank, institution: "BisB", balance: 547.460)
+        bisb.smsMatch = "9001"
+        context.insert(bisb)
+
+        // Prior transaction to a DIFFERENT IBAN (1234) categorized as Groceries, plus a generic placeholder
+        let otherIBANTx = MoneyTransaction(amount: 5.000, isIncome: false, merchant: "IBAN ending 1234", category: .groceries, date: .now.addingTimeInterval(-86400), source: .sms, accountID: bisb.id)
+        let genericTx = MoneyTransaction(amount: 4.000, isIncome: false, merchant: "Fawri+ transfer", category: .groceries, date: .now.addingTimeInterval(-43200), source: .sms, accountID: bisb.id)
+        context.insert(otherIBANTx)
+        context.insert(genericTx)
+        try context.save()
+
+        // Different IBAN (7878) and generic placeholder must NOT inherit Groceries
+        #expect(Categorizer.learnedMatch(for: "IBAN ending 7878", in: context, isIncome: false) == nil)
+        #expect(Categorizer.learnedMatch(for: "Fawri+ transfer", in: context, isIncome: false) == nil)
+        // Exact same IBAN (1234) still matches its own learned category
+        #expect(Categorizer.learnedMatch(for: "IBAN ending 1234", in: context, isIncome: false)?.category == .groceries)
+
+        // Importing the exact Fawri+ SMS to IBAN ending 7878 must stay Transfer Out (not Groceries)
+        let sms = "Fawri+ payment BHD3.000, ref: BIB103KB800445aa was credited to IBAN ending 7878 on 2026/11/22 11:11. Balance BHD544.460. Tel: 17515151"
+        let outcome = await SMSImporter.importText(sms, context: context, forceApprove: true)
+        let tx = try #require(outcome.transaction)
+        #expect(tx.category == .transfers)
+        #expect(tx.smsTransactionType == .transferOut)
+        #expect(tx.isTransferOut == true)
+    }
+
+    @Test func originalSMSRuleContainsAndExactTemplateIgnoresDynamicVariables() throws {
+        TransactionRuleStore.shared.clearAll()
+        defer { TransactionRuleStore.shared.clearAll() }
+
+        #expect(RuleConditionField.originalSMS.label == "Original SMS")
+        #expect(RuleConditionField.smsSender.label == "Phone Number")
+
+        let sms1 = "Fawri+ payment BHD3.000, ref: BIB103KB800445aa was credited to IBAN ending 7878 on 2026/11/22 11:11. Balance BHD544.460. Tel: 17515151"
+        let sms2SameTemplate = "Fawri+ payment BHD3.000, ref: BIB999ZZZ111222 was credited to IBAN ending 7878 on 2026/12/05 18:45. Balance BHD912.300. Tel: 17515151"
+        let sms3DifferentIBAN = "Fawri+ payment BHD3.000, ref: BIB999ZZZ111222 was credited to IBAN ending 9999 on 2026/12/05 18:45. Balance BHD912.300. Tel: 17515151"
+
+        // 1. Exact match ignores date, time, reference, and balance
+        let exactRule = TransactionRule(
+            name: "Exact IBAN 7878",
+            isEnabled: true,
+            logic: .and,
+            conditions: [RuleCondition(field: .originalSMS, value: sms1, displayValue: sms1, smsMatchMode: .exactTemplate)],
+            actions: RuleActions(category: .dining)
+        )
+        let tx2 = MoneyTransaction(amount: 3.0, isIncome: false, merchant: "IBAN ending 7878", category: .transfers, date: .now, source: .sms)
+        tx2.rawText = sms2SameTemplate
+        let tx3 = MoneyTransaction(amount: 3.0, isIncome: false, merchant: "IBAN ending 9999", category: .transfers, date: .now, source: .sms)
+        tx3.rawText = sms3DifferentIBAN
+
+        #expect(TransactionRuleStore.shared.matches(rule: exactRule, context: RuleEvaluationContext(from: tx2)) == true)
+        #expect(TransactionRuleStore.shared.matches(rule: exactRule, context: RuleEvaluationContext(from: tx3)) == false)
+
+        // 2. Contains mode matches substring
+        let containsRule = TransactionRule(
+            name: "Contains IBAN 7878",
+            isEnabled: true,
+            logic: .and,
+            conditions: [RuleCondition(field: .originalSMS, value: "credited to IBAN ending 7878", displayValue: "Contains", smsMatchMode: .contains)],
+            actions: RuleActions(category: .groceries)
+        )
+        #expect(TransactionRuleStore.shared.matches(rule: containsRule, context: RuleEvaluationContext(from: tx2)) == true)
+        #expect(TransactionRuleStore.shared.matches(rule: containsRule, context: RuleEvaluationContext(from: tx3)) == false)
+    }
+
+    @Test func userCategoryChoiceLearnsForSameMerchantAndRecipientIBAN() async throws {
+        let context = makeCleanContext()
+        TransactionRuleStore.shared.clearAll()
+        defer {
+            TransactionRuleStore.shared.clearAll()
+            Categorizer.UserCategoryLearningStore.shared.clearAll()
+        }
+
+        let bisb = Account(name: "BisB", kind: .bank, institution: "BisB", balance: 500.000)
+        bisb.smsMatch = "9001"
+        context.insert(bisb)
+        try context.save()
+
+        // 1. User manually changes a transfer to IBAN 7878 to Dining
+        let firstTransfer = MoneyTransaction(amount: 3.000, isIncome: false, merchant: "IBAN ending 7878", category: .dining, date: .now.addingTimeInterval(-3600), source: .sms, accountID: bisb.id)
+        firstTransfer.smsRecipientSuffix = "7878"
+        context.insert(firstTransfer)
+        Categorizer.recordUserCategoryChoice(for: firstTransfer, category: .dining)
+        try context.save()
+
+        // Next SMS to IBAN 7878 automatically learns Dining
+        let smsSameIBAN = "Fawri+ payment BHD4.500, ref: BIB7878NEW001 was credited to IBAN ending 7878 on 2026/11/22 14:00. Balance BHD495.500. Tel: 17515151"
+        let resSameIBAN = await SMSImporter.importText(smsSameIBAN, context: context, forceApprove: true)
+        let txSameIBAN = try #require(resSameIBAN.transaction)
+        #expect(txSameIBAN.category == .dining)
+        #expect(txSameIBAN.smsTransactionType == .expense)
+
+        // Different IBAN (9999) does NOT inherit Dining -> stays Transfer Out
+        let smsOtherIBAN = "Fawri+ payment BHD4.500, ref: BIB9999NEW002 was credited to IBAN ending 9999 on 2026/11/22 14:05. Balance BHD491.000. Tel: 17515151"
+        let resOtherIBAN = await SMSImporter.importText(smsOtherIBAN, context: context, forceApprove: true)
+        let txOtherIBAN = try #require(resOtherIBAN.transaction)
+        #expect(txOtherIBAN.category == .transfers)
+        #expect(txOtherIBAN.smsTransactionType == .transferOut)
+
+        // 2. User manually changes a real merchant to Education -> future SMS from same merchant learns Education
+        let merchantTx = MoneyTransaction(amount: 12.000, isIncome: false, merchant: "AMAKIN STUDIO BH", category: .education, date: .now.addingTimeInterval(-1800), source: .sms, accountID: bisb.id)
+        context.insert(merchantTx)
+        Categorizer.recordUserCategoryChoice(for: merchantTx, category: .education)
+        try context.save()
+
+        let learnedMerchant = Categorizer.learnedMatch(for: "AMAKIN STUDIO MANAMA", in: context, isIncome: false)
+        #expect(learnedMerchant?.category == .education)
+    }
+
+    @Test func loanInstallmentSMSKeywordAutoDeductAndDeduplication() throws {
+        let context = makeCleanContext()
+        let now = Date()
+
+        // Case 1: Auto-deduct runs first on due date, then SMS with loan number arrives later -> NEVER deducts twice
+        let bank1 = Account(name: "BisB", kind: .bank, institution: "BisB", balance: 1000.000)
+        let loan1 = Account(name: "Murabaha Loan", kind: .loan, institution: "BisB", balance: 5000.000)
+        loan1.loanTotalAmount = 6000.000
+        loan1.loanMonthlyInstallment = 167.985
+        loan1.loanKeywordsRaw = "400001377387, Murabaha"
+        loan1.loanAutoDeduct = true
+        loan1.loanAutoDeductAccountID = bank1.id
+        loan1.paymentDueDate = now
+        context.insert(bank1)
+        context.insert(loan1)
+        try context.save()
+
+        // Scheduled auto-deduct fires once
+        let autoProcessed = Ledger.processScheduledLoanInstallments(context: context, now: now)
+        #expect(autoProcessed.count == 1)
+        #expect(loan1.isLoanInstallmentPaidForCurrentCycle(now: now) == true)
+        #expect(loan1.lastLoanInstallmentWasAuto == true)
+        #expect(abs(bank1.balance - (1000.000 - 167.985)) < 0.001)
+        #expect(abs(loan1.balance - (5000.000 - 167.985)) < 0.001)
+
+        // Running scheduler again in the same cycle does nothing
+        #expect(Ledger.processScheduledLoanInstallments(context: context, now: now).isEmpty)
+
+        // Now real bank SMS arrives with loan number 400001377387 -> replaces auto placeholder instead of deducting twice!
+        let smsTx = MoneyTransaction(amount: 167.985, isIncome: false, merchant: "Murabaha 400001377387", category: .bills, date: now, source: .sms, accountID: bank1.id)
+        smsTx.rawText = "Your account debited BHD 167.985 for Murabaha 400001377387"
+        Ledger.add(smsTx, context: context, checkDuplicates: false)
+
+        #expect(loan1.isLoanInstallmentPaidForCurrentCycle(now: now) == true)
+        #expect(loan1.lastLoanInstallmentWasAuto == false)
+        #expect(loan1.lastLoanInstallmentTxID == smsTx.id)
+        #expect(abs(bank1.balance - (1000.000 - 167.985)) < 0.001)
+        #expect(abs(loan1.balance - (5000.000 - 167.985)) < 0.001)
+
+        // Safe to Spend liability for this loan is now 0 since it's paid for this month
+        let f = Finance(transactions: [smsTx], accounts: [bank1, loan1], now: now)
+        #expect(f.safeToSpendLiability(for: loan1) == 0.0)
+
+        // Case 2: SMS arrives FIRST -> scheduled auto-deduct skips completely
+        let bank2 = Account(name: "NBB", kind: .bank, institution: "NBB", balance: 800.000)
+        let loan2 = Account(name: "Car Loan", kind: .loan, institution: "NBB", balance: 3000.000)
+        loan2.loanMonthlyInstallment = 120.000
+        loan2.loanKeywordsRaw = "CARLOAN-9988"
+        loan2.loanAutoDeduct = true
+        loan2.loanAutoDeductAccountID = bank2.id
+        loan2.paymentDueDate = now
+        context.insert(bank2)
+        context.insert(loan2)
+        try context.save()
+
+        let smsFirst = MoneyTransaction(amount: 120.000, isIncome: false, merchant: "CARLOAN-9988", category: .bills, date: now, source: .sms, accountID: bank2.id)
+        Ledger.add(smsFirst, context: context, checkDuplicates: false)
+        #expect(loan2.isLoanInstallmentPaidForCurrentCycle(now: now) == true)
+        #expect(Ledger.processScheduledLoanInstallments(context: context, now: now).isEmpty)
+        #expect(abs(bank2.balance - 680.000) < 0.001)
+        #expect(abs(loan2.balance - 2880.000) < 0.001)
     }
 }

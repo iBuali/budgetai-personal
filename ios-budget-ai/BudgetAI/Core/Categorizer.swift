@@ -186,25 +186,240 @@ enum Categorizer {
         return nil
     }
 
-    /// Learns from the user's past transactions in SwiftData: if this merchant was categorized before,
-    /// reuse that exact category and subcategory.
-    static func learnedMatch(for merchant: String, in context: ModelContext, isIncome: Bool? = nil) -> (category: SpendCategory, subcategory: SpendCategory?)? {
+    /// Generic placeholder labels that describe a payment rail rather than a specific merchant.
+    /// These must never be used for history-based learned category matching.
+    static func isGenericPlaceholderMerchant(_ merchant: String) -> Bool {
+        let lower = merchant.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let generics: Set<String> = [
+            "fawri+ transfer", "fawri transfer", "benefitpay · fawri+ transfer", "benefitpay · fawri transfer",
+            "bank transfer", "transfer", "outgoing transfer", "incoming transfer", "internal transfer",
+            "incoming credit", "card purchase", "pos purchase", "online purchase", "expense", "income",
+            "other transaction", "debit", "credit", "atm withdrawal", "cash withdrawal",
+            "bank fee", "outgoing charges", "transfer out", "transfer in"
+        ]
+        return lower.isEmpty
+            || generics.contains(lower)
+            || lower.hasSuffix(" transfer out")
+            || lower.hasSuffix(" transfer in")
+            || lower.hasSuffix(" (needs review)")
+    }
+
+    /// True when the merchant string identifies a recipient by an IBAN, account, card, or number
+    /// (e.g. "IBAN ending 7878", "Account ending 1234"). Stripping digits via `Finance.merchantKey`
+    /// would collapse completely different recipients into the same key ("iban ending"), so these
+    /// must only match on exact string equality.
+    static func isIdentifierBasedMerchant(_ merchant: String) -> Bool {
+        let lower = merchant.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !lower.isEmpty else { return false }
+        let prefixes = [
+            "iban ", "iban:", "account ", "acct ", "a/c ", "card ",
+            "beneficiary ", "recipient ", "transfer to ", "transfer from ",
+            "to iban", "from iban", "mobile ", "phone "
+        ]
+        if prefixes.contains(where: { lower.hasPrefix($0) }) { return true }
+        if lower.contains("ending ") || lower.contains("****") || lower.contains("••") { return true }
+        let hasDigits = lower.rangeOfCharacter(from: .decimalDigits) != nil
+        if hasDigits {
+            let key = Finance.merchantKey(lower)
+            let genericKeys: Set<String> = [
+                "iban", "iban ending", "account", "account ending", "acct", "card", "card ending",
+                "transfer", "transfer to", "transfer from", "beneficiary", "recipient",
+                "fawri", "fawri transfer", "payment", "mobile", "phone"
+            ]
+            if key.isEmpty || genericKeys.contains(key) { return true }
+        }
+        return false
+    }
+
+    /// Persistent store for explicit user category choices by recipient IBAN or merchant.
+    final class UserCategoryLearningStore: @unchecked Sendable {
+        static let shared = UserCategoryLearningStore()
+
+        struct Entry: Codable, Equatable, Sendable {
+            let categoryRaw: String
+            let subcategoryRaw: String?
+            let isIncome: Bool
+            let updatedAt: Date
+        }
+
+        private let storageKey = "falak_user_category_learning_v1"
+        private let lock = NSLock()
+        private let defaults: UserDefaults
+
+        init(defaults: UserDefaults = .standard) {
+            self.defaults = defaults
+        }
+
+        func record(merchant: String, recipientIBAN: String?, category: SpendCategory, subcategory: SpendCategory? = nil, isIncome: Bool) {
+            // Never learn own-account internal/visa transfers or `.other` as automatic merchant categories
+            guard category != .internalTransfer, category != .visaTransfer, category != .other else { return }
+
+            let entry = Entry(
+                categoryRaw: category.rawValue,
+                subcategoryRaw: subcategory?.rawValue,
+                isIncome: isIncome,
+                updatedAt: Date()
+            )
+
+            lock.lock()
+            defer { lock.unlock() }
+            var map = loadLocked()
+
+            if let cleanIBAN = Self.cleanDigits(recipientIBAN), cleanIBAN.count >= 3 {
+                map["iban:\(cleanIBAN)"] = entry
+            }
+
+            let trimmed = merchant.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.count >= 2 && !Categorizer.isGenericPlaceholderMerchant(trimmed) {
+                let lower = trimmed.lowercased()
+                map["merchant:\(lower)"] = entry
+                if !Categorizer.isIdentifierBasedMerchant(trimmed) {
+                    let key = Finance.merchantKey(trimmed)
+                    if key.count >= 2 {
+                        map["key:\(key)"] = entry
+                    }
+                }
+            }
+
+            saveLocked(map)
+        }
+
+        func match(merchant: String, recipientIBAN: String?, isIncome: Bool? = nil) -> (category: SpendCategory, subcategory: SpendCategory?)? {
+            lock.lock()
+            let map = loadLocked()
+            lock.unlock()
+            guard !map.isEmpty else { return nil }
+
+            func resolve(_ entry: Entry?) -> (category: SpendCategory, subcategory: SpendCategory?)? {
+                guard let entry, let cat = SpendCategory(rawValue: entry.categoryRaw), cat != .other else { return nil }
+                if let isIncome, !cat.isTransferCategory, entry.isIncome != isIncome { return nil }
+                let sub = entry.subcategoryRaw.flatMap(SpendCategory.init(rawValue:))
+                return (cat, sub)
+            }
+
+            // 1. Highest priority: exact recipient IBAN / account suffix
+            if let cleanIBAN = Self.cleanDigits(recipientIBAN), cleanIBAN.count >= 3,
+               let hit = resolve(map["iban:\(cleanIBAN)"]) {
+                return hit
+            }
+
+            // 2. Exact merchant match (skip generic placeholders)
+            let trimmed = merchant.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.count >= 2, !Categorizer.isGenericPlaceholderMerchant(trimmed) else { return nil }
+            let lower = trimmed.lowercased()
+            if let hit = resolve(map["merchant:\(lower)"]) {
+                return hit
+            }
+
+            // 3. Normalized merchant key (only for real merchant names, never IBAN/account/generic strings)
+            if !Categorizer.isIdentifierBasedMerchant(trimmed) {
+                let key = Finance.merchantKey(trimmed)
+                if key.count >= 2, let hit = resolve(map["key:\(key)"]) {
+                    return hit
+                }
+            }
+
+            return nil
+        }
+
+        func clearAll() {
+            lock.lock()
+            defer { lock.unlock() }
+            defaults.removeObject(forKey: storageKey)
+        }
+
+        private static func cleanDigits(_ raw: String?) -> String? {
+            guard let raw else { return nil }
+            let digits = raw.filter(\.isNumber)
+            return digits.isEmpty ? nil : digits
+        }
+
+        private func loadLocked() -> [String: Entry] {
+            guard let data = defaults.data(forKey: storageKey),
+                  let decoded = try? JSONDecoder().decode([String: Entry].self, from: data) else {
+                return [:]
+            }
+            return decoded
+        }
+
+        private func saveLocked(_ map: [String: Entry]) {
+            if let data = try? JSONEncoder().encode(map) {
+                defaults.set(data, forKey: storageKey)
+            }
+        }
+    }
+
+    /// Saves an explicit user category choice so future transactions with the same merchant or recipient IBAN inherit it.
+    static func recordUserCategoryChoice(for tx: MoneyTransaction, category: SpendCategory, subcategory: SpendCategory? = nil) {
+        let inferredIncome = category.isIncomeCategory || category == .transferIn || tx.isIncome
+        UserCategoryLearningStore.shared.record(
+            merchant: tx.merchant,
+            recipientIBAN: tx.smsRecipientSuffix,
+            category: category,
+            subcategory: subcategory,
+            isIncome: inferredIncome
+        )
+    }
+
+    /// Learns from the user's explicit category choices and past transactions in SwiftData:
+    /// if this merchant or recipient IBAN was categorized before, reuse that exact category and subcategory.
+    static func learnedMatch(
+        for merchant: String,
+        recipientIBAN: String? = nil,
+        in context: ModelContext,
+        isIncome: Bool? = nil
+    ) -> (category: SpendCategory, subcategory: SpendCategory?)? {
+        // 1. Check explicit user category choices first (covers both merchant and recipient IBAN, including custom transfer categories)
+        if let direct = UserCategoryLearningStore.shared.match(merchant: merchant, recipientIBAN: recipientIBAN, isIncome: isIncome) {
+            return direct
+        }
+
+        let cleanIBAN = recipientIBAN?.filter(\.isNumber)
+        let hasIBAN = (cleanIBAN?.count ?? 0) >= 3
         let cleaned = merchant.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard cleaned.count >= 2 else { return nil }
-        let targetKey = Finance.merchantKey(cleaned)
+        let canUseMerchant = cleaned.count >= 2 && !isGenericPlaceholderMerchant(cleaned)
+        guard hasIBAN || canUseMerchant else { return nil }
+
+        let targetKey = canUseMerchant ? Finance.merchantKey(cleaned) : ""
         let lower = cleaned.lowercased()
+        let exactOnly = isIdentifierBasedMerchant(cleaned)
 
         let descriptor = FetchDescriptor<MoneyTransaction>(
             sortBy: [SortDescriptor(\.date, order: .reverse)]
         )
         guard let history = try? context.fetch(descriptor) else { return nil }
 
+        // 2. Match by exact recipient IBAN in history (including non-internal transfers)
+        if let cleanIBAN, hasIBAN {
+            for tx in history where !tx.isPending {
+                guard tx.category != .other, tx.category != .internalTransfer, tx.category != .visaTransfer else { continue }
+                if TransactionRuleStore.shared.wasClassifiedByDisabledRule(tx) { continue }
+                if let txIBAN = tx.smsRecipientSuffix?.filter(\.isNumber), !txIBAN.isEmpty, txIBAN == cleanIBAN {
+                    if let isIncome, !tx.category.isTransferCategory, tx.isIncome != isIncome { continue }
+                    // Ignore default unedited .transfers/.transferIn unless the user explicitly changed it
+                    if tx.category == .transfers || tx.category == .transferIn { continue }
+                    return (tx.category, tx.subcategory)
+                }
+            }
+        }
+
+        guard canUseMerchant else { return nil }
+
+        // 3. Match by merchant name in history
         for tx in history where !tx.isPending && !tx.isTransfer {
             if let isIncome, tx.isIncome != isIncome { continue }
             guard tx.category != .other else { continue }
+            if TransactionRuleStore.shared.wasClassifiedByDisabledRule(tx) { continue }
             let txMerchantLower = tx.merchant.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if isGenericPlaceholderMerchant(txMerchantLower) { continue }
+            if txMerchantLower == lower {
+                return (tx.category, tx.subcategory)
+            }
+            if exactOnly || isIdentifierBasedMerchant(txMerchantLower) {
+                continue
+            }
             let txKey = Finance.merchantKey(tx.merchant)
-            if txMerchantLower == lower || (!targetKey.isEmpty && txKey == targetKey) {
+            if !targetKey.isEmpty && txKey == targetKey {
                 return (tx.category, tx.subcategory)
             }
         }
@@ -220,7 +435,8 @@ enum Categorizer {
         var map: [String: String] = [:]
         for tx in history where !tx.isPending && !tx.isTransfer && tx.category != .other {
             let m = tx.merchant.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard m.count >= 2, map[m] == nil else { continue }
+            guard m.count >= 2, !isGenericPlaceholderMerchant(m), !isIdentifierBasedMerchant(m), map[m] == nil else { continue }
+            if TransactionRuleStore.shared.wasClassifiedByDisabledRule(tx) { continue }
             if let sub = tx.subcategory {
                 map[m] = "\(tx.category.rawValue) (sub: \(sub.rawValue))"
             } else {
