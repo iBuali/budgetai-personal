@@ -563,7 +563,7 @@ final class SharedExpenseIntelligenceService {
             // Blend AI judgment conservatively with statistical/memory priors
             prob = min(1, max(0, (prob * 0.45) + (ai.sharedProbability * 0.55) + prior.probabilityDelta * 0.5))
             // An expense alone without a reimbursement NEVER auto-adjusts (cap below 0.85)
-            confidence = min(0.80, max(0, (confidence * 0.40) + (ai.confidence * 0.60)))
+            confidence = min(0.80, max(0, (confidence * 0.30) + (ai.confidence * 0.70)))
             if prior.confirmedPersonalCount > 0 {
                 confidence = min(confidence, 0.50)
             }
@@ -904,27 +904,25 @@ final class SharedExpenseIntelligenceService {
             }
         }
 
-        // (B) Evaluate 1-reimbursement-covering-multiple-expenses (2 or 3 recent expenses whose shares sum to incoming amount)
-        if bestPlan == nil || (bestPlan?.confidence ?? 0) < 0.85 {
-            if let multiPlan = findMultiExpenseBundlePlan(
-                incomingTx: incomingTx,
-                availableCapacity: availableCapacity,
-                candidates: Array(candidates.prefix(8)),
-                senderToken: senderToken,
-                incomingHasCue: incomingHasCue,
-                incomingHasRule: incomingHasRule,
-                aiAssessment: aiAssessment,
-                currency: currency
-            ) {
-                if bestPlan == nil || multiPlan.confidence > (bestPlan?.confidence ?? 0) {
-                    bestPlan = ScoredPlan(
-                        links: multiPlan.links,
-                        confidence: multiPlan.confidence,
-                        corroborationCount: multiPlan.corroborationCount,
-                        explanation: multiPlan.explanation,
-                        anyRuleConflict: multiPlan.anyRuleConflict
-                    )
-                }
+        // (B) Always evaluate 1-reimbursement-covering-multiple-expenses (recent shared expenses whose expected shares sum exactly to incoming amount)
+        if let multiPlan = findMultiExpenseBundlePlan(
+            incomingTx: incomingTx,
+            availableCapacity: availableCapacity,
+            candidates: Array(candidates.prefix(8)),
+            senderToken: senderToken,
+            incomingHasCue: incomingHasCue,
+            incomingHasRule: incomingHasRule,
+            aiAssessment: aiAssessment,
+            currency: currency
+        ) {
+            if bestPlan == nil || multiPlan.confidence >= (bestPlan?.confidence ?? 0) {
+                bestPlan = ScoredPlan(
+                    links: multiPlan.links,
+                    confidence: multiPlan.confidence,
+                    corroborationCount: multiPlan.corroborationCount,
+                    explanation: multiPlan.explanation,
+                    anyRuleConflict: multiPlan.anyRuleConflict
+                )
             }
         }
 
@@ -1305,7 +1303,7 @@ final class SharedExpenseIntelligenceService {
                 let sum = a.share + b.share
                 if abs(sum - availableCapacity) <= 0.08 {
                     var corroborations = 2 // both expenses have explicit shared predictions / outstanding shares
-                    var conf = 0.78
+                    var conf = 0.80
                     if senderPrior.knownSenderConfirmationCount > 0 {
                         conf += 0.12
                         corroborations += 1
@@ -1318,7 +1316,7 @@ final class SharedExpenseIntelligenceService {
                     let desc = "Incoming transfer of \(Money.format(availableCapacity, currency)) matches the combined reimbursable shares of \(a.expense.merchant) (\(Money.format(a.share, currency))) and \(b.expense.merchant) (\(Money.format(b.share, currency)))."
                     return MultiExpenseBundleResult(
                         links: [(a.expense, a.share), (b.expense, b.share)],
-                        confidence: min(0.95, conf),
+                        confidence: min(0.97, conf),
                         corroborationCount: corroborations,
                         explanation: desc,
                         anyRuleConflict: anyRule
