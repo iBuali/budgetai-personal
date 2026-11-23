@@ -55,16 +55,20 @@ struct Finance {
     let cal = Calendar.current
     let cycleStartDay: Int
     let thisMonth: DateInterval
+    let sharedExpenseOverlay: SharedExpenseOverlay
 
     init(transactions: [MoneyTransaction], accounts: [Account] = [], budgets: [Budget] = [],
-         goals: [SavingsGoal] = [], bills: [Bill] = [], now: Date = .now) {
+         goals: [SavingsGoal] = [], bills: [Bill] = [], now: Date = .now,
+         sharedExpenseOverlay: SharedExpenseOverlay? = nil) {
+        let overlay = sharedExpenseOverlay ?? .current
+        self.sharedExpenseOverlay = overlay
         var approved: [MoneyTransaction] = []
         var spending: [MoneyTransaction] = []
         var income: [MoneyTransaction] = []
         approved.reserveCapacity(transactions.count)
         for tx in transactions where !tx.isPending {
             approved.append(tx)
-            if tx.isSpending {
+            if tx.isSpending || overlay.isIncludedAsAdjustedExpense(tx) {
                 spending.append(tx)
             }
             if tx.isOrdinaryIncome {
@@ -157,33 +161,35 @@ struct Finance {
 
     func income(in interval: DateInterval) -> Double {
         ordinaryIncomeTransactions.reduce(0) {
-            ($1.date >= interval.start && $1.date < interval.end) ? $0 + $1.amount : $0
+            ($1.date >= interval.start && $1.date < interval.end) ? $0 + sharedExpenseOverlay.effectiveIncomeAmount(for: $1) : $0
         }
     }
 
     func expenses(in interval: DateInterval) -> Double {
         spendingTransactions.reduce(0) {
-            ($1.date >= interval.start && $1.date < interval.end) ? $0 + $1.amount : $0
+            ($1.date >= interval.start && $1.date < interval.end) ? $0 + sharedExpenseOverlay.effectiveSpendingAmount(for: $1) : $0
         }
     }
 
     func spent(_ category: SpendCategory, in interval: DateInterval) -> Double {
         spendingTransactions.reduce(0) {
-            ($1.date >= interval.start && $1.date < interval.end && $1.categoryRaw == category.rawValue) ? $0 + $1.amount : $0
+            ($1.date >= interval.start && $1.date < interval.end && sharedExpenseOverlay.effectiveCategoryRaw(for: $1) == category.rawValue)
+                ? $0 + sharedExpenseOverlay.effectiveSpendingAmount(for: $1) : $0
         }
     }
 
     func spent(for budget: Budget, in interval: DateInterval) -> Double {
         let keys = Set(budget.categories.map(\.rawValue))
         return spendingTransactions.reduce(0) {
-            ($1.date >= interval.start && $1.date < interval.end && keys.contains($1.categoryRaw)) ? $0 + $1.amount : $0
+            ($1.date >= interval.start && $1.date < interval.end && keys.contains(sharedExpenseOverlay.effectiveCategoryRaw(for: $1)))
+                ? $0 + sharedExpenseOverlay.effectiveSpendingAmount(for: $1) : $0
         }
     }
 
     func spendingTotalsByCategory(in interval: DateInterval) -> [String: Double] {
         var totals: [String: Double] = [:]
         for tx in spendingTransactions where tx.date >= interval.start && tx.date < interval.end {
-            totals[tx.categoryRaw, default: 0] += tx.amount
+            totals[sharedExpenseOverlay.effectiveCategoryRaw(for: tx), default: 0] += sharedExpenseOverlay.effectiveSpendingAmount(for: tx)
         }
         return totals
     }
@@ -209,7 +215,8 @@ struct Finance {
     func budgetSpent(in interval: DateInterval) -> Double {
         let keys = Set(budgets.flatMap(\.categories).map(\.rawValue))
         return spendingTransactions.reduce(0) {
-            ($1.date >= interval.start && $1.date < interval.end && keys.contains($1.categoryRaw)) ? $0 + $1.amount : $0
+            ($1.date >= interval.start && $1.date < interval.end && keys.contains(sharedExpenseOverlay.effectiveCategoryRaw(for: $1)))
+                ? $0 + sharedExpenseOverlay.effectiveSpendingAmount(for: $1) : $0
         }
     }
 
@@ -252,7 +259,7 @@ struct Finance {
 
     var avgDailyDiscretionary: Double {
         let spend = spendingTransactions.reduce(0) {
-            ($1.date >= thisMonth.start && $1.date < thisMonth.end && $1.source != .bill) ? $0 + $1.amount : $0
+            ($1.date >= thisMonth.start && $1.date < thisMonth.end && $1.source != .bill) ? $0 + sharedExpenseOverlay.effectiveSpendingAmount(for: $1) : $0
         }
         return spend / Double(daysElapsed)
     }
@@ -331,7 +338,7 @@ struct Finance {
                   let end = cal.date(byAdding: .day, value: 1, to: today) else { return [] }
             var byDay: [Date: Double] = [:]
             for tx in spendingTransactions where tx.date >= start && tx.date < end {
-                byDay[cal.startOfDay(for: tx.date), default: 0] += tx.amount
+                byDay[cal.startOfDay(for: tx.date), default: 0] += sharedExpenseOverlay.effectiveSpendingAmount(for: tx)
             }
             return (0..<7).reversed().compactMap { offset in
                 guard let d = cal.date(byAdding: .day, value: -offset, to: today) else { return nil }
@@ -341,7 +348,7 @@ struct Finance {
             guard let end = cal.date(byAdding: .day, value: 1, to: today) else { return [] }
             var byDay: [Date: Double] = [:]
             for tx in spendingTransactions where tx.date >= thisMonth.start && tx.date < end {
-                byDay[cal.startOfDay(for: tx.date), default: 0] += tx.amount
+                byDay[cal.startOfDay(for: tx.date), default: 0] += sharedExpenseOverlay.effectiveSpendingAmount(for: tx)
             }
             var points: [ChartPoint] = []
             var d = thisMonth.start
@@ -360,7 +367,7 @@ struct Finance {
             var bucketTotals = Array(repeating: 0.0, count: intervals.count)
             for tx in spendingTransactions where tx.date >= minStart && tx.date < maxEnd {
                 for idx in intervals.indices where tx.date >= intervals[idx].start && tx.date < intervals[idx].end {
-                    bucketTotals[idx] += tx.amount
+                    bucketTotals[idx] += sharedExpenseOverlay.effectiveSpendingAmount(for: tx)
                     break
                 }
             }
@@ -381,7 +388,8 @@ struct Finance {
     func categoryBreakdown(in interval: DateInterval) -> [(category: SpendCategory, amount: Double)] {
         var totals: [SpendCategory: Double] = [:]
         for tx in spendingTransactions where tx.date >= interval.start && tx.date < interval.end {
-            totals[tx.category, default: 0] += tx.amount
+            let cat = SpendCategory.resolve(sharedExpenseOverlay.effectiveCategoryRaw(for: tx))
+            totals[cat, default: 0] += sharedExpenseOverlay.effectiveSpendingAmount(for: tx)
         }
         return totals.map { ($0.key, $0.value) }.sorted { $0.1 > $1.1 }
     }
@@ -400,13 +408,13 @@ struct Finance {
         var expenses = Array(repeating: 0.0, count: intervals.count)
         for tx in ordinaryIncomeTransactions where tx.date >= minStart && tx.date < maxEnd {
             for idx in intervals.indices where tx.date >= intervals[idx].start && tx.date < intervals[idx].end {
-                incomes[idx] += tx.amount
+                incomes[idx] += sharedExpenseOverlay.effectiveIncomeAmount(for: tx)
                 break
             }
         }
         for tx in spendingTransactions where tx.date >= minStart && tx.date < maxEnd {
             for idx in intervals.indices where tx.date >= intervals[idx].start && tx.date < intervals[idx].end {
-                expenses[idx] += tx.amount
+                expenses[idx] += sharedExpenseOverlay.effectiveSpendingAmount(for: tx)
                 break
             }
         }

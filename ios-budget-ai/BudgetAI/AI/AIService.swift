@@ -942,6 +942,10 @@ enum SMSImporter {
                 }
             }
         }
+        // Independent, safely disableable AI Shared Expense Intelligence observer (read-only on original tx).
+        if AppSettings.sharedExpenseIntelligenceEnabled && !tx.isPending {
+            _ = await SharedExpenseIntelligenceService.shared.analyzeNewTransaction(tx, context: context, currency: code)
+        }
         let typeLabel = p.transactionType.title
         var summary = "\(typeLabel) \(Money.format(tx.amount, code)) · \(tx.merchant)"
         if p.requiresReview {

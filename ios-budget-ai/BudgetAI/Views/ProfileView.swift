@@ -15,6 +15,7 @@ struct ProfileView: View {
     @AppStorage(Keys.onboarded) private var onboarded = true
     @AppStorage(Keys.cycleStartDay) private var cycleStartDay = 1
     @AppStorage(Keys.appearanceMode) private var appearanceModeRaw = AppAppearanceMode.automatic.rawValue
+    @AppStorage(Keys.sharedExpenseIntelligenceEnabled) private var sharedExpenseIntelligence = true
     @Query private var customCategories: [CustomCategory]
     @State private var confirmSample = false
     @State private var confirmErase = false
@@ -120,10 +121,25 @@ struct ProfileView: View {
                     NavigationLink { GeminiSettingsView() } label: {
                         row("Gemini AI", "sparkles", Theme.cobalt, value: geminiOn ? "Connected" : "Not connected")
                     }
+                    Toggle(isOn: $sharedExpenseIntelligence) {
+                        row("Shared Expense AI", "person.2.wave.2.fill", Theme.cobalt)
+                    }
+                    .onChange(of: sharedExpenseIntelligence) { _, on in
+                        Ledger.notifyDataChanged()
+                        appState.show(on ? "Shared Expense Intelligence enabled" : "Shared Expense Intelligence disabled")
+                    }
+                    if sharedExpenseIntelligence {
+                        NavigationLink { SharedExpenseCenterView() } label: {
+                            let pending = SharedExpenseAdjustmentStore.shared.pendingSuggestions.count
+                            let active = SharedExpenseAdjustmentStore.shared.activeAdjustments.count
+                            let badge = pending > 0 ? "\(pending) to review" : (active > 0 ? "\(active) active" : "Ready")
+                            row("Shared Expenses & Memory", "person.2.fill", Theme.positive, value: badge)
+                        }
+                    }
                 } header: {
                     Text("AI")
                 } footer: {
-                    Text("AI features run on your own Google Gemini account.")
+                    Text("AI features run on your own Google Gemini account. Shared Expense Intelligence can be disabled anytime without changing your bank transactions or rules.")
                 }
 
                 Section("Security & notifications") {

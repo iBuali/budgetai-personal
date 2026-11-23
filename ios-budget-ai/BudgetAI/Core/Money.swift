@@ -20,6 +20,7 @@ enum Keys {
     static let homeHiddenAccounts = "homeHiddenAccounts"
     static let netWorthChartExcludedAccounts = "netWorthChartExcludedAccounts"
     static let appearanceMode = "appearanceMode"
+    static let sharedExpenseIntelligenceEnabled = "sharedExpenseIntelligenceEnabled"
 }
 
 enum AppSettings {
@@ -28,6 +29,7 @@ enum AppSettings {
     static var budgetAlerts: Bool { UserDefaults.standard.object(forKey: Keys.budgetAlerts) as? Bool ?? true }
     static var smsAutoApprove: Bool { UserDefaults.standard.object(forKey: Keys.smsAutoApprove) as? Bool ?? true }
     static var smsSyncBalance: Bool { UserDefaults.standard.object(forKey: Keys.smsSyncBalance) as? Bool ?? true }
+    static var sharedExpenseIntelligenceEnabled: Bool { UserDefaults.standard.object(forKey: Keys.sharedExpenseIntelligenceEnabled) as? Bool ?? true }
     /// Empty string means "detect automatically".
     static var smsAccountID: UUID? { UUID(uuidString: UserDefaults.standard.string(forKey: Keys.smsAccountID) ?? "") }
 }

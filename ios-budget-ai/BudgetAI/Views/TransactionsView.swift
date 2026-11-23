@@ -1097,6 +1097,7 @@ struct TransactionDetailView: View {
             }
             editableFieldsSection
             locationSection
+            SharedExpenseTransactionSection(tx: tx)
             rulesSection
             if isSMSTransaction || tx.smsBalance != nil {
                 smsDetailsSection

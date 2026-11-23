@@ -98,6 +98,7 @@ enum Ledger {
                 loan.lastLoanInstallmentWasAuto = false
             }
         }
+        SharedExpenseAdjustmentStore.shared.cleanupDeletedTransaction(tx.id)
         context.delete(tx)
         recordSnapshot(context: context)
         try? context.save()
@@ -757,6 +758,8 @@ enum Ledger {
         TransactionRuleStore.shared.deleteAll()
         Categorizer.UserCategoryLearningStore.shared.clearAll()
         SubscriptionLearningStore.shared.clearAll()
+        SharedExpenseAdjustmentStore.shared.clearAll()
+        SharedExpenseMemoryStore.shared.clearAll()
         CategoryRegistry.shared.reload(context: context)
         Notifier.rescheduleBills([])
         notifyDataChanged()

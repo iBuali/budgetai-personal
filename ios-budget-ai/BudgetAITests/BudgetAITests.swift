@@ -25,6 +25,8 @@ struct BudgetAITests {
         UserDefaults.standard.removeObject(forKey: Keys.smsAutoApprove)
         UserDefaults.standard.removeObject(forKey: Keys.smsSyncBalance)
         TransactionRuleStore.shared.clearAll()
+        SharedExpenseAdjustmentStore.shared.clearAll()
+        SharedExpenseMemoryStore.shared.clearAll()
         return context
     }
 
