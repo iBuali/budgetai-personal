@@ -1871,7 +1871,7 @@ enum SMSParser {
         let trimmedBankInput = bank?.trimmingCharacters(in: .whitespacesAndNewlines)
         let senderBank: String? = {
             guard let s = senderOrPhone?.trimmingCharacters(in: .whitespacesAndNewlines), !s.isEmpty else { return nil }
-            return detectBank(in: s).bank
+            return identifyBank(in: s, sender: s).bank
         }()
         let trimmedBank = (trimmedBankInput?.isEmpty == false) ? trimmedBankInput : senderBank
         let hasBank = (trimmedBank?.isEmpty == false)
