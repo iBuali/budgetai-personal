@@ -436,6 +436,18 @@ struct TransactionRow: View {
                     .padding(.horizontal, 7)
                     .padding(.vertical, 2.5)
                     .background(Theme.negative.opacity(0.14), in: Capsule())
+                } else if tx.hasRuleConflict {
+                    HStack(spacing: 5) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.caption2.weight(.bold))
+                        Text("Rule conflict")
+                            .font(.caption.weight(.semibold))
+                            .lineLimit(1)
+                    }
+                    .foregroundStyle(Theme.warning)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2.5)
+                    .background(Theme.warning.opacity(0.14), in: Capsule())
                 } else if tx.needsBillReview {
                     HStack(spacing: 5) {
                         Image(systemName: "calendar.badge.plus")

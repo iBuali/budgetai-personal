@@ -145,6 +145,7 @@ struct BillEditor: View {
     @State private var keywordsText = ""
     @State private var amountText = ""
     @State private var category: SpendCategory = .bills
+    @State private var showCategoryPicker = false
     @State private var due = Date()
     @State private var frequency: BillFrequency = .monthly
     @State private var isSubscription = false
@@ -168,13 +169,41 @@ struct BillEditor: View {
                         TextField(Money.format(0, currency), text: $amountText)
                             .keyboardType(.decimalPad).multilineTextAlignment(.trailing).monospacedDigit()
                     }
-                    SheetPickerRow(
-                        title: "Category",
-                        selection: $category,
-                        options: SpendCategory.expenseCases.map {
-                            SheetPickerOption(id: $0, title: $0.title, symbol: $0.symbol, color: $0.color)
+                    Button {
+                        showCategoryPicker = true
+                    } label: {
+                        HStack(spacing: 10) {
+                            Text("Category")
+                                .foregroundStyle(Theme.ink)
+                            Spacer()
+                            HStack(spacing: 6) {
+                                CategoryIcon(category: category, size: 22)
+                                Text(category.title)
+                                    .font(.subheadline.weight(.medium))
+                                    .foregroundStyle(Theme.ink)
+                                    .lineLimit(1)
+                                Image(systemName: "chevron.up.chevron.down")
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(Theme.secondaryInk)
+                            }
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(Theme.track.opacity(0.65), in: Capsule())
                         }
-                    )
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .sheet(isPresented: $showCategoryPicker) {
+                        TransactionCategoryPickerSheet(
+                            selected: category,
+                            initialTab: category.isTransferCategory ? .transfers : .expenses,
+                            allowedTabs: [.expenses, .transfers],
+                            onSelect: { chosen in
+                                category = chosen
+                            }
+                        )
+                        .presentationDetents([.medium, .large])
+                    }
                 } footer: {
                     Text("Add keywords from your bank SMS (separated by commas). When an SMS arrives matching these keywords and the amount, the bill is automatically marked as paid.")
                 }
@@ -243,7 +272,19 @@ struct BillEditor: View {
         target.frequency = frequency
         target.isSubscription = isSubscription
         target.remindersOn = reminders
+
+        // Sync category to any transaction linked to this bill
+        let targetID = target.id
+        let lastTxID = target.lastPaidTxID
+        if let allTxs = try? context.fetch(FetchDescriptor<MoneyTransaction>()) {
+            for tx in allTxs where tx.billID == targetID || (lastTxID != nil && tx.id == lastTxID) {
+                tx.category = category
+                tx.billID = targetID
+            }
+        }
+
         try? context.save()
+        Ledger.notifyDataChanged()
         reschedule()
         if reminders { Task { await Notifier.requestAuthorization() } }
         dismiss()

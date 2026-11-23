@@ -1,5 +1,6 @@
 import SwiftUI
 import SwiftData
+import UIKit
 
 enum TxFilter: String, CaseIterable, Identifiable {
     case all = "All", income = "Income", expenses = "Expenses", transfers = "Transfers", review = "Review"
@@ -58,7 +59,7 @@ struct TxFilterState: Equatable {
     func matches(_ tx: MoneyTransaction, interval activeInterval: DateInterval?, ignoringDates: Bool = false) -> Bool {
         switch kind {
         case .all: break
-        case .review: if !tx.isPending && !tx.isPossibleDuplicate && !tx.needsBillReview { return false }
+        case .review: if !tx.isPending && !tx.isPossibleDuplicate && !tx.needsBillReview && !tx.hasRuleConflict { return false }
         case .income: if !tx.isOrdinaryIncome && !(!tx.isTransfer && tx.isIncome) { return false }
         case .expenses: if !tx.isSpending { return false }
         case .transfers: if !tx.isTransfer { return false }
@@ -137,7 +138,7 @@ struct TransactionsView: View {
 
             let passesKindScope: Bool = {
                 switch filters.kind {
-                case .review: return tx.isPending || tx.isPossibleDuplicate || tx.needsBillReview
+                case .review: return tx.isPending || tx.isPossibleDuplicate || tx.needsBillReview || tx.hasRuleConflict
                 case .all: return true
                 case .income, .expenses, .transfers: return !tx.isPending
                 }
@@ -1088,6 +1089,9 @@ struct TransactionDetailView: View {
             if tx.isPossibleDuplicate {
                 duplicateSection
             }
+            if tx.hasRuleConflict {
+                ruleConflictSection
+            }
             if tx.needsBillReview {
                 billReviewSection
             }
@@ -1124,6 +1128,21 @@ struct TransactionDetailView: View {
             noteText = tx.note
             refreshDerivedSMSMetadata()
             refreshLatestTransactionFlags()
+        }
+        .onChange(of: tx.merchant) { _, newValue in
+            if focusedField != .name && nameText != newValue {
+                nameText = newValue
+            }
+        }
+        .onChange(of: tx.note) { _, newValue in
+            if focusedField != .note && noteText != newValue {
+                noteText = newValue
+            }
+        }
+        .onChange(of: tx.amount) { _, newValue in
+            if focusedField != .amount {
+                amountText = Money.number(newValue, decimals: Money.digits(currency)).replacingOccurrences(of: ",", with: "")
+            }
         }
         .onChange(of: tx.rawText) { _, _ in
             refreshDerivedSMSMetadata()
@@ -1277,31 +1296,27 @@ struct TransactionDetailView: View {
                         let result = Ledger.approve(tx, context: context)
                         appState.report(result, base: "Approved \(Money.format(tx.amount, currency))")
                     } label: {
-                        HStack(spacing: 8) {
-                            Image(systemName: "checkmark.circle.fill")
-                                .font(.system(size: 18, weight: .semibold))
-                            Text("Approve and update account")
-                                .font(.subheadline.weight(.semibold))
-                        }
-                        .foregroundStyle(Color.white)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 13)
-                        .background(
-                            LinearGradient(
-                                colors: [
-                                    Color(light: Color(hex: 0x16A34A), dark: Color(hex: 0x10B981)),
-                                    Color(light: Color(hex: 0x15803D), dark: Color(hex: 0x059669))
-                                ],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            ),
-                            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                .strokeBorder(Color.white.opacity(0.18), lineWidth: 1)
-                        )
-                        .shadow(color: Color(light: Color(hex: 0x16A34A).opacity(0.24), dark: Color(hex: 0x10B981).opacity(0.22)), radius: 8, y: 3)
+                        Text("Approve and update account")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(Color.white)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 13)
+                            .background(
+                                LinearGradient(
+                                    colors: [
+                                        Color(light: Color(hex: 0x16A34A), dark: Color(hex: 0x10B981)),
+                                        Color(light: Color(hex: 0x15803D), dark: Color(hex: 0x059669))
+                                    ],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                ),
+                                in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .strokeBorder(Color.white.opacity(0.18), lineWidth: 1)
+                            )
+                            .shadow(color: Color(light: Color(hex: 0x16A34A).opacity(0.24), dark: Color(hex: 0x10B981).opacity(0.22)), radius: 8, y: 3)
                     }
                     .buttonStyle(PressableStyle())
 
@@ -1310,26 +1325,22 @@ struct TransactionDetailView: View {
                         appState.show("Transaction rejected and removed")
                         dismiss()
                     } label: {
-                        HStack(spacing: 8) {
-                            Image(systemName: "xmark.circle.fill")
-                                .font(.system(size: 17, weight: .semibold))
-                            Text("Reject")
-                                .font(.subheadline.weight(.semibold))
-                        }
-                        .foregroundStyle(Color(light: Color(hex: 0xDC2626), dark: Color(hex: 0xFCA5A5)))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 12)
-                        .background(
-                            Color(light: Color(hex: 0xFEF2F2), dark: Color(hex: 0xEF4444).opacity(0.14)),
-                            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                .strokeBorder(
-                                    Color(light: Color(hex: 0xDC2626).opacity(0.28), dark: Color(hex: 0xF87171).opacity(0.34)),
-                                    lineWidth: 1
-                                )
-                        )
+                        Text("Reject")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(Color(light: Color(hex: 0xDC2626), dark: Color(hex: 0xFCA5A5)))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 12)
+                            .background(
+                                Color(light: Color(hex: 0xFEF2F2), dark: Color(hex: 0xEF4444).opacity(0.14)),
+                                in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .strokeBorder(
+                                        Color(light: Color(hex: 0xDC2626).opacity(0.28), dark: Color(hex: 0xF87171).opacity(0.34)),
+                                        lineWidth: 1
+                                    )
+                            )
                     }
                     .buttonStyle(PressableStyle())
                 }
@@ -1354,6 +1365,112 @@ struct TransactionDetailView: View {
                 Ledger.delete(tx, context: context)
                 dismiss()
             }
+        }
+    }
+
+    @ViewBuilder
+    private var ruleConflictSection: some View {
+        let store = TransactionRuleStore.shared
+        let conflictingRules = tx.ruleConflictIDs.compactMap { id in
+            store.rules.first(where: { $0.id == id })
+        }
+        Section {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 12) {
+                    ZStack {
+                        Circle()
+                            .fill(Theme.warning.opacity(0.18))
+                            .frame(width: 42, height: 42)
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 20, weight: .semibold))
+                            .foregroundStyle(Theme.warning)
+                    }
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Rule Conflict — Review Needed")
+                            .font(.headline)
+                            .foregroundStyle(Theme.ink)
+                        Text("Multiple rules matched with equal specificity but different actions. Choose which rule to apply:")
+                            .font(.caption)
+                            .foregroundStyle(Theme.secondaryInk)
+                    }
+                }
+
+                if conflictingRules.isEmpty {
+                    Button {
+                        tx.ruleConflictIDsRaw = ""
+                        try? context.save()
+                    } label: {
+                        Text("Clear conflict notice")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(Theme.ink)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .background(Theme.track.opacity(0.7), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    }
+                    .buttonStyle(PressableStyle())
+                } else {
+                    VStack(spacing: 8) {
+                        ForEach(conflictingRules) { rule in
+                            let summary: String = {
+                                var parts: [String] = []
+                                if let cat = rule.actions.category { parts.append(cat.title) }
+                                if let m = rule.actions.setMerchant, !m.isEmpty { parts.append("Merchant: \(m)") }
+                                if let accID = rule.actions.overrideAccountID ?? rule.actions.fromAccountID,
+                                   let acc = accounts.first(where: { $0.id == accID }) {
+                                    parts.append("Account: \(acc.name)")
+                                }
+                                return parts.isEmpty ? "Apply rule actions" : parts.joined(separator: " · ")
+                            }()
+                            Button {
+                                commitPendingEdits(silent: true)
+                                Ledger.edit(tx, context: context) { target in
+                                    store.apply(rule: rule, to: target, explanation: "Rule: \(rule.name) · Chosen by user to resolve equal-specificity conflict")
+                                }
+                                nameText = tx.merchant
+                                appState.show("Applied rule \"\(rule.name)\"")
+                            } label: {
+                                HStack(spacing: 10) {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(rule.name.isEmpty ? "Rule" : rule.name)
+                                            .font(.subheadline.weight(.semibold))
+                                            .foregroundStyle(Theme.ink)
+                                        Text(summary)
+                                            .font(.caption)
+                                            .foregroundStyle(Theme.secondaryInk)
+                                            .lineLimit(2)
+                                    }
+                                    Spacer()
+                                    Text("Apply")
+                                        .font(.caption.weight(.bold))
+                                        .foregroundStyle(.white)
+                                        .padding(.horizontal, 12)
+                                        .padding(.vertical, 6)
+                                        .background(Theme.cobalt, in: Capsule())
+                                }
+                                .padding(10)
+                                .background(Theme.track.opacity(0.55), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            }
+                            .buttonStyle(PressableStyle())
+                        }
+
+                        Button {
+                            tx.ruleConflictIDsRaw = ""
+                            try? context.save()
+                            appState.show("Rule conflict dismissed")
+                        } label: {
+                            Text("Keep current values (dismiss)")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(Theme.secondaryInk)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 8)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            .padding(.vertical, 4)
+        } header: {
+            Text("Rule Conflict")
         }
     }
 
@@ -2032,22 +2149,65 @@ struct TransactionDetailView: View {
         Section(rawSMSMessages.count > 1 ? "Original SMS messages (\(rawSMSMessages.count))" : "Original message") {
             if rawSMSMessages.count > 1 {
                 ForEach(Array(rawSMSMessages.enumerated()), id: \.offset) { idx, msg in
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(idx < cachedSMSLegHeaders.count ? cachedSMSLegHeaders[idx] : "SMS \(idx + 1)")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(idx == 0 ? Theme.ink : Theme.positive)
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text(idx < cachedSMSLegHeaders.count ? cachedSMSLegHeaders[idx] : "SMS \(idx + 1)")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(idx == 0 ? Theme.ink : Theme.positive)
+                            Spacer()
+                            Button {
+                                UIPasteboard.general.string = msg
+                                appState.show("SMS copied")
+                            } label: {
+                                Label("Copy", systemImage: "doc.on.doc")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(Theme.cobalt)
+                            }
+                            .buttonStyle(.plain)
+                        }
                         Text(msg)
                             .font(.footnote)
                             .foregroundStyle(Theme.secondaryInk)
                             .textSelection(.enabled)
                     }
                     .padding(.vertical, 2)
+                    .contextMenu {
+                        Button("Copy SMS", systemImage: "doc.on.doc") {
+                            UIPasteboard.general.string = msg
+                            appState.show("SMS copied")
+                        }
+                    }
                 }
             } else {
-                Text(rawSMSMessages[0])
-                    .font(.footnote)
-                    .foregroundStyle(Theme.secondaryInk)
-                    .textSelection(.enabled)
+                let msg = rawSMSMessages[0]
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(msg)
+                        .font(.footnote)
+                        .foregroundStyle(Theme.secondaryInk)
+                        .textSelection(.enabled)
+                    HStack {
+                        Spacer()
+                        Button {
+                            UIPasteboard.general.string = msg
+                            appState.show("SMS copied")
+                        } label: {
+                            Label("Copy SMS", systemImage: "doc.on.doc")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(Theme.cobalt)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .background(Theme.cobaltSoft, in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.vertical, 2)
+                .contextMenu {
+                    Button("Copy SMS", systemImage: "doc.on.doc") {
+                        UIPasteboard.general.string = msg
+                        appState.show("SMS copied")
+                    }
+                }
             }
         }
     }
@@ -2184,9 +2344,10 @@ struct TransactionDetailView: View {
     }
 }
 
-private struct TransactionCategoryPickerSheet: View {
+struct TransactionCategoryPickerSheet: View {
     let selected: SpendCategory
     let initialTab: CategoryTab
+    var allowedTabs: [CategoryTab] = CategoryTab.allCases
     let onSelect: (SpendCategory) -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -2194,11 +2355,18 @@ private struct TransactionCategoryPickerSheet: View {
     @State private var selectedTab: CategoryTab
     @State private var editorTarget: CategoryEditorTarget?
 
-    init(selected: SpendCategory, initialTab: CategoryTab, onSelect: @escaping (SpendCategory) -> Void) {
+    init(
+        selected: SpendCategory,
+        initialTab: CategoryTab,
+        allowedTabs: [CategoryTab] = CategoryTab.allCases,
+        onSelect: @escaping (SpendCategory) -> Void
+    ) {
         self.selected = selected
         self.initialTab = initialTab
+        self.allowedTabs = allowedTabs
         self.onSelect = onSelect
-        self._selectedTab = State(initialValue: initialTab)
+        let resolvedInitial = allowedTabs.contains(initialTab) ? initialTab : (allowedTabs.first ?? .expenses)
+        self._selectedTab = State(initialValue: resolvedInitial)
     }
 
     private var categoriesForTab: [SpendCategory] {
@@ -2217,19 +2385,21 @@ private struct TransactionCategoryPickerSheet: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    HStack(spacing: 6) {
-                        ForEach(CategoryTab.allCases) { tab in
-                            Button {
-                                withAnimation(.snappy) { selectedTab = tab }
-                            } label: {
-                                Text(tab.rawValue)
-                                    .font(.subheadline.weight(selectedTab == tab ? .semibold : .medium))
-                                    .foregroundStyle(selectedTab == tab ? Theme.ink : Theme.secondaryInk)
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 8)
-                                    .background(selectedTab == tab ? Theme.track : Color.clear, in: Capsule())
+                    if allowedTabs.count > 1 {
+                        HStack(spacing: 6) {
+                            ForEach(allowedTabs) { tab in
+                                Button {
+                                    withAnimation(.snappy) { selectedTab = tab }
+                                } label: {
+                                    Text(tab.rawValue)
+                                        .font(.subheadline.weight(selectedTab == tab ? .semibold : .medium))
+                                        .foregroundStyle(selectedTab == tab ? Theme.ink : Theme.secondaryInk)
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 8)
+                                        .background(selectedTab == tab ? Theme.track : Color.clear, in: Capsule())
+                                }
+                                .buttonStyle(.plain)
                             }
-                            .buttonStyle(.plain)
                         }
                     }
 

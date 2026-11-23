@@ -93,9 +93,21 @@ struct Finance {
     var netWorth: Double { totalAssets - totalLiabilities }
 
     /// Liability amount deducted in Safe to Spend for an account.
-    /// Loans reserve their unpaid monthly installment (0 once paid for this cycle).
+    /// - Unpaid loans reserve their monthly installment.
+    /// - Paid loans: if paid from an included asset account, `totalAssets` already deducted it (so return 0 to avoid double-deduction);
+    ///   if paid without a linked included asset account, deduct the paid installment here so Safe to Spend always reflects it.
     func safeToSpendLiability(for account: Account) -> Double {
         guard account.includeInNetWorth else { return 0 }
+        if account.kind == .loan && account.isLoanInstallmentPaidForCurrentCycle(now: now) {
+            if let txID = account.lastLoanInstallmentTxID,
+               let tx = approvedTransactions.first(where: { $0.id == txID }) {
+                let deductedFromIncludedAsset = tx.accountID.map { accID in
+                    accounts.contains(where: { $0.id == accID && $0.includeInNetWorth && !$0.kind.isLiability })
+                } ?? false
+                return deductedFromIncludedAsset ? 0 : tx.amount
+            }
+            return min(account.balance, max(0, account.loanMonthlyInstallment))
+        }
         return account.safeToSpendLiabilityAmount(now: now)
     }
 

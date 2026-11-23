@@ -102,8 +102,8 @@ struct RuleCondition: Codable, Hashable, Identifiable {
     var latitude: Double?
     /// Optional GPS longitude for coordinate-based location matching.
     var longitude: Double?
-    /// Radius in meters for coordinate-based matching. Default is 15 meters.
-    var radiusMeters: Double = 15.0
+    /// Radius in meters for coordinate-based matching. Default is 10 meters.
+    var radiusMeters: Double = 10.0
     /// Optional match mode for `.originalSMS` (`contains` or `exactTemplate`).
     var smsMatchMode: RuleSMSMatchMode? = nil
 
@@ -125,7 +125,7 @@ struct RuleCondition: Codable, Hashable, Identifiable {
         displayValue: String,
         latitude: Double? = nil,
         longitude: Double? = nil,
-        radiusMeters: Double = 15.0,
+        radiusMeters: Double = 10.0,
         smsMatchMode: RuleSMSMatchMode? = nil
     ) {
         self.id = id
@@ -146,7 +146,7 @@ struct RuleCondition: Codable, Hashable, Identifiable {
         self.displayValue = try container.decode(String.self, forKey: .displayValue)
         self.latitude = try container.decodeIfPresent(Double.self, forKey: .latitude)
         self.longitude = try container.decodeIfPresent(Double.self, forKey: .longitude)
-        self.radiusMeters = try container.decodeIfPresent(Double.self, forKey: .radiusMeters) ?? 15.0
+        self.radiusMeters = try container.decodeIfPresent(Double.self, forKey: .radiusMeters) ?? 10.0
         self.smsMatchMode = try container.decodeIfPresent(RuleSMSMatchMode.self, forKey: .smsMatchMode)
     }
 
@@ -520,7 +520,7 @@ final class TransactionRuleStore {
             let placeName = (locName != nil && !locName!.isEmpty) ? locName! : "GPS Location"
             let display: String = {
                 if hasCoords {
-                    return "\(placeName) (within 15m)"
+                    return "\(placeName) (within 10m)"
                 } else {
                     return placeName
                 }
@@ -531,7 +531,7 @@ final class TransactionRuleStore {
                 displayValue: display,
                 latitude: tx.latitude,
                 longitude: tx.longitude,
-                radiusMeters: 15.0
+                radiusMeters: 10.0
             ))
         }
 
@@ -617,31 +617,6 @@ final class TransactionRuleStore {
         save()
     }
 
-    func moveRules(from source: IndexSet, to destination: Int) {
-        var copy = rules
-        let moving = source.map { copy[$0] }
-        for index in source.sorted(by: >) {
-            copy.remove(at: index)
-        }
-        let adjustedDestination = destination - source.filter { $0 < destination }.count
-        let safeDestination = max(0, min(copy.count, adjustedDestination))
-        copy.insert(contentsOf: moving, at: safeDestination)
-        rules = copy
-        save()
-    }
-
-    func moveRuleUp(id: UUID) {
-        guard let idx = rules.firstIndex(where: { $0.id == id }), idx > 0 else { return }
-        rules.swapAt(idx, idx - 1)
-        save()
-    }
-
-    func moveRuleDown(id: UUID) {
-        guard let idx = rules.firstIndex(where: { $0.id == id }), idx < rules.count - 1 else { return }
-        rules.swapAt(idx, idx + 1)
-        save()
-    }
-
     func deleteAll() {
         rules.removeAll()
         UserDefaults.standard.removeObject(forKey: Self.storageKey)
@@ -651,35 +626,159 @@ final class TransactionRuleStore {
         deleteAll()
     }
 
-    /// Returns the 1-based priority index (`Rule 1`, `Rule 2`, ...) for a given rule ID.
-    func priorityNumber(for id: UUID) -> Int? {
-        guard let idx = rules.firstIndex(where: { $0.id == id }) else { return nil }
-        return idx + 1
-    }
-
-    /// Returns all rules associated with or matching a transaction, preserving global priority order (`Rule 1`, `Rule 2`, ...).
+    /// Returns all rules associated with or matching a transaction, sorted by specificity (most specific first).
     func rulesForTransaction(_ tx: MoneyTransaction) -> [TransactionRule] {
         let context = RuleEvaluationContext(from: tx)
-        return rules.filter { rule in
-            rule.sourceTransactionID == tx.id || matches(rule: rule, context: context, ignoreEnabledState: true)
-        }
-    }
-
-    // MARK: Priority Evaluation & Matching
-
-    /// Evaluates enabled rules in strict priority order (`Rule 1`, `Rule 2`, `Rule 3`, ...).
-    /// When multiple rules match, the higher-priority rule takes precedence.
-    func firstMatchingRule(for context: RuleEvaluationContext) -> TransactionRule? {
-        for rule in rules where rule.isEnabled {
-            if matches(rule: rule, context: context, ignoreEnabledState: false) {
-                return rule
+        return rules
+            .filter { rule in
+                rule.sourceTransactionID == tx.id || matches(rule: rule, context: context, ignoreEnabledState: true)
             }
-        }
-        return nil
+            .sorted { Self.staticSpecificityScore(for: $0) > Self.staticSpecificityScore(for: $1) }
     }
 
-    func firstMatchingRule(for tx: MoneyTransaction) -> TransactionRule? {
-        firstMatchingRule(for: RuleEvaluationContext(from: tx))
+    // MARK: - Specificity-Based Evaluation & Conflict Detection
+
+    struct RuleSpecificityMatch {
+        let rule: TransactionRule
+        let score: Int
+        let matchedConditions: [RuleCondition]
+
+        var matchedSummary: String {
+            matchedConditions.map { "\($0.field.label) (\($0.displayValue))" }.joined(separator: " + ")
+        }
+    }
+
+    enum RuleResolutionResult {
+        case noMatch
+        case matched(RuleSpecificityMatch, reason: String)
+        case conflict(matches: [RuleSpecificityMatch], score: Int, reason: String)
+
+        var winningRule: TransactionRule? {
+            if case .matched(let m, _) = self { return m.rule }
+            return nil
+        }
+
+        var conflictingRules: [TransactionRule] {
+            if case .conflict(let matches, _, _) = self { return matches.map(\.rule) }
+            return []
+        }
+    }
+
+    /// Specificity weight for a single condition. More precise signals (exact SMS template, exact amount,
+    /// GPS location, recipient IBAN) outweigh broad signals (bank, phone number, direction).
+    static func specificityWeight(for condition: RuleCondition) -> Int {
+        switch condition.field {
+        case .originalSMS:
+            if condition.smsMatchMode == .exactTemplate {
+                return 100
+            }
+            let len = condition.value.trimmingCharacters(in: .whitespacesAndNewlines).count
+            return 45 + min(15, len / 6)
+        case .reference:
+            return 95
+        case .amount:
+            return 60
+        case .location:
+            if condition.latitude != nil && condition.longitude != nil {
+                return condition.radiusMeters <= 25 ? 60 : 55
+            }
+            return 35
+        case .recipientIBAN:
+            return 45
+        case .accountDigits:
+            return 40
+        case .merchant:
+            return 35
+        case .accountID:
+            return 30
+        case .note:
+            return 30
+        case .smsSender:
+            return 20
+        case .bank:
+            return 15
+        case .direction:
+            return 10
+        }
+    }
+
+    /// Static specificity score for a rule (used for displaying specificity badges in the UI).
+    static func staticSpecificityScore(for rule: TransactionRule) -> Int {
+        guard !rule.conditions.isEmpty else { return 0 }
+        switch rule.logic {
+        case .and:
+            let base = rule.conditions.reduce(0) { $0 + specificityWeight(for: $1) }
+            let compoundBonus = max(0, rule.conditions.count - 1) * 15
+            return base + compoundBonus
+        case .or:
+            return rule.conditions.map { specificityWeight(for: $0) }.max() ?? 0
+        }
+    }
+
+    /// Evaluates a single rule against `context` and returns its dynamic specificity match if satisfied.
+    func evaluateSpecificity(rule: TransactionRule, context: RuleEvaluationContext, ignoreEnabledState: Bool = false) -> RuleSpecificityMatch? {
+        if !ignoreEnabledState && !rule.isEnabled { return nil }
+        guard !rule.conditions.isEmpty else { return nil }
+
+        switch rule.logic {
+        case .and:
+            guard rule.conditions.allSatisfy({ conditionMatches($0, context: context) }) else { return nil }
+            let base = rule.conditions.reduce(0) { $0 + Self.specificityWeight(for: $1) }
+            let compoundBonus = max(0, rule.conditions.count - 1) * 15
+            return RuleSpecificityMatch(rule: rule, score: base + compoundBonus, matchedConditions: rule.conditions)
+
+        case .or:
+            let hits = rule.conditions.filter { conditionMatches($0, context: context) }
+            guard !hits.isEmpty else { return nil }
+            let strongest = hits.map { Self.specificityWeight(for: $0) }.max() ?? 0
+            let extraHitBonus = max(0, hits.count - 1) * 5
+            return RuleSpecificityMatch(rule: rule, score: strongest + extraHitBonus, matchedConditions: hits)
+        }
+    }
+
+    /// Evaluates ALL enabled rules before executing any.
+    /// - Selects the single most specific matching rule regardless of creation order.
+    /// - If multiple rules tie for the highest specificity with different outcomes, returns `.conflict`
+    ///   instead of silently picking one.
+    func evaluateRules(for context: RuleEvaluationContext) -> RuleResolutionResult {
+        let candidates = rules
+            .filter(\.isEnabled)
+            .compactMap { evaluateSpecificity(rule: $0, context: context, ignoreEnabledState: false) }
+            .sorted { $0.score > $1.score }
+
+        guard let top = candidates.first else { return .noMatch }
+        let tiedTop = candidates.filter { $0.score == top.score }
+
+        if tiedTop.count == 1 {
+            let otherCount = candidates.count - 1
+            let suffix = otherCount > 0 ? " (most specific of \(candidates.count) matching rules)" : ""
+            let reason = "Rule: \(top.rule.name) · Matched \(top.matchedSummary)\(suffix)"
+            return .matched(top, reason: reason)
+        }
+
+        // If all tied rules produce identical outcomes, no real conflict exists
+        let firstActions = tiedTop[0].rule.actions
+        if tiedTop.allSatisfy({ $0.rule.actions == firstActions }) {
+            let reason = "Rule: \(top.rule.name) · Matched \(top.matchedSummary)"
+            return .matched(top, reason: reason)
+        }
+
+        let names = tiedTop.map(\.rule.name).joined(separator: " vs ")
+        let reason = "Rule conflict: \(names) have equal specificity (score \(top.score)) with different actions — review required"
+        return .conflict(matches: tiedTop, score: top.score, reason: reason)
+    }
+
+    func evaluateRules(for tx: MoneyTransaction) -> RuleResolutionResult {
+        evaluateRules(for: RuleEvaluationContext(from: tx))
+    }
+
+    /// Convenience helper returning the winning rule only when there is an unambiguous best match (nil on noMatch or conflict).
+    func bestMatchingRule(for context: RuleEvaluationContext) -> TransactionRule? {
+        evaluateRules(for: context).winningRule
+    }
+
+    func bestMatchingRule(for tx: MoneyTransaction) -> TransactionRule? {
+        bestMatchingRule(for: RuleEvaluationContext(from: tx))
     }
 
     /// Returns true if `tx` was previously classified by a Transaction Rule that is currently switched OFF.
@@ -692,11 +791,11 @@ final class TransactionRuleStore {
 
         for rule in disabledRules {
             let cleanName = rule.name.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !cleanName.isEmpty && (reason == "Matched: \(cleanName)" || reason.contains("(\(cleanName))")) {
+            if !cleanName.isEmpty && (reason == "Matched: \(cleanName)" || reason.hasPrefix("Rule: \(cleanName)") || reason.contains("(\(cleanName))")) {
                 return true
             }
         }
-        if reason.hasPrefix("Matched:") || reason.hasPrefix("Matched Rule") {
+        if reason.hasPrefix("Matched:") || reason.hasPrefix("Matched Rule") || reason.hasPrefix("Rule:") {
             let ctx = RuleEvaluationContext(from: tx)
             if disabledRules.contains(where: { matches(rule: $0, context: ctx, ignoreEnabledState: true) }) {
                 return true
@@ -787,7 +886,7 @@ final class TransactionRuleStore {
             if let ruleLat = condition.latitude, let ruleLon = condition.longitude {
                 if let txLat = context.latitude, let txLon = context.longitude {
                     let distanceMeters = Self.distanceBetween(lat1: ruleLat, lon1: ruleLon, lat2: txLat, lon2: txLon)
-                    let allowedRadius = condition.radiusMeters > 0 ? condition.radiusMeters : 15.0
+                    let allowedRadius = condition.radiusMeters > 0 ? condition.radiusMeters : 10.0
                     return distanceMeters <= allowedRadius
                 }
                 // If transaction lacks coordinates, do not trigger false positive based solely on name
@@ -822,18 +921,27 @@ final class TransactionRuleStore {
         }
     }
 
-    // MARK: Applying Highest-Priority Rule to a Future Transaction
+    // MARK: Applying Best-Matching Rule (Specificity-Based)
 
-    /// Applies the highest-priority matching rule to a newly created/imported transaction.
-    /// Returns the matched rule if one was applied.
+    /// Evaluates ALL enabled rules and executes ONLY the single most specific matching rule.
+    /// If multiple rules tie for equal specificity with different outcomes, flags the conflict on `tx`
+    /// for in-page user review without executing either rule.
     @discardableResult
-    func applyHighestPriorityRuleIfMatching(to tx: MoneyTransaction, context: ModelContext? = nil) -> TransactionRule? {
-        guard let rule = firstMatchingRule(for: tx) else { return nil }
-        apply(rule: rule, to: tx, priorityNumber: priorityNumber(for: rule.id) ?? 1)
-        return rule
+    func applyBestMatchingRuleIfAny(to tx: MoneyTransaction, context: ModelContext? = nil) -> RuleResolutionResult {
+        let resolution = evaluateRules(for: tx)
+        switch resolution {
+        case .noMatch:
+            tx.ruleConflictIDsRaw = ""
+        case .matched(let match, let reason):
+            apply(rule: match.rule, to: tx, explanation: reason)
+        case .conflict(let matches, _, let reason):
+            tx.ruleConflictIDs = matches.map(\.rule.id)
+            tx.smsClassificationReason = reason
+        }
+        return resolution
     }
 
-    func apply(rule: TransactionRule, to tx: MoneyTransaction, priorityNumber: Int = 1) {
+    func apply(rule: TransactionRule, to tx: MoneyTransaction, explanation: String? = nil) {
         let actions = rule.actions
 
         // 1. Optional direction override
@@ -870,23 +978,32 @@ final class TransactionRuleStore {
             }
         } else if let cat = actions.category {
             tx.category = cat
-            if cat.isIncomeCategory {
+            if cat == .transferIn {
+                tx.isIncome = true
+                tx.smsTransactionType = .transferIn
+                tx.toAccountID = nil
+            } else if cat.isTransferCategory {
+                tx.isIncome = false
+                tx.smsTransactionType = .transferOut
+                tx.toAccountID = nil
+            } else if cat.isIncomeCategory {
                 tx.isIncome = true
                 if tx.source == .sms {
                     tx.smsTransactionType = .income
                 }
-            } else if tx.source == .sms && (tx.smsTransactionType == nil || tx.smsTransactionType == .unknown || tx.smsTransactionType == .internalTransfer || tx.smsTransactionType == .transferOut) {
-                tx.smsTransactionType = tx.isIncome ? .income : .expense
+                tx.toAccountID = nil
+            } else {
+                if tx.source == .sms && (tx.smsTransactionType == nil || tx.smsTransactionType == .unknown || tx.smsTransactionType == .internalTransfer || tx.smsTransactionType == .transferOut || tx.smsTransactionType == .transferIn) {
+                    tx.smsTransactionType = tx.isIncome ? .income : .expense
+                }
+                tx.toAccountID = nil
             }
             if let fromID = actions.fromAccountID ?? actions.overrideAccountID {
                 tx.accountID = fromID
             }
-            if cat != .internalTransfer && cat != .visaTransfer {
-                tx.toAccountID = nil
-            }
         }
 
-        // 3. Additional field actions
+        // 4. Additional field actions
         if let merchant = actions.setMerchant?.trimmingCharacters(in: .whitespacesAndNewlines), !merchant.isEmpty {
             tx.merchant = merchant
         }
@@ -910,8 +1027,9 @@ final class TransactionRuleStore {
             tx.goalID = goalID
         }
 
+        tx.ruleConflictIDsRaw = ""
         tx.smsConfidence = .high
-        tx.smsClassificationReason = "Matched: \(rule.name)"
+        tx.smsClassificationReason = explanation ?? "Rule: \(rule.name)"
         tx.aiCategorized = false
     }
 

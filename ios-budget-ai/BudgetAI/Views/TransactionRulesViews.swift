@@ -43,7 +43,7 @@ struct TransactionRuleBuilderSheet: View {
     @State private var logic: RuleConditionLogic = .and
     @State private var availableConditions: [RuleCondition] = []
     @State private var selectedFields: Set<RuleConditionField> = []
-    @State private var locationRadius: Double = 15.0
+    @State private var locationRadius: Double = 10.0
     @State private var originalSMSMatchMode: RuleSMSMatchMode = .contains
     @State private var originalSMSText: String = ""
     @State private var manualConditionValues: [RuleConditionField: String] = [:]
@@ -52,6 +52,7 @@ struct TransactionRuleBuilderSheet: View {
     // THEN – Actions
     @State private var enableSetCategory: Bool = false
     @State private var selectedCategory: SpendCategory = .other
+    @State private var showCategoryPicker: Bool = false
     @State private var fromAccountID: UUID?
     @State private var toAccountID: UUID?
 
@@ -153,6 +154,16 @@ struct TransactionRuleBuilderSheet: View {
         sourceTransaction == nil && existingRule == nil
     }
 
+    /// True if this condition should show an inline manual editor when checked (either creating from scratch
+    /// or adding a condition that wasn't auto-captured from a source transaction).
+    private func needsManualInput(for cond: RuleCondition) -> Bool {
+        if cond.field == .originalSMS { return false }
+        if isManualCreation { return true }
+        return cond.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || (manualConditionValues[cond.field] != nil)
+            || (cond.field == .accountID && cond.value.isEmpty)
+    }
+
     private var selectedConditionsList: [RuleCondition] {
         availableConditions.filter { selectedFields.contains($0.field) }
     }
@@ -164,11 +175,11 @@ struct TransactionRuleBuilderSheet: View {
                 let text = originalSMSText.trimmingCharacters(in: .whitespacesAndNewlines)
                 return !text.isEmpty || !cond.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             }
-            if isManualCreation {
+            if needsManualInput(for: cond) {
                 if cond.field == .accountID {
-                    return manualAccountConditionID != nil
+                    return manualAccountConditionID != nil || !cond.value.isEmpty
                 }
-                let raw = (manualConditionValues[cond.field] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                let raw = (manualConditionValues[cond.field] ?? cond.value).trimmingCharacters(in: .whitespacesAndNewlines)
                 if cond.field == .amount {
                     return (Money.parse(raw) ?? 0) > 0
                 }
@@ -327,7 +338,7 @@ struct TransactionRuleBuilderSheet: View {
                     }
                     .pickerStyle(.segmented)
 
-                    if originalSMSMatchMode == .contains || isManualCreation {
+                    if originalSMSMatchMode == .contains || isManualCreation || cond.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         TextField(
                             originalSMSMatchMode == .contains ? "Text the SMS must contain" : "Paste full example SMS",
                             text: $originalSMSText,
@@ -348,8 +359,8 @@ struct TransactionRuleBuilderSheet: View {
                 .padding(.top, 2)
             }
 
-            // Inline manual inputs when creating a rule from scratch in Settings
-            if isManualCreation && isSelected && cond.field != .originalSMS {
+            // Inline manual inputs when creating from scratch or adding an uncaptured condition while editing
+            if needsManualInput(for: cond) && isSelected && cond.field != .originalSMS {
                 Group {
                     if cond.field == .accountID {
                         Picker("Match Account", selection: $manualAccountConditionID) {
@@ -372,49 +383,6 @@ struct TransactionRuleBuilderSheet: View {
                 }
                 .padding(.leading, 36)
                 .padding(.top, 2)
-            }
-
-            // If this is the Location condition and it is selected with GPS coordinates, offer radius customization
-            if cond.field == .location && isSelected && (cond.latitude != nil || actionLatitude != nil) {
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        Label("Matching Radius", systemImage: "circle.circle")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(Theme.brand)
-                        Spacer()
-                        Text("\(Int(locationRadius)) meters")
-                            .font(.caption.weight(.bold))
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 2)
-                            .background(Theme.brand.opacity(0.12), in: Capsule())
-                            .foregroundStyle(Theme.brand)
-                    }
-
-                    HStack(spacing: 6) {
-                        ForEach([10.0, 15.0, 25.0, 50.0, 100.0], id: \.self) { r in
-                            Button {
-                                locationRadius = r
-                            } label: {
-                                Text("\(Int(r))m")
-                                    .font(.caption2.weight(locationRadius == r ? .bold : .regular))
-                                    .padding(.horizontal, 9)
-                                    .padding(.vertical, 4)
-                                    .background(locationRadius == r ? Theme.brand : Theme.track, in: Capsule())
-                                    .foregroundStyle(locationRadius == r ? .white : Theme.ink)
-                            }
-                            .buttonStyle(.plain)
-                        }
-
-                        Stepper("", value: $locationRadius, in: 5...500, step: 5)
-                            .labelsHidden()
-                    }
-
-                    Text("Matches any transaction within \(Int(locationRadius)) meters of this GPS coordinate, regardless of place name.")
-                        .font(.caption2)
-                        .foregroundStyle(Theme.secondaryInk)
-                }
-                .padding(.leading, 36)
-                .padding(.top, 4)
             }
         }
     }
@@ -448,10 +416,39 @@ struct TransactionRuleBuilderSheet: View {
                 Label("Set Category", systemImage: "tag.fill")
             }
             if enableSetCategory {
-                Picker("Category", selection: $selectedCategory) {
-                    ForEach(SpendCategory.allCases) { cat in
-                        Label(cat.title, systemImage: cat.symbol).tag(cat)
+                Button {
+                    showCategoryPicker = true
+                } label: {
+                    HStack(spacing: 10) {
+                        Text("Category")
+                            .foregroundStyle(Theme.ink)
+                        Spacer()
+                        HStack(spacing: 6) {
+                            CategoryIcon(category: selectedCategory, size: 22)
+                            Text(selectedCategory.title)
+                                .font(.subheadline.weight(.medium))
+                                .foregroundStyle(Theme.ink)
+                                .lineLimit(1)
+                            Image(systemName: "chevron.up.chevron.down")
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(Theme.secondaryInk)
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(Theme.track.opacity(0.65), in: Capsule())
                     }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .sheet(isPresented: $showCategoryPicker) {
+                    TransactionCategoryPickerSheet(
+                        selected: selectedCategory,
+                        initialTab: selectedCategory.isTransferCategory ? .transfers : (selectedCategory.isIncomeCategory ? .income : .expenses),
+                        onSelect: { chosen in
+                            selectedCategory = chosen
+                        }
+                    )
+                    .presentationDetents([.medium, .large])
                 }
 
                 // If Category is Internal Transfer: From and To account pickers
@@ -606,19 +603,51 @@ struct TransactionRuleBuilderSheet: View {
             applyToExisting = existingRule.isEnabled
             logic = existingRule.logic
 
-            if let tx = sourceTransaction {
-                var captured = TransactionRuleStore.captureAvailableConditions(from: tx, accounts: accounts)
-                for cond in existingRule.conditions where !captured.contains(where: { $0.field == cond.field }) {
-                    captured.append(cond)
-                }
-                availableConditions = captured
-            } else {
-                availableConditions = existingRule.conditions
+            let resolvedTx: MoneyTransaction? = sourceTransaction
+                ?? existingRule.sourceTransactionID.flatMap { sid in allTransactions.first(where: { $0.id == sid }) }
+
+            var merged: [RuleCondition] = []
+            if let tx = resolvedTx {
+                merged = TransactionRuleStore.captureAvailableConditions(from: tx, accounts: accounts)
             }
+            // Apply saved rule conditions (overriding captured values for fields already saved on the rule)
+            for cond in existingRule.conditions {
+                if let idx = merged.firstIndex(where: { $0.field == cond.field }) {
+                    merged[idx] = cond
+                } else {
+                    merged.append(cond)
+                }
+            }
+            // Ensure all standard condition options are always visible so the user can add/toggle any option while editing
+            let standardPlaceholders: [RuleCondition] = [
+                RuleCondition(field: .originalSMS, value: "", displayValue: "Match SMS text", smsMatchMode: .contains),
+                RuleCondition(field: .merchant, value: "", displayValue: "Enter merchant or recipient"),
+                RuleCondition(field: .recipientIBAN, value: "", displayValue: "Enter recipient IBAN digits"),
+                RuleCondition(field: .accountDigits, value: "", displayValue: "Enter card or account digits"),
+                RuleCondition(field: .smsSender, value: "", displayValue: "Enter bank phone number"),
+                RuleCondition(field: .accountID, value: "", displayValue: "Choose account"),
+                RuleCondition(field: .amount, value: "", displayValue: "Enter exact amount"),
+                RuleCondition(field: .note, value: "", displayValue: "Enter note text")
+            ]
+            for placeholder in standardPlaceholders where !merged.contains(where: { $0.field == placeholder.field }) {
+                merged.append(placeholder)
+            }
+            // Keep consistent display order (Original SMS first, then standard order)
+            let fieldOrder: [RuleConditionField] = [.originalSMS, .merchant, .recipientIBAN, .accountDigits, .smsSender, .accountID, .location, .amount, .note]
+            merged.sort { lhs, rhs in
+                let i0 = fieldOrder.firstIndex(of: lhs.field) ?? 99
+                let i1 = fieldOrder.firstIndex(of: rhs.field) ?? 99
+                return i0 < i1
+            }
+            availableConditions = merged
             selectedFields = Set(existingRule.conditions.map(\.field))
+            if let accCond = existingRule.conditions.first(where: { $0.field == .accountID }),
+               let accUUID = UUID(uuidString: accCond.value) {
+                manualAccountConditionID = accUUID
+            }
 
             if let locCond = existingRule.conditions.first(where: { $0.field == .location }) {
-                locationRadius = locCond.radiusMeters > 0 ? locCond.radiusMeters : 15.0
+                locationRadius = locCond.radiusMeters > 0 ? locCond.radiusMeters : 10.0
             }
             if let smsCond = existingRule.conditions.first(where: { $0.field == .originalSMS }) {
                 originalSMSMatchMode = smsCond.smsMatchMode ?? .contains
@@ -772,27 +801,27 @@ struct TransactionRuleBuilderSheet: View {
             }
         }
 
-        // Synchronize manual condition values when creating a rule from scratch in Settings
-        if isManualCreation {
-            let cur = UserDefaults.standard.string(forKey: Keys.currency) ?? "BHD"
-            for idx in chosenConditions.indices where chosenConditions[idx].field != .originalSMS {
-                let field = chosenConditions[idx].field
-                if field == .accountID, let accID = manualAccountConditionID {
-                    chosenConditions[idx].value = accID.uuidString
-                    chosenConditions[idx].displayValue = accounts.first(where: { $0.id == accID })?.name ?? "Account"
+        // Synchronize manual condition values (for creating from scratch OR newly added manual conditions when editing)
+        let cur = UserDefaults.standard.string(forKey: Keys.currency) ?? "BHD"
+        for idx in chosenConditions.indices where chosenConditions[idx].field != .originalSMS {
+            let cond = chosenConditions[idx]
+            guard needsManualInput(for: cond) else { continue }
+            let field = cond.field
+            if field == .accountID, let accID = manualAccountConditionID {
+                chosenConditions[idx].value = accID.uuidString
+                chosenConditions[idx].displayValue = accounts.first(where: { $0.id == accID })?.name ?? "Account"
+            } else if let typed = manualConditionValues[field] {
+                let raw = typed.trimmingCharacters(in: .whitespacesAndNewlines)
+                if field == .amount, let parsed = Money.parse(raw), parsed > 0 {
+                    chosenConditions[idx].value = String(format: "%.3f", parsed)
+                    chosenConditions[idx].displayValue = Money.format(parsed, cur)
+                } else if field == .recipientIBAN || field == .accountDigits {
+                    let digits = raw.replacingOccurrences(of: "*", with: "")
+                    chosenConditions[idx].value = digits
+                    chosenConditions[idx].displayValue = digits.isEmpty ? "" : "**\(digits)"
                 } else {
-                    let raw = (manualConditionValues[field] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                    if field == .amount, let parsed = Money.parse(raw), parsed > 0 {
-                        chosenConditions[idx].value = String(format: "%.3f", parsed)
-                        chosenConditions[idx].displayValue = Money.format(parsed, cur)
-                    } else if field == .recipientIBAN || field == .accountDigits {
-                        let digits = raw.replacingOccurrences(of: "*", with: "")
-                        chosenConditions[idx].value = digits
-                        chosenConditions[idx].displayValue = digits.isEmpty ? "" : "**\(digits)"
-                    } else {
-                        chosenConditions[idx].value = raw
-                        chosenConditions[idx].displayValue = raw
-                    }
+                    chosenConditions[idx].value = raw
+                    chosenConditions[idx].displayValue = raw
                 }
             }
         }
@@ -824,8 +853,8 @@ struct TransactionRuleBuilderSheet: View {
         var actions = RuleActions(
             setCategoryRaw: effectiveCat?.rawValue,
             overrideAccountID: enableOverrideAccount ? overrideAccountID : nil,
-            fromAccountID: (effectiveCat == .internalTransfer || effectiveCat == .transfers) ? fromAccountID : nil,
-            toAccountID: (effectiveCat == .internalTransfer) ? toAccountID : nil,
+            fromAccountID: (effectiveCat?.isTransferCategory == true) ? fromAccountID : nil,
+            toAccountID: (effectiveCat == .internalTransfer || effectiveCat == .visaTransfer) ? toAccountID : nil,
             setMerchant: enableSetMerchant && !actionMerchant.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? actionMerchant.trimmingCharacters(in: .whitespacesAndNewlines) : nil,
             setBank: nil,
             setLocationName: effectiveLocationName,
@@ -884,10 +913,9 @@ struct TransactionRuleBuilderSheet: View {
         if applyToExisting && savedRule.isEnabled {
             let affected = computeAffectedTransactions()
             if !affected.isEmpty {
-                let priority = store.priorityNumber(for: savedRule.id) ?? 1
                 for item in affected {
                     Ledger.edit(item.tx, context: modelContext) { target in
-                        store.apply(rule: savedRule, to: target, priorityNumber: priority)
+                        store.applyBestMatchingRuleIfAny(to: target, context: modelContext)
                     }
                 }
             }
@@ -1147,16 +1175,20 @@ struct TransactionDetailRulesSection: View {
 
     var body: some View {
         let context = RuleEvaluationContext(from: tx)
-        // Only show rules that match this transaction
-        let matchedRulesWithIndex: [(originalIndex: Int, rule: TransactionRule)] = store.rules.enumerated().compactMap { index, rule in
-            if store.matches(rule: rule, context: context, ignoreEnabledState: true) {
-                return (originalIndex: index, rule: rule)
+        // Show all matching rules ordered by specificity (most specific first)
+        let resolution = store.evaluateRules(for: context)
+        let winningID = resolution.winningRule?.id
+        let conflictIDs = Set(resolution.conflictingRules.map(\.id))
+        let matchedRules: [TransactionRule] = store.rules
+            .filter { store.matches(rule: $0, context: context, ignoreEnabledState: true) }
+            .sorted {
+                let s0 = store.evaluateSpecificity(rule: $0, context: context, ignoreEnabledState: true)?.score ?? TransactionRuleStore.staticSpecificityScore(for: $0)
+                let s1 = store.evaluateSpecificity(rule: $1, context: context, ignoreEnabledState: true)?.score ?? TransactionRuleStore.staticSpecificityScore(for: $1)
+                return s0 > s1
             }
-            return nil
-        }
 
         VStack(alignment: .leading, spacing: 12) {
-            if matchedRulesWithIndex.isEmpty {
+            if matchedRules.isEmpty {
                 Text("No matching rules for this transaction.")
                     .font(.caption)
                     .foregroundStyle(Theme.secondaryInk)
@@ -1165,15 +1197,21 @@ struct TransactionDetailRulesSection: View {
                     .background(Theme.track.opacity(0.5), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             } else {
                 VStack(spacing: 8) {
-                    ForEach(matchedRulesWithIndex, id: \.rule.id) { item in
+                    ForEach(matchedRules) { rule in
+                        let statusBadge: String? = {
+                            if !rule.isEnabled { return nil }
+                            if conflictIDs.contains(rule.id) { return "Conflict" }
+                            if winningID == rule.id { return "Best Match" }
+                            return nil
+                        }()
                         Button {
-                            editingRule = item.rule
+                            editingRule = rule
                         } label: {
                             TransactionRuleRowCard(
-                                priorityNumber: item.originalIndex + 1,
-                                rule: item.rule,
+                                rule: rule,
                                 accounts: accounts,
-                                isHighlighted: false,
+                                statusBadge: statusBadge,
+                                isHighlighted: winningID == rule.id || conflictIDs.contains(rule.id),
                                 showControls: false,
                                 onToggle: {},
                                 onEdit: {},
@@ -1206,17 +1244,21 @@ struct TransactionDetailRulesSection: View {
     }
 }
 
-// MARK: - Compact Rule Card with Priority & Controls
+// MARK: - Compact Rule Card (Specificity-Based)
 
 struct TransactionRuleRowCard: View {
-    let priorityNumber: Int
     let rule: TransactionRule
     let accounts: [Account]
+    var statusBadge: String? = nil
     var isHighlighted: Bool = false
     var showControls: Bool = true
     let onToggle: () -> Void
     let onEdit: () -> Void
     let onDelete: () -> Void
+
+    private var specificityScore: Int {
+        TransactionRuleStore.staticSpecificityScore(for: rule)
+    }
 
     private func accountName(_ id: UUID?) -> String? {
         guard let id else { return nil }
@@ -1251,29 +1293,37 @@ struct TransactionRuleRowCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            // Row 1: #Priority + Rule Name + Toggle
+            // Row 1: Rule Name + Specificity / Status Badges + Toggle
             HStack(spacing: 8) {
-                Text("#\(priorityNumber)")
-                    .font(.caption.weight(.bold))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(Theme.cobaltSoft, in: Capsule())
-                    .foregroundStyle(Theme.cobalt)
-
-                Text(rule.name.isEmpty ? "Rule \(priorityNumber)" : rule.name)
+                Text(rule.name.isEmpty ? "Rule" : rule.name)
                     .font(.body.weight(.semibold))
                     .foregroundStyle(Theme.ink)
                     .lineLimit(1)
 
                 Spacer(minLength: 8)
 
-                if !rule.isEnabled {
+                if let badge = statusBadge {
+                    let isConflict = badge == "Conflict"
+                    Text(badge)
+                        .font(.caption2.weight(.bold))
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background((isConflict ? Theme.warning : Theme.positive).opacity(0.16), in: Capsule())
+                        .foregroundStyle(isConflict ? Theme.warning : Theme.positive)
+                } else if !rule.isEnabled {
                     Text("Off")
                         .font(.caption2.weight(.bold))
                         .padding(.horizontal, 7)
                         .padding(.vertical, 3)
                         .background(Theme.track, in: Capsule())
                         .foregroundStyle(Theme.secondaryInk)
+                } else {
+                    Text("Score \(specificityScore)")
+                        .font(.caption2.weight(.semibold).monospacedDigit())
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(Theme.cobaltSoft, in: Capsule())
+                        .foregroundStyle(Theme.cobalt)
                 }
 
                 if showControls {
@@ -1404,12 +1454,14 @@ struct TransactionRulesListView: View {
                 }
             } else {
                 Section {
-                    ForEach(Array(store.rules.enumerated()), id: \.element.id) { index, rule in
+                    let sortedRules = store.rules.sorted {
+                        TransactionRuleStore.staticSpecificityScore(for: $0) > TransactionRuleStore.staticSpecificityScore(for: $1)
+                    }
+                    ForEach(sortedRules) { rule in
                         Button {
                             editingRule = rule
                         } label: {
                             TransactionRuleRowCard(
-                                priorityNumber: index + 1,
                                 rule: rule,
                                 accounts: accounts,
                                 isHighlighted: false,
@@ -1423,23 +1475,24 @@ struct TransactionRulesListView: View {
                         .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
                         .listRowBackground(Color.clear)
                         .listRowSeparator(.hidden)
-                    }
-                    .onMove { source, destination in
-                        store.moveRules(from: source, to: destination)
-                    }
-                    .onDelete { offsets in
-                        store.deleteRules(at: offsets)
+                        .swipeActions(edge: .trailing) {
+                            Button(role: .destructive) {
+                                store.deleteRule(id: rule.id)
+                            } label: {
+                                Label("Delete", systemImage: "trash")
+                            }
+                        }
                     }
                 } header: {
                     HStack {
-                        Text("Rules Priority Order")
+                        Text("Rules (Most Specific First)")
                         Spacer()
-                        Text("Drag to Reorder")
+                        Text("Specificity-Based")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
                 } footer: {
-                    Text("Rules have the highest priority in the app and apply only to future matching transactions. Existing transactions are never modified when creating or editing rules.")
+                    Text("All enabled rules are evaluated and only the most specific matching rule executes, regardless of creation order. If multiple rules tie with equal specificity and different outcomes, the conflict is flagged for your review.")
                 }
                 .listSectionSeparator(.hidden)
 
@@ -1464,10 +1517,7 @@ struct TransactionRulesListView: View {
         .navigationTitle("Transaction Rules")
         .navigationBarTitleDisplayMode(.large)
         .toolbar {
-            ToolbarItemGroup(placement: .topBarTrailing) {
-                if !store.rules.isEmpty {
-                    EditButton()
-                }
+            ToolbarItem(placement: .topBarTrailing) {
                 Button {
                     showCreateRule = true
                 } label: {

@@ -957,6 +957,7 @@ struct StatementFieldMappingSheet: View {
 struct EditStatementItemSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State var item: ParsedStatementItem
+    @State private var showCategoryPicker = false
     var onSaved: (ParsedStatementItem) -> Void
 
     var body: some View {
@@ -976,10 +977,44 @@ struct EditStatementItemSheet: View {
                 }
 
                 Section("Category") {
-                    Picker("Category", selection: $item.category) {
-                        ForEach(SpendCategory.allCases) { cat in
-                            Label(cat.title, systemImage: cat.symbol).tag(cat)
+                    Button {
+                        showCategoryPicker = true
+                    } label: {
+                        HStack(spacing: 10) {
+                            Text("Category")
+                                .foregroundStyle(Theme.ink)
+                            Spacer()
+                            HStack(spacing: 6) {
+                                CategoryIcon(category: item.category, size: 22)
+                                Text(item.category.title)
+                                    .font(.subheadline.weight(.medium))
+                                    .foregroundStyle(Theme.ink)
+                                    .lineLimit(1)
+                                Image(systemName: "chevron.up.chevron.down")
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(Theme.secondaryInk)
+                            }
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(Theme.track.opacity(0.65), in: Capsule())
                         }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .sheet(isPresented: $showCategoryPicker) {
+                        TransactionCategoryPickerSheet(
+                            selected: item.category,
+                            initialTab: item.category.isTransferCategory ? .transfers : (item.isIncome || item.category.isIncomeCategory ? .income : .expenses),
+                            onSelect: { chosen in
+                                item.category = chosen
+                                if chosen.isIncomeCategory || chosen == .transferIn {
+                                    item.isIncome = true
+                                } else if !chosen.isTransferCategory {
+                                    item.isIncome = false
+                                }
+                            }
+                        )
+                        .presentationDetents([.medium, .large])
                     }
                 }
 

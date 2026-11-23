@@ -104,11 +104,16 @@ struct NetWorthView: View {
 
     private func accountRow(_ account: Account) -> some View {
         let isExcluded = !account.includeInNetWorth
+        let isLoanPaid = account.kind == .loan && account.isLoanInstallmentPaidForCurrentCycle()
         return Button { editing = account } label: {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 12) {
-                    AccountIcon(account: account, size: 40)
-                        .saturation(isExcluded ? 0 : 1)
+                    if isLoanPaid {
+                        IconBadge(symbol: "checkmark", color: Theme.positive, size: 40)
+                    } else {
+                        AccountIcon(account: account, size: 40)
+                            .saturation(isExcluded ? 0 : 1)
+                    }
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: 6) {
                             Text(account.name)
@@ -123,22 +128,11 @@ struct NetWorthView: View {
                                     .padding(.vertical, 3)
                                     .background(Theme.track, in: Capsule())
                             }
-                            if account.kind == .loan && account.isLoanInstallmentPaidForCurrentCycle() {
-                                HStack(spacing: 3) {
-                                    Image(systemName: "checkmark.circle.fill")
-                                        .font(.system(size: 10, weight: .bold))
-                                    Text("Paid this month")
-                                        .font(.caption2.weight(.semibold))
-                                }
-                                .foregroundStyle(Theme.positive)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2.5)
-                                .background(Theme.positive.opacity(0.14), in: Capsule())
-                            } else if account.kind.isLiability {
+                            if account.kind.isLiability && !isLoanPaid {
                                 dueBadge(for: account)
                             }
                         }
-                        Text(account.kind.title)
+                        Text(isLoanPaid ? "Loan · Paid" : account.kind.title)
                             .font(.caption)
                             .foregroundStyle(Theme.secondaryInk)
                             .lineLimit(1)

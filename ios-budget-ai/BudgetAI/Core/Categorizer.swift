@@ -231,6 +231,22 @@ enum Categorizer {
         return false
     }
 
+    /// True when an extracted IBAN/account suffix is a masked placeholder (e.g. "0000", "000", "000000")
+    /// that banks reuse across unrelated recipients. Never learn automatic categories from masked zeros.
+    static func isMaskedPlaceholderIBAN(_ raw: String?) -> Bool {
+        guard let raw else { return true }
+        let digits = raw.filter(\.isNumber)
+        guard digits.count >= 3 else { return true }
+        return digits.allSatisfy { $0 == "0" }
+    }
+
+    /// True when a merchant label is an identifier-based string whose only digits are masked zeros (e.g. "IBAN ending 0000").
+    static func isMaskedPlaceholderMerchant(_ merchant: String) -> Bool {
+        guard isIdentifierBasedMerchant(merchant) else { return false }
+        let digits = merchant.filter(\.isNumber)
+        return !digits.isEmpty && digits.allSatisfy { $0 == "0" }
+    }
+
     /// Persistent store for explicit user category choices by recipient IBAN or merchant.
     final class UserCategoryLearningStore: @unchecked Sendable {
         static let shared = UserCategoryLearningStore()
@@ -265,12 +281,12 @@ enum Categorizer {
             defer { lock.unlock() }
             var map = loadLocked()
 
-            if let cleanIBAN = Self.cleanDigits(recipientIBAN), cleanIBAN.count >= 3 {
+            if let cleanIBAN = Self.cleanDigits(recipientIBAN), !Categorizer.isMaskedPlaceholderIBAN(cleanIBAN) {
                 map["iban:\(cleanIBAN)"] = entry
             }
 
             let trimmed = merchant.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.count >= 2 && !Categorizer.isGenericPlaceholderMerchant(trimmed) {
+            if trimmed.count >= 2 && !Categorizer.isGenericPlaceholderMerchant(trimmed) && !Categorizer.isMaskedPlaceholderMerchant(trimmed) {
                 let lower = trimmed.lowercased()
                 map["merchant:\(lower)"] = entry
                 if !Categorizer.isIdentifierBasedMerchant(trimmed) {
@@ -297,15 +313,15 @@ enum Categorizer {
                 return (cat, sub)
             }
 
-            // 1. Highest priority: exact recipient IBAN / account suffix
-            if let cleanIBAN = Self.cleanDigits(recipientIBAN), cleanIBAN.count >= 3,
+            // 1. Highest priority: exact recipient IBAN / account suffix (never for masked placeholder like 0000)
+            if let cleanIBAN = Self.cleanDigits(recipientIBAN), !Categorizer.isMaskedPlaceholderIBAN(cleanIBAN),
                let hit = resolve(map["iban:\(cleanIBAN)"]) {
                 return hit
             }
 
-            // 2. Exact merchant match (skip generic placeholders)
+            // 2. Exact merchant match (skip generic and masked-zero placeholders like "IBAN ending 0000")
             let trimmed = merchant.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard trimmed.count >= 2, !Categorizer.isGenericPlaceholderMerchant(trimmed) else { return nil }
+            guard trimmed.count >= 2, !Categorizer.isGenericPlaceholderMerchant(trimmed), !Categorizer.isMaskedPlaceholderMerchant(trimmed) else { return nil }
             let lower = trimmed.lowercased()
             if let hit = resolve(map["merchant:\(lower)"]) {
                 return hit
@@ -375,9 +391,9 @@ enum Categorizer {
         }
 
         let cleanIBAN = recipientIBAN?.filter(\.isNumber)
-        let hasIBAN = (cleanIBAN?.count ?? 0) >= 3
+        let hasIBAN = !isMaskedPlaceholderIBAN(cleanIBAN)
         let cleaned = merchant.trimmingCharacters(in: .whitespacesAndNewlines)
-        let canUseMerchant = cleaned.count >= 2 && !isGenericPlaceholderMerchant(cleaned)
+        let canUseMerchant = cleaned.count >= 2 && !isGenericPlaceholderMerchant(cleaned) && !isMaskedPlaceholderMerchant(cleaned)
         guard hasIBAN || canUseMerchant else { return nil }
 
         let targetKey = canUseMerchant ? Finance.merchantKey(cleaned) : ""
@@ -482,6 +498,10 @@ struct ParsedSMS {
     var toAccountID: UUID? = nil
     var goalID: UUID? = nil
     var matchedUserRule: Bool = false
+    /// ID of the TransactionRule that matched during initial parsing (used to prevent partial overlap if a more specific rule wins once account/location are attached).
+    var matchedUserRuleID: UUID? = nil
+    /// Category before initial rule application, so a less-specific rule's category never leaks if a more specific rule or conflict replaces it.
+    var preRuleCategory: SpendCategory? = nil
     /// True when `balance` is a credit card's available limit (e.g. "Available Bal" in a Visa payment SMS), not a bank balance.
     var balanceIsCardLimit: Bool = false
     /// ID of the published knowledge pattern (SMS Testing Lab) that shaped this result, if any.
@@ -957,66 +977,85 @@ enum SMSParser {
                 note: parsed.note ?? "",
                 rawText: normalized
             )
-            guard let rule = TransactionRuleStore.shared.firstMatchingRule(for: evalContext) else { return }
-            let priorityNum = TransactionRuleStore.shared.priorityNumber(for: rule.id) ?? 1
-            let act = rule.actions
+            let resolution = TransactionRuleStore.shared.evaluateRules(for: evalContext)
+            switch resolution {
+            case .noMatch:
+                return
+            case .conflict(_, _, let reason):
+                parsed.classificationReason = reason
+                return
+            case .matched(let match, let reason):
+                let rule = match.rule
+                let act = rule.actions
+                parsed.preRuleCategory = parsed.category
+                parsed.matchedUserRuleID = rule.id
 
-            if let setInc = act.setIsIncome {
-                parsed.isIncome = setInc
-            }
-            if let tk = act.effectiveTransferKind {
-                switch tk {
-                case .internalTransfer:
-                    parsed.transactionType = .internalTransfer
-                    parsed.category = .internalTransfer
-                    parsed.isIncome = false
-                    if let fromID = act.fromAccountID {
+                if let setInc = act.setIsIncome {
+                    parsed.isIncome = setInc
+                }
+                if let tk = act.effectiveTransferKind {
+                    switch tk {
+                    case .internalTransfer:
+                        parsed.transactionType = .internalTransfer
+                        parsed.category = .internalTransfer
+                        parsed.isIncome = false
+                        if let fromID = act.fromAccountID {
+                            parsed.accountID = fromID
+                        }
+                        if let toID = act.toAccountID, toID != parsed.accountID {
+                            parsed.toAccountID = toID
+                        }
+                    case .externalTransfer:
+                        parsed.transactionType = parsed.isIncome ? .transferIn : .transferOut
+                        parsed.category = .transfers
+                        parsed.toAccountID = nil
+                        parsed.goalID = nil
+                        if let fromID = act.fromAccountID {
+                            parsed.accountID = fromID
+                        }
+                    }
+                } else if let cat = act.category {
+                    parsed.category = cat
+                    if cat == .transferIn {
+                        parsed.isIncome = true
+                        parsed.transactionType = .transferIn
+                        parsed.toAccountID = nil
+                    } else if cat.isTransferCategory {
+                        parsed.isIncome = false
+                        parsed.transactionType = .transferOut
+                        parsed.toAccountID = nil
+                    } else if cat.isIncomeCategory {
+                        parsed.isIncome = true
+                        parsed.transactionType = .income
+                        parsed.toAccountID = nil
+                    } else {
+                        parsed.transactionType = parsed.isIncome ? .income : .expense
+                        parsed.toAccountID = nil
+                    }
+                    if let fromID = act.overrideAccountID ?? act.fromAccountID {
                         parsed.accountID = fromID
                     }
-                    if let toID = act.toAccountID, toID != parsed.accountID {
-                        parsed.toAccountID = toID
-                    }
-                case .externalTransfer:
-                    parsed.transactionType = parsed.isIncome ? .transferIn : .transferOut
-                    parsed.category = .transfers
-                    parsed.toAccountID = nil
-                    parsed.goalID = nil
-                    if let fromID = act.fromAccountID {
-                        parsed.accountID = fromID
-                    }
-                }
-            } else if let cat = act.category {
-                parsed.category = cat
-                if cat.isIncomeCategory {
-                    parsed.isIncome = true
-                    parsed.transactionType = .income
-                } else {
-                    parsed.transactionType = parsed.isIncome ? .income : .expense
-                    parsed.toAccountID = nil
-                }
-                if let fromID = act.overrideAccountID ?? act.fromAccountID {
+                } else if let fromID = act.overrideAccountID ?? act.fromAccountID {
                     parsed.accountID = fromID
                 }
-            } else if let fromID = act.overrideAccountID ?? act.fromAccountID {
-                parsed.accountID = fromID
+                if let m = act.setMerchant?.trimmingCharacters(in: .whitespacesAndNewlines), !m.isEmpty {
+                    parsed.merchant = m
+                }
+                if let b = act.setBank?.trimmingCharacters(in: .whitespacesAndNewlines), !b.isEmpty {
+                    parsed.detectedBank = b
+                    parsed.accountHint = b
+                    parsed.bankConfidence = .high
+                }
+                if let n = act.setNote?.trimmingCharacters(in: .whitespacesAndNewlines), !n.isEmpty {
+                    parsed.note = n
+                }
+                if let g = act.setGoalID {
+                    parsed.goalID = g
+                }
+                parsed.confidence = .high
+                parsed.classificationReason = reason
+                parsed.matchedUserRule = true
             }
-            if let m = act.setMerchant?.trimmingCharacters(in: .whitespacesAndNewlines), !m.isEmpty {
-                parsed.merchant = m
-            }
-            if let b = act.setBank?.trimmingCharacters(in: .whitespacesAndNewlines), !b.isEmpty {
-                parsed.detectedBank = b
-                parsed.accountHint = b
-                parsed.bankConfidence = .high
-            }
-            if let n = act.setNote?.trimmingCharacters(in: .whitespacesAndNewlines), !n.isEmpty {
-                parsed.note = n
-            }
-            if let g = act.setGoalID {
-                parsed.goalID = g
-            }
-            parsed.confidence = .high
-            parsed.classificationReason = "Matched: \(rule.name)"
-            parsed.matchedUserRule = true
         }
 
         // 1. Check Verified Rule: BisB / Bahrain Outgoing Fawri+ Payment credited to recipient IBAN
@@ -1822,15 +1861,27 @@ enum SMSParser {
     /// saved sender rule, or phone number.
     /// When card/account digits are present, MATCHING DIGITS HAS HIGHEST PRIORITY so credit cards
     /// and specific accounts are correctly identified even if bank name differs or is omitted.
-    static func findMatchingAccount(forBank bank: String?, senderOrPhone: String? = nil, digits: String? = nil, in context: ModelContext) -> Account? {
+    static func findMatchingAccount(forBank bank: String?, senderOrPhone: String? = nil, digits: String? = nil, rawText: String? = nil, in context: ModelContext) -> Account? {
         let accounts = (try? context.fetch(FetchDescriptor<Account>(sortBy: [SortDescriptor(\.createdAt)]))) ?? []
-        return findMatchingAccount(forBank: bank, senderOrPhone: senderOrPhone, digits: digits, in: accounts)
+        return findMatchingAccount(forBank: bank, senderOrPhone: senderOrPhone, digits: digits, rawText: rawText, in: accounts)
     }
 
-    static func findMatchingAccount(forBank bank: String?, senderOrPhone: String? = nil, digits: String? = nil, in accounts: [Account]) -> Account? {
+    static func findMatchingAccount(forBank bank: String?, senderOrPhone: String? = nil, digits: String? = nil, rawText: String? = nil, in accounts: [Account]) -> Account? {
         guard !accounts.isEmpty else { return nil }
-        let trimmedBank = bank?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedBankInput = bank?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let senderBank: String? = {
+            guard let s = senderOrPhone?.trimmingCharacters(in: .whitespacesAndNewlines), !s.isEmpty else { return nil }
+            return detectBank(in: s).bank
+        }()
+        let trimmedBank = (trimmedBankInput?.isEmpty == false) ? trimmedBankInput : senderBank
         let hasBank = (trimmedBank?.isEmpty == false)
+
+        let lowerRaw = (rawText ?? "").lowercased()
+        let isDebitCardSMS = lowerRaw.contains("debit card") || lowerRaw.contains("atm ") || lowerRaw.contains("بطاقة الصراف") || lowerRaw.contains("بطاقة الخصم")
+        let isCreditCardSMS = !isDebitCardSMS && (
+            lowerRaw.contains("credit card") || lowerRaw.contains("visa infinite") || lowerRaw.contains("visa platinum")
+            || lowerRaw.contains("visa signature") || lowerRaw.contains("mastercard credit") || lowerRaw.contains("البطاقة الائتمانية")
+        )
 
         // 1. Primary rule: When digits are provided (card number or account suffix from SMS),
         // MATCHING DIGITS HAS HIGHEST PRIORITY!
@@ -1838,15 +1889,20 @@ enum SMSParser {
         // is matched first, regardless of whether the account has a bank name or institution set.
         if let digits, !digits.isEmpty {
             let matchingDigitsAccounts = accounts.filter { acc in
-                digitsMatch(accountMatch: acc.smsMatch, query: digits)
+                acc.kind != .loan && digitsMatch(accountMatch: acc.smsMatch, query: digits)
             }
             if !matchingDigitsAccounts.isEmpty {
                 // a. If an account matches BOTH digits and the bank name/institution, that's top priority
-                if hasBank, let b = trimmedBank,
-                   let bothMatch = matchingDigitsAccounts.first(where: { accountMatchesBank($0, bank: b) }) {
-                    return bothMatch
+                if hasBank, let b = trimmedBank {
+                    let both = matchingDigitsAccounts.filter { accountMatchesBank($0, bank: b) }
+                    if isDebitCardSMS, let liquid = both.first(where: { $0.kind.isLiquid }) { return liquid }
+                    if isCreditCardSMS, let card = both.first(where: { $0.kind == .creditCard }) { return card }
+                    if let first = both.first { return first }
                 }
-                // b. If any matched account is a Credit Card, prioritize it (cards often have blank or separate institution)
+                // b. Respect debit vs credit card hint when disambiguating
+                if isDebitCardSMS, let liquid = matchingDigitsAccounts.first(where: { $0.kind.isLiquid }) {
+                    return liquid
+                }
                 if let cardMatch = matchingDigitsAccounts.first(where: { $0.kind == .creditCard }) {
                     return cardMatch
                 }
@@ -1859,19 +1915,47 @@ enum SMSParser {
             }
         }
 
-        // 2. Bank matching (when digits were not provided or no account had matching digits)
-        let sortedAccounts = accounts.sorted { ($0.kind.isLiquid ? 0 : 1) < ($1.kind.isLiquid ? 0 : 1) }
+        // 2. Bank matching (via detected bank name, bank phone number like Tel 17515151, or SMS sender ID)
+        let eligibleAll = accounts.filter { $0.kind != .loan }
+        let sortedAccounts = eligibleAll.sorted { ($0.kind.isLiquid ? 0 : 1) < ($1.kind.isLiquid ? 0 : 1) }
         if hasBank, let b = trimmedBank {
             let matchingBankAccounts = sortedAccounts.filter { accountMatchesBank($0, bank: b) }
             if !matchingBankAccounts.isEmpty {
-                // If multiple accounts exist for this bank, prefer one without a conflicting smsMatch
-                if let digits, !digits.isEmpty,
-                   let unconfiguredOrMatching = matchingBankAccounts.first(where: {
-                       $0.smsMatch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || digitsMatch(accountMatch: $0.smsMatch, query: digits)
-                   }) {
-                    return unconfiguredOrMatching
+                // Narrow by card/account type when the SMS explicitly specifies Debit card vs Credit card
+                let typedCandidates: [Account] = {
+                    if isDebitCardSMS {
+                        let liquid = matchingBankAccounts.filter { $0.kind.isLiquid }
+                        return liquid
+                    }
+                    if isCreditCardSMS {
+                        let cards = matchingBankAccounts.filter { $0.kind == .creditCard }
+                        return cards.isEmpty ? matchingBankAccounts : cards
+                    }
+                    return matchingBankAccounts
+                }()
+
+                // If there is exactly ONE eligible account at this bank, match it unambiguously!
+                if typedCandidates.count == 1 {
+                    return typedCandidates[0]
                 }
-                return matchingBankAccounts.first
+
+                // If multiple accounts exist at this bank:
+                // - If SMS had card/account digits that didn't match ANY account, NEVER randomly guess!
+                if let digits, !digits.isEmpty {
+                    let unconfigured = typedCandidates.filter { $0.smsMatch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+                    // Only pick an unconfigured account if it is the sole unconfigured candidate AND no other liquid candidate competes
+                    if typedCandidates.count == 1, let only = unconfigured.first {
+                        return only
+                    }
+                    return nil
+                }
+
+                // - If SMS had no digits, only pick if there's a single liquid bank account for this bank
+                let liquidOnly = typedCandidates.filter { $0.kind.isLiquid }
+                if liquidOnly.count == 1 {
+                    return liquidOnly[0]
+                }
+                return nil
             }
         }
 
@@ -1879,16 +1963,18 @@ enum SMSParser {
         if let senderOrPhone {
             let cleanSender = senderOrPhone.trimmingCharacters(in: .whitespacesAndNewlines)
             let phoneDigits = normalizePhoneDigits(cleanSender)
-            if !phoneDigits.isEmpty,
-               let acc = sortedAccounts.first(where: {
-                   let m = normalizePhoneDigits($0.smsMatch)
-                   guard !m.isEmpty && (m == phoneDigits || phoneDigits.hasSuffix(m) || m.hasSuffix(phoneDigits)) else { return false }
-                   if hasBank, let b = trimmedBank, $0.kind != .creditCard, bankName(forAccount: $0) != nil, !accountMatchesBank($0, bank: b) {
-                       return false
-                   }
-                   return true
-               }) {
-                return acc
+            if !phoneDigits.isEmpty {
+                let phoneMatches = sortedAccounts.filter {
+                    let m = normalizePhoneDigits($0.smsMatch)
+                    guard !m.isEmpty && (m == phoneDigits || phoneDigits.hasSuffix(m) || m.hasSuffix(phoneDigits)) else { return false }
+                    if hasBank, let b = trimmedBank, $0.kind != .creditCard, bankName(forAccount: $0) != nil, !accountMatchesBank($0, bank: b) {
+                        return false
+                    }
+                    return true
+                }
+                if phoneMatches.count == 1 {
+                    return phoneMatches[0]
+                }
             }
         }
 

@@ -742,9 +742,7 @@ enum SubscriptionMatchingEngine {
             tx.billMatchConfidence = score
             tx.billMatchReason = reason
             tx.billReviewStatusRaw = "confirmedBill"
-            if tx.category == .bills || tx.category == .other || tx.category == .subscriptions {
-                tx.category = bill.category
-            }
+            tx.category = bill.category
             try? context.save()
             Notifier.rescheduleBills(bills)
             return bill
@@ -924,6 +922,7 @@ enum SubscriptionMatchingEngine {
         tx.billMatchConfidence = 1.0
         tx.billMatchReason = "Confirmed match for \(bill.name)"
         tx.billReviewStatusRaw = "confirmedBill"
+        tx.category = bill.category
 
         store.recordConfirmation(bill: bill, signal: signal)
 

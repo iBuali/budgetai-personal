@@ -619,6 +619,8 @@ final class MoneyTransaction {
     var billMatchConfidence: Double = 0
     /// Concise human-readable explanation of the subscription/bill match.
     var billMatchReason: String = ""
+    /// Comma-separated UUIDs of equal-specificity conflicting TransactionRules awaiting user review.
+    var ruleConflictIDsRaw: String = ""
     /// True when `smsBalance` in the SMS represents a credit card's available credit limit rather than a bank deposit balance.
     var smsBalanceIsCardLimit: Bool = false
     /// Name of the place of purchase or location (e.g. "City Centre Bahrain", "Manama").
@@ -765,6 +767,22 @@ final class MoneyTransaction {
     /// True if this transaction is flagged in Review to be confirmed or rejected as a recurring bill/subscription.
     var needsBillReview: Bool {
         billReviewStatusRaw == "suggestedNewBill" && billID == nil
+    }
+
+    /// Conflicting equal-specificity TransactionRule IDs awaiting user selection.
+    var ruleConflictIDs: [UUID] {
+        get {
+            ruleConflictIDsRaw.split(separator: ",")
+                .compactMap { UUID(uuidString: $0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        }
+        set {
+            ruleConflictIDsRaw = newValue.map(\.uuidString).joined(separator: ",")
+        }
+    }
+
+    /// True if multiple equally specific rules matched this transaction with different outcomes.
+    var hasRuleConflict: Bool {
+        !ruleConflictIDs.isEmpty
     }
 
     /// Difference between paid amount and expected bill/subscription amount (`> 0` price increase, `< 0` price decrease).

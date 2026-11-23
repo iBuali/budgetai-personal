@@ -1449,34 +1449,29 @@ struct BudgetAITests {
         _ = TransactionRuleStore.shared.addRule(ruleExternal)
         _ = TransactionRuleStore.shared.addRule(ruleInternal)
         #expect(TransactionRuleStore.shared.rules.count == 2)
-        #expect(TransactionRuleStore.shared.priorityNumber(for: ruleExternal.id) == 1) // Rule 1
-        #expect(TransactionRuleStore.shared.priorityNumber(for: ruleInternal.id) == 2) // Rule 2
 
         // Existing sampleTx must NOT be altered when rules are created
         #expect(sampleTx.merchant != "External Recipient 0846")
 
-        // 4. Since Rule 1 has higher priority than Rule 2, a matching future SMS uses Rule 1
-        let futureSMS1 = "Fawri+ payment BHD 25.000, ref: BIB103KAK999222 was credited to IBAN ending 0846 on 2026/11/02 12:00. Balance BHD 935.000. Tel: 17515151"
+        // 4. Specificity-based matching: ruleInternal (IBAN + Bank, 2 conditions) is MORE specific than
+        // ruleExternal (IBAN only, 1 condition), so ruleInternal wins automatically regardless of creation order!
+        let futureSMS1 = "Fawri+ payment BHD 30.000, ref: BIB103KAK999333 was credited to IBAN ending 0846 on 2026/11/03 15:00. Balance BHD 905.000. Tel: 17515151"
         let outFuture1 = await SMSImporter.importText(futureSMS1, context: context, forceApprove: true)
         let txFuture1 = try #require(outFuture1.transaction)
-        #expect(txFuture1.merchant == "External Recipient 0846")
-        #expect(txFuture1.category == .transfers)
-        #expect(txFuture1.toAccountID == nil)
+        #expect(txFuture1.smsTransactionType == .internalTransfer)
+        #expect(txFuture1.category == .internalTransfer)
+        #expect(txFuture1.accountID == bisb.id)
+        #expect(txFuture1.toAccountID == ila.id)
+        #expect(abs(ila.balance - 230.000) < 0.0001)
 
-        // 5. Reorder rules so Rule 2 (Internal Transfer) becomes Rule 1 (highest priority)
-        TransactionRuleStore.shared.moveRules(from: IndexSet(integer: 1), to: 0)
-        #expect(TransactionRuleStore.shared.priorityNumber(for: ruleInternal.id) == 1)
-        #expect(TransactionRuleStore.shared.priorityNumber(for: ruleExternal.id) == 2)
-
-        // Now a future SMS to IBAN 0846 from BisB matches the new Rule 1 (Internal Transfer from BisB -> ila)
-        let futureSMS2 = "Fawri+ payment BHD 30.000, ref: BIB103KAK999333 was credited to IBAN ending 0846 on 2026/11/03 15:00. Balance BHD 905.000. Tel: 17515151"
+        // 5. When the more specific ruleInternal is disabled, ruleExternal wins cleanly
+        TransactionRuleStore.shared.setRuleEnabled(id: ruleInternal.id, isEnabled: false)
+        let futureSMS2 = "Fawri+ payment BHD 25.000, ref: BIB103KAK999222 was credited to IBAN ending 0846 on 2026/11/04 12:00. Balance BHD 880.000. Tel: 17515151"
         let outFuture2 = await SMSImporter.importText(futureSMS2, context: context, forceApprove: true)
         let txFuture2 = try #require(outFuture2.transaction)
-        #expect(txFuture2.smsTransactionType == .internalTransfer)
-        #expect(txFuture2.category == .internalTransfer)
-        #expect(txFuture2.accountID == bisb.id)
-        #expect(txFuture2.toAccountID == ila.id)
-        #expect(abs(ila.balance - 230.000) < 0.0001) // Credited 30.000 to ila via internal transfer rule!
+        #expect(txFuture2.merchant == "External Recipient 0846")
+        #expect(txFuture2.category == .transfers)
+        #expect(txFuture2.toAccountID == nil)
 
         // 6. Test OR logic rule
         let orRule = TransactionRule(
@@ -1634,7 +1629,7 @@ struct BudgetAITests {
         #expect(store.matches(rule: ruleWithoutCategory, context: context, ignoreEnabledState: true))
 
         // Apply rule
-        store.apply(rule: ruleWithoutCategory, to: tx, priorityNumber: 1)
+        store.apply(rule: ruleWithoutCategory, to: tx)
         #expect(tx.category == SpendCategory.dining) // Remains .dining because setCategory was not enabled
         #expect(tx.merchant == "Talabat Delivery") // Cleaned up
         #expect(tx.accountID == designatedAccount.id) // Override Account force-routed it
@@ -1667,7 +1662,7 @@ struct BudgetAITests {
             source: .manual
         )
 
-        store.apply(rule: internalTransferRule, to: transferTx, priorityNumber: 2)
+        store.apply(rule: internalTransferRule, to: transferTx)
         #expect(transferTx.category == SpendCategory.internalTransfer)
         #expect(transferTx.accountID == checkingAccount.id)
         #expect(transferTx.toAccountID == savingsAccount.id)
@@ -1870,7 +1865,7 @@ struct BudgetAITests {
         #expect(store.matches(rule: wideRadiusRule, context: contextOutside, ignoreEnabledState: true))
 
         // 6. Test applying the rule to txWithin8m
-        store.apply(rule: locationRule, to: txWithin8m, priorityNumber: 1)
+        store.apply(rule: locationRule, to: txWithin8m)
         #expect(txWithin8m.category == SpendCategory.dining)
         #expect(txWithin8m.merchant == "Mall Cafe")
 
@@ -3801,5 +3796,176 @@ struct BudgetAITests {
         #expect(Ledger.processScheduledLoanInstallments(context: context, now: now).isEmpty)
         #expect(abs(bank2.balance - 680.000) < 0.001)
         #expect(abs(loan2.balance - 2880.000) < 0.001)
+    }
+
+    @Test func specificityBasedRulesEngineOverridesGenericAndDetectsEqualSpecificityConflicts() async throws {
+        let context = makeCleanContext()
+        TransactionRuleStore.shared.clearAll()
+        defer { TransactionRuleStore.shared.clearAll() }
+
+        let bisb = Account(name: "BisB", kind: .bank, institution: "BisB", balance: 800.000)
+        bisb.smsMatch = "9001"
+        context.insert(bisb)
+        try context.save()
+
+        let sms = "Fawri+ payment BHD150.110, ref: BIB103KBB004KH9V credited to IBAN ending 0000 on 2026/11/23 15:09. Fee & VAT: BD 0.110. Bal: BHD638.219. Tel: 17515151"
+
+        // Rule 1 (generic, created FIRST): IBAN **0000 -> Groceries
+        let genericRule = TransactionRule(
+            name: "Generic IBAN 0000 Groceries",
+            isEnabled: true,
+            logic: .and,
+            conditions: [
+                RuleCondition(field: .recipientIBAN, value: "0000", displayValue: "**0000")
+            ],
+            actions: RuleActions(setCategoryRaw: SpendCategory.groceries.rawValue)
+        )
+
+        // Rule 2 (specific, created SECOND): Original SMS Exact + IBAN **0000 + Phone 17515151 + Account BisB + Amount 150.110 -> Transfer Out
+        let specificRule = TransactionRule(
+            name: "Specific 150.110 Association",
+            isEnabled: true,
+            logic: .and,
+            conditions: [
+                RuleCondition(field: .originalSMS, value: sms, displayValue: "Exact SMS", smsMatchMode: .exactTemplate),
+                RuleCondition(field: .recipientIBAN, value: "0000", displayValue: "**0000"),
+                RuleCondition(field: .smsSender, value: "17515151", displayValue: "17515151"),
+                RuleCondition(field: .accountID, value: bisb.id.uuidString, displayValue: "BisB"),
+                RuleCondition(field: .amount, value: "150.110", displayValue: "BD 150.110")
+            ],
+            actions: RuleActions(
+                setCategoryRaw: SpendCategory.transfers.rawValue,
+                setMerchant: "جمعية 2026"
+            )
+        )
+
+        TransactionRuleStore.shared.addRule(genericRule)
+        TransactionRuleStore.shared.addRule(specificRule)
+
+        let res = await SMSImporter.importText(sms, context: context, forceApprove: true)
+        let tx = try #require(res.transaction)
+        // Specific rule MUST win over generic rule regardless of creation order — never Groceries!
+        #expect(tx.category == .transfers)
+        #expect(tx.merchant == "جمعية 2026")
+        #expect(tx.hasRuleConflict == false)
+        #expect(tx.smsClassificationReason.contains("Specific 150.110 Association"))
+
+        // Equal-specificity conflict detection: two rules with identical specificity score but different categories
+        TransactionRuleStore.shared.clearAll()
+        let conflictA = TransactionRule(
+            name: "Conflict A (Dining)",
+            isEnabled: true,
+            logic: .and,
+            conditions: [RuleCondition(field: .recipientIBAN, value: "7777", displayValue: "**7777")],
+            actions: RuleActions(setCategoryRaw: SpendCategory.dining.rawValue)
+        )
+        let conflictB = TransactionRule(
+            name: "Conflict B (Shopping)",
+            isEnabled: true,
+            logic: .and,
+            conditions: [RuleCondition(field: .recipientIBAN, value: "7777", displayValue: "**7777")],
+            actions: RuleActions(setCategoryRaw: SpendCategory.shopping.rawValue)
+        )
+        // Add directly (different condition values or IDs with same specificity weight: IBAN vs Original SMS contains of same weight, or two distinct equal-weight fields)
+        let conflictFieldA = TransactionRule(
+            name: "Merchant Rule (Dining)",
+            isEnabled: true,
+            logic: .and,
+            conditions: [RuleCondition(field: .merchant, value: "CONFLICT CAFE", displayValue: "CONFLICT CAFE")],
+            actions: RuleActions(setCategoryRaw: SpendCategory.dining.rawValue)
+        )
+        let conflictFieldB = TransactionRule(
+            name: "Location Name Rule (Shopping)",
+            isEnabled: true,
+            logic: .and,
+            conditions: [RuleCondition(field: .location, value: "City Centre", displayValue: "City Centre")],
+            actions: RuleActions(setCategoryRaw: SpendCategory.shopping.rawValue)
+        )
+        _ = conflictA; _ = conflictB
+        TransactionRuleStore.shared.addRule(conflictFieldA)
+        TransactionRuleStore.shared.addRule(conflictFieldB)
+
+        let conflictTx = MoneyTransaction(amount: 5.0, isIncome: false, merchant: "CONFLICT CAFE", category: .other, date: .now, source: .sms, accountID: bisb.id)
+        conflictTx.locationName = "City Centre"
+        let resolution = TransactionRuleStore.shared.applyBestMatchingRuleIfAny(to: conflictTx, context: context)
+        if case .conflict(let matches, _, _) = resolution {
+            #expect(matches.count == 2)
+        } else {
+            #expect(Bool(false), "Expected equal-specificity conflict between Merchant (35) and Location Name (35)")
+        }
+        #expect(conflictTx.hasRuleConflict == true)
+        #expect(conflictTx.category == .other)
+    }
+
+    @Test func debitCardSMSMatchesSingleBankByPhoneAndQuarantinesWhenAmbiguous() async throws {
+        let context = makeCleanContext()
+        TransactionRuleStore.shared.clearAll()
+        defer { TransactionRuleStore.shared.clearAll() }
+
+        let sms = "Dear ISA, thank you for using your Debit card 7854 for BHD 130.050 at BFC Remittance MANAMA ManBH-170555 on 22/11 @13:05. Avail Bal BHD 370.045. Tel 17515151"
+
+        // Case 1: 1 BisB bank account (IBAN 3876) + 1 BisB Visa credit card + 1 ila bank account
+        // -> Must automatically match the single BisB liquid bank account via Tel 17515151 + "Debit card"
+        let bisbBank = Account(name: "BisB", kind: .bank, institution: "BisB", balance: 500.095)
+        bisbBank.smsMatch = "3876"
+        let bisbVisa = Account(name: "BisB Visa", kind: .creditCard, institution: "BisB", balance: 100.000)
+        bisbVisa.smsMatch = "9999"
+        let ila = Account(name: "ila", kind: .bank, institution: "ila", balance: 200.000)
+        ila.smsMatch = "1101"
+        context.insert(bisbBank)
+        context.insert(bisbVisa)
+        context.insert(ila)
+        try context.save()
+
+        let res1 = await SMSImporter.importText(sms, context: context, forceApprove: true)
+        let tx1 = try #require(res1.transaction)
+        #expect(tx1.smsBank == "BisB")
+        #expect(tx1.accountID == bisbBank.id)
+        #expect(tx1.isPending == false)
+
+        // Case 2: 2 BisB bank accounts (BisB Current 3876 + BisB Savings 5555), neither matching Debit card 7854
+        // -> Must NOT randomly choose one; must leave accountID nil and mark isPending = true for Review!
+        let bisbSavings = Account(name: "BisB Savings", kind: .bank, institution: "BisB", balance: 900.000)
+        bisbSavings.smsMatch = "5555"
+        context.insert(bisbSavings)
+        try context.save()
+
+        let sms2 = "Dear ISA, thank you for using your Debit card 7854 for BHD 42.000 at BFC Remittance MANAMA ManBH-170556 on 23/11 @14:10. Avail Bal BHD 328.045. Tel 17515151"
+        let res2 = await SMSImporter.importText(sms2, context: context, forceApprove: true)
+        let tx2 = try #require(res2.transaction)
+        #expect(tx2.smsBank == "BisB")
+        #expect(tx2.accountID == nil)
+        #expect(tx2.isPending == true)
+    }
+
+    @Test func maskedZeroIBAN0000NeverLearnsGroceriesAndStaysTransferOut() async throws {
+        let context = makeCleanContext()
+        TransactionRuleStore.shared.clearAll()
+        defer {
+            TransactionRuleStore.shared.clearAll()
+            Categorizer.UserCategoryLearningStore.shared.clearAll()
+        }
+
+        let ila = Account(name: "ila", kind: .bank, institution: "ila", balance: 1027.164)
+        ila.smsMatch = "1101"
+        context.insert(ila)
+
+        // Prior grocery transaction whose recipient IBAN was masked ****0000
+        let prevGrocery = MoneyTransaction(amount: 3.000, isIncome: false, merchant: "IBAN ending 0000", category: .groceries, date: .now.addingTimeInterval(-86400), source: .sms, accountID: ila.id)
+        prevGrocery.smsRecipientSuffix = "0000"
+        context.insert(prevGrocery)
+        Categorizer.recordUserCategoryChoice(for: prevGrocery, category: .groceries)
+        try context.save()
+
+        // Masked placeholder 0000 must NEVER leak into learnedMatch
+        #expect(Categorizer.learnedMatch(for: "IBAN ending 0000", recipientIBAN: "0000", in: context, isIncome: false) == nil)
+
+        // New BD 200.000 Fawri+ transfer to IBAN ****0000 without any matching rule must stay Transfer Out
+        let sms = "Success! Fawri+ transfer of BHD 200.000 to IBAN ****0000 is completed on 23/11/2026 13:27 Ref ABCO261123075193 Balance BHD 827.054 Enquiry 17123456"
+        let res = await SMSImporter.importText(sms, context: context, forceApprove: true)
+        let tx = try #require(res.transaction)
+        #expect(tx.category == .transfers)
+        #expect(tx.smsTransactionType == .transferOut)
+        #expect(tx.isTransferOut == true)
     }
 }

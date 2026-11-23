@@ -384,7 +384,7 @@ struct AddTransactionSheet: View {
             tx.longitude = loc.longitude
         }
         if !userPickedCategory {
-            TransactionRuleStore.shared.applyHighestPriorityRuleIfMatching(to: tx, context: context)
+            TransactionRuleStore.shared.applyBestMatchingRuleIfAny(to: tx, context: context)
         }
         let result = Ledger.add(tx, context: context)
         if repeatsMonthly && !isIncome {

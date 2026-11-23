@@ -561,7 +561,7 @@ enum SMSImporter {
 
         // If digits weren't extracted by regex, check if the raw SMS text contains any account's configured smsMatch
         let directAccountFromSMS: Account? = explicitDigitMatchedAccount ?? {
-            if let d = matchingDigits, let acc = SMSParser.findMatchingAccount(forBank: resolvedSMSBank, senderOrPhone: resolvedSender, digits: d, in: context) {
+            if let d = matchingDigits, let acc = SMSParser.findMatchingAccount(forBank: resolvedSMSBank, senderOrPhone: resolvedSender, digits: d, rawText: trimmed, in: context) {
                 return acc
             }
             return nil
@@ -595,7 +595,7 @@ enum SMSImporter {
             ?? explicitDigitMatchedAccount?.id
             ?? savedRuleAccount
             ?? directAccountFromSMS?.id
-            ?? SMSParser.findMatchingAccount(forBank: resolvedSMSBank, senderOrPhone: resolvedSender, digits: matchingDigits, in: context)?.id
+            ?? SMSParser.findMatchingAccount(forBank: resolvedSMSBank, senderOrPhone: resolvedSender, digits: matchingDigits, rawText: trimmed, in: context)?.id
 
         // Visa / credit card payments come out of a bank account and pay down the card.
         let isCardPayment = p.category == .visaTransfer
@@ -801,8 +801,18 @@ enum SMSImporter {
             tx.longitude = loc.longitude
         }
 
-        // Highest Priority: Apply user-defined Transaction Rules to future matching transactions.
-        let matchedHighPriorityRule = TransactionRuleStore.shared.applyHighestPriorityRuleIfMatching(to: tx, context: context)
+        // Specificity-Based Rules Engine: evaluate all enabled rules and execute ONLY the single most specific match.
+        // If a less-specific rule matched earlier during parsing before account/location were resolved,
+        // restore the pre-rule category first so only the single winning rule's actions apply.
+        let fullResolution = TransactionRuleStore.shared.evaluateRules(for: tx)
+        if let earlierID = p.matchedUserRuleID, earlierID != fullResolution.winningRule?.id {
+            if let origCat = p.preRuleCategory {
+                tx.category = origCat
+            }
+            p.matchedUserRule = false
+        }
+        let ruleResolution = TransactionRuleStore.shared.applyBestMatchingRuleIfAny(to: tx, context: context)
+        let matchedHighPriorityRule = ruleResolution.winningRule
         if matchedHighPriorityRule != nil {
             p.matchedUserRule = true
             p.category = tx.category
@@ -836,11 +846,11 @@ enum SMSImporter {
             return false
         }()
         let matchedByDigits = explicitDigitMatchedAccount ?? (matchingDigits.flatMap { d in
-            SMSParser.findMatchingAccount(forBank: resolvedSMSBank, senderOrPhone: resolvedSender, digits: d, in: context)
+            SMSParser.findMatchingAccount(forBank: resolvedSMSBank, senderOrPhone: resolvedSender, digits: d, rawText: trimmed, in: context)
         } ?? directAccountFromSMS)
         let matchedByBankOrSender = isExplicitDigitMatch
             || savedRuleAccount != nil
-            || SMSParser.findMatchingAccount(forBank: effectiveBank, senderOrPhone: resolvedSender, digits: matchingDigits, in: context) != nil
+            || SMSParser.findMatchingAccount(forBank: effectiveBank, senderOrPhone: resolvedSender, digits: matchingDigits, rawText: trimmed, in: context) != nil
         let bankUnknown: Bool = {
             if isExplicitDigitMatch || matchedByDigits != nil || p.matchedUserRule { return false }
             if resolvedSMSBank == nil && p.transactionType == .unknown && savedRuleAccount == nil { return true }
@@ -855,12 +865,18 @@ enum SMSImporter {
                !SMSParser.accountMatchesBank(targetAccount, bank: b) {
                 return true
             }
-            if let suffix = p.accountSuffix, !suffix.isEmpty {
+            if let suffix = matchingDigits, !suffix.isEmpty {
                 let targetDigits = targetAccount.smsMatch.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !targetDigits.isEmpty && !SMSParser.digitsMatch(accountMatch: targetDigits, query: suffix) {
+                    let lowerTrimmed = trimmed.lowercased()
+                    let isDebitCard = lowerTrimmed.contains("debit card") || lowerTrimmed.contains("atm ")
+                    let isCreditCard = !isDebitCard && (lowerTrimmed.contains("credit card") || lowerTrimmed.contains("visa infinite") || lowerTrimmed.contains("visa platinum"))
                     let sameBankAccounts = allAccounts.filter { acc in
-                        guard let b = effectiveBank else { return false }
-                        return SMSParser.accountMatchesBank(acc, bank: b)
+                        guard acc.kind != .loan, let b = effectiveBank else { return false }
+                        guard SMSParser.accountMatchesBank(acc, bank: b) else { return false }
+                        if isDebitCard { return acc.kind.isLiquid }
+                        if isCreditCard { return acc.kind == .creditCard }
+                        return true
                     }
                     if sameBankAccounts.count != 1 || sameBankAccounts.first?.id != targetAccount.id {
                         return true
