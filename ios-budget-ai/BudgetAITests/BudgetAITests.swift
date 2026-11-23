@@ -3968,4 +3968,31 @@ struct BudgetAITests {
         #expect(tx.smsTransactionType == .transferOut)
         #expect(tx.isTransferOut == true)
     }
+
+    @Test func visaAndDebitCardUsingYourCardSMSClassifyAsExpenseNeverTransferOut() async throws {
+        let context = makeCleanContext()
+        TransactionRuleStore.shared.clearAll()
+        defer { TransactionRuleStore.shared.clearAll() }
+
+        let visa = Account(name: "Visa", kind: .creditCard, institution: "BisB", balance: 0.000)
+        visa.creditLimit = 5000.000
+        visa.smsMatch = "1843"
+        context.insert(visa)
+        try context.save()
+
+        let sms = "Dear ISA, thank you for using your VISA card 1843 for BHD 21.150 at LUMEE (THE AVENUES) MANAMA BH-956600 on 23/11 @20:57. Avail Bal BHD 4975. Tel 17515151"
+        let parsed = try #require(SMSParser.parse(sms, context: context))
+        #expect(parsed.transactionType == .expense)
+        #expect(parsed.confidence == .high)
+        #expect(parsed.detectedBank == "BisB")
+        #expect(abs(parsed.amount - 21.150) < 0.0001)
+
+        let res = await SMSImporter.importText(sms, context: context, forceApprove: true)
+        let tx = try #require(res.transaction)
+        #expect(tx.accountID == visa.id)
+        #expect(tx.smsTransactionType == .expense)
+        #expect(tx.isSpending == true)
+        #expect(tx.isTransfer == false)
+        #expect(tx.category != .transfers)
+    }
 }

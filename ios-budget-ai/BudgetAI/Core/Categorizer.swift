@@ -1493,7 +1493,25 @@ enum SMSParser {
             )
         }
 
-        // 5. Fawri+ / Fawri / Bank Transfer / IBAN Transfer analysis
+        // 5. Card Purchases / POS / Online Purchases / Bill Payments / ATM Withdrawals
+        // Detect explicit card-use alerts BEFORE generic transfer keyword checks so merchants like
+        // "BFC Remittance" paid via "using your Debit card 7854" or "using your VISA card 1843 at LUMEE"
+        // are always classified as card expenses, never transfers or unknown.
+        let isExplicitCardPurchase =
+            lower.range(of: "\\busing\\s+your\\s+(?:[a-z]+\\s+){0,3}card\\b", options: .regularExpression) != nil
+            || lower.range(of: "\\bcard\\b.*\\b(?:used for|purchase|charged|debited)\\b", options: .regularExpression) != nil
+            || lower.range(of: "\\b(?:visa|mastercard|debit|credit|prepaid|mada)\\s+card\\s*(?:ending\\s+|no\\.?\\s*)?[0-9*x•]{3,6}\\s+(?:for|at|was\\s+used)\\b", options: .regularExpression) != nil
+            || lower.contains("تم استخدام بطاقتك") || lower.contains("استخدام بطاقة")
+
+        if isExplicitCardPurchase {
+            return ClassificationOutcome(
+                type: .expense,
+                confidence: .high,
+                reason: "Matched verified card purchase SMS pattern"
+            )
+        }
+
+        // 6. Fawri+ / Fawri / Bank Transfer / IBAN Transfer analysis
         let isTransferContext = (rail?.contains("Fawri") == true)
             || lower.range(of: "\\b(?:fawri\\+?|iban|bank transfer|wire transfer|remittance|inward transfer|outward transfer|incoming transfer|outgoing transfer|transfer|sarie)\\b|فوري\\+?|حوالة|تحويل بنكي|تحويل فوري|آيبان", options: .regularExpression) != nil
 
@@ -1509,9 +1527,9 @@ enum SMSParser {
             )
         }
 
-        // 6. Card Purchases / POS / Online Purchases / Bill Payments / ATM Withdrawals
+        // 7. Other POS / Online Purchases / Bill Payments / ATM Withdrawals / Debits
         let verifiedExpensePatterns = [
-            "\\bcard\\b.*\\b(?:used for|purchase|charged|debited)\\b",
+            "\\bcard\\b.*\\b(?:used for|purchase|charged|debited|transaction|txn|payment)\\b",
             "\\b(?:pos|apple pay|samsung pay|benefitpay)\\s*(?:purchase|payment|txn|transaction)\\b",
             "\\b(?:debited|has been debited|deducted|withdrawn|cash withdrawal|atm withdrawal|spent)\\b",
             "\\b(?:bill payment|sadad payment|paid to)\\b",

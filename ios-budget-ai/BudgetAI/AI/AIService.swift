@@ -707,9 +707,22 @@ enum SMSImporter {
 
         // If there is no user rule and no learned history:
         // Let AI identify a specific expense category if the merchant is a real name (not generic IBAN/transfer wording).
+        // Credit card purchases and explicit card-use SMS can NEVER be categorized as Transfer Out.
         // Otherwise, keep transfers and unidentified debit/credit alerts in the Transfers tab.
         if !p.matchedUserRule && !learnedMerchant && p.transactionType != .internalTransfer && !isCardPayment {
             let lowerSMS = trimmed.lowercased()
+            let resolvedTargetAcc = target.flatMap { Ledger.account($0, context: context) }
+            let isCreditCardCharge = (resolvedTargetAcc?.kind == .creditCard)
+                || lowerSMS.range(of: "\\busing\\s+your\\s+(?:[a-z]+\\s+){0,3}card\\b", options: .regularExpression) != nil
+                || lowerSMS.range(of: "\\b(?:visa|mastercard|credit|debit|prepaid)\\s+card\\s*(?:ending\\s+|no\\.?\\s*)?[0-9*x•]{3,6}\\s+(?:for|at|was\\s+used)\\b", options: .regularExpression) != nil
+
+            if isCreditCardCharge && !p.isIncome {
+                p.transactionType = .expense
+                if p.category.isTransferCategory {
+                    p.category = .other
+                }
+            }
+
             let isGenericTransferLabel = isGenericSMSMerchant(p.merchant)
                 || p.merchant.lowercased().hasPrefix("iban ")
                 || p.merchant.lowercased().hasPrefix("fawri")
@@ -720,8 +733,8 @@ enum SMSImporter {
                 || lowerSMS.contains("allowance") || lowerSMS.contains("pension") || lowerSMS.contains("stipend")
                 || lowerSMS.contains("راتب") || lowerSMS.contains("مكافأة") || lowerSMS.contains("أرباح")
                 || lowerSMS.contains("ارباح")
-            let looksLikeGenericCredit = p.transactionType == .income && isGenericTransferLabel && !hasExplicitIncomeCue
-            let looksLikeGenericDebit = p.transactionType == .expense && p.category == .other && isGenericTransferLabel
+            let looksLikeGenericCredit = !isCreditCardCharge && p.transactionType == .income && isGenericTransferLabel && !hasExplicitIncomeCue
+            let looksLikeGenericDebit = !isCreditCardCharge && p.transactionType == .expense && p.category == .other && isGenericTransferLabel
                 && (lowerSMS.contains("debit") || lowerSMS.contains("transfer") || lowerSMS.contains("fawri")
                     || lowerSMS.contains("iban") || lowerSMS.contains("خصم") || lowerSMS.contains("تحويل"))
 
@@ -744,7 +757,7 @@ enum SMSImporter {
                         usedAI = true
                     }
                 }
-                if !usedAI {
+                if !usedAI && !isCreditCardCharge {
                     if p.transactionType == .transferOut || looksLikeGenericDebit {
                         p.transactionType = .transferOut
                         p.isIncome = false
@@ -754,11 +767,13 @@ enum SMSImporter {
                         p.isIncome = true
                         if !p.category.isTransferCategory { p.category = .transferIn }
                     } else if p.transactionType == .unknown && !p.requiresReview {
-                        let looksLikeTransferOrGenericDebitCredit =
+                        let isCardWording = lowerSMS.contains("debit card") || lowerSMS.contains("credit card") || lowerSMS.contains("visa card") || lowerSMS.contains("mastercard")
+                        let looksLikeTransferOrGenericDebitCredit = !isCardWording && (
                             lowerSMS.contains("transfer") || lowerSMS.contains("fawri") || lowerSMS.contains("iban")
-                            || lowerSMS.contains("debit") || lowerSMS.contains("credit") || lowerSMS.contains("visa")
+                            || lowerSMS.contains("debit") || lowerSMS.contains("credit")
                             || lowerSMS.contains("تحويل") || lowerSMS.contains("حوالة")
                             || lowerSMS.contains("خصم") || lowerSMS.contains("إيداع") || lowerSMS.contains("ايداع")
+                        )
                         if looksLikeTransferOrGenericDebitCredit {
                             p.transactionType = p.isIncome ? .transferIn : .transferOut
                             p.category = p.isIncome ? .transferIn : .transfers
