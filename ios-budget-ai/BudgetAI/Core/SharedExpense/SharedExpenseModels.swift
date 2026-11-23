@@ -195,6 +195,7 @@ enum SharedExpensePrivacy {
             .split(separator: " ")
             .filter { $0.count >= 2 }
             .prefix(3)
+            .map(String.init)
         return tokens.joined(separator: " ")
     }
 
