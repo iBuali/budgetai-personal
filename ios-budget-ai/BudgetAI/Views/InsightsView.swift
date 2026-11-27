@@ -1,43 +1,110 @@
 import SwiftUI
+import SwiftData
 
+enum InsightRoute: Hashable {
+    case timeMachine
+    case wishlist
+    case alerts
+    case buyNow(amount: Double, name: String)
+    case savingGoal
+    case bills
+}
+
+/// Completely rebuilt FALAK Insights & Financial Intelligence hub.
+/// Displays exactly three clean, focused main cards:
+/// 1. Time Machine (contains Forecast, Graph, Events, FALAK Insight, Buy Now?, Saving Goal)
+/// 2. Wishlist Intelligence
+/// 3. Insights & Alerts
 struct InsightsView: View {
+    @Environment(AppState.self) private var appState
+    @Query(sort: \MoneyTransaction.date, order: .reverse) private var transactions: [MoneyTransaction]
+    @Query(sort: \Account.createdAt) private var accounts: [Account]
+    @Query private var budgets: [Budget]
+    @Query private var goals: [SavingsGoal]
+    @Query(sort: \Bill.nextDueDate) private var bills: [Bill]
+    @AppStorage(Keys.currency) private var currency = "BHD"
+
+    @State private var path = NavigationPath()
+
+    private let wishlistStore = WishlistStore.shared
+    private let alertStateStore = FinancialAlertStateStore.shared
+
     var body: some View {
-        NavigationStack {
+        let finance = Finance(transactions: transactions, accounts: accounts, budgets: budgets, goals: goals, bills: bills)
+        let previewProjection = FinancialProjectionEngine.project(finance: finance, period: .threeMonths, currency: currency)
+        let activeAlerts = FinancialAlertsEngine.generate(
+            finance: finance,
+            projection: previewProjection,
+            wishlistItems: wishlistStore.items,
+            currency: currency
+        ).filter { !alertStateStore.isDismissed($0.id) }
+        let unreadAlertsCount = activeAlerts.filter { !alertStateStore.isRead($0.id) }.count
+        let readyWishlistCount = wishlistStore.items.filter { item in
+            let eval = WishlistEvaluator.evaluate(item: item, finance: finance, projection: previewProjection, currency: currency)
+            return eval.suitability == .goodTimeToBuy || item.hasReachedTargetPrice
+        }.count
+
+        NavigationStack(path: $path) {
             ScrollView {
                 VStack(spacing: 16) {
-                    Text("Plan ahead with smart money tools")
+                    Text("Understand your financial future, track goals, and act on smart alerts.")
                         .font(.subheadline)
                         .foregroundStyle(Theme.secondaryInk)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, 4)
-                        .padding(.top, -8)
 
+                    // Card 1 — Time Machine
                     NavigationLink(value: InsightRoute.timeMachine) {
-                        featureCard(title: "Financial Time Machine",
-                                    subtitle: "See where your money is heading. Simulate your balance 30 days to 1 year ahead.",
-                                    symbol: "clock.arrow.2.circlepath",
-                                    colors: [Color(hex: 0x1E3FAE), Color(hex: 0x6D4AE0)],
-                                    available: true)
+                        mainCard(
+                            title: "Time Machine",
+                            subtitle: "Forecast your balance, explore upcoming events, and simulate Buy Now? or Saving Goals.",
+                            symbol: "clock.arrow.2.circlepath",
+                            colors: [Color(hex: 0x1E3FAE), Color(hex: 0x6D4AE0)],
+                            badgeText: previewProjection.hasSufficientData
+                                ? "3M: \(Money.format(previewProjection.projectedEndBalance, currency))"
+                                : "Forecast Ready",
+                            badgeColor: previewProjection.primaryInsight.severity.color
+                        )
                     }
                     .buttonStyle(PressableStyle())
 
-                    featureCard(title: "Can I Afford It?",
-                                subtitle: "Check if a purchase fits your plans before you buy.",
-                                symbol: "cart.badge.questionmark",
-                                colors: [Color(hex: 0x0EA5A4), Color(hex: 0x22A565)],
-                                available: false)
+                    // Card 2 — Wishlist Intelligence
+                    NavigationLink(value: InsightRoute.wishlist) {
+                        mainCard(
+                            title: "Wishlist Intelligence",
+                            subtitle: "Track desired purchases, target prices, and the best financial time to buy.",
+                            symbol: "heart.text.square.fill",
+                            colors: [Color(hex: 0x0EA5A4), Color(hex: 0x22A565)],
+                            badgeText: wishlistStore.items.isEmpty
+                                ? "Add items"
+                                : (readyWishlistCount > 0 ? "\(readyWishlistCount) ready to buy" : "\(wishlistStore.items.count) tracked"),
+                            badgeColor: readyWishlistCount > 0 ? Theme.positive : Theme.cobalt
+                        )
+                    }
+                    .buttonStyle(PressableStyle())
 
-                    featureCard(title: "Life Planner",
-                                subtitle: "Plan big life goals like a home, a wedding or retirement.",
-                                symbol: "map.fill",
-                                colors: [Color(hex: 0xF08A24), Color(hex: 0xEC4899)],
-                                available: false)
+                    // Card 3 — Insights & Alerts
+                    NavigationLink(value: InsightRoute.alerts) {
+                        mainCard(
+                            title: "Insights & Alerts",
+                            subtitle: "Priority financial risks, budget warnings, bill reminders, and opportunities.",
+                            symbol: "bell.badge.waveform.fill",
+                            colors: [Color(hex: 0xF08A24), Color(hex: 0xEC4899)],
+                            badgeText: unreadAlertsCount > 0
+                                ? "\(unreadAlertsCount) unread"
+                                : (activeAlerts.isEmpty ? "All clear" : "\(activeAlerts.count) active"),
+                            badgeColor: activeAlerts.first?.priority == .critical ? Theme.negative : (unreadAlertsCount > 0 ? Theme.warning : Theme.positive)
+                        )
+                    }
+                    .buttonStyle(PressableStyle())
                 }
                 .padding(.horizontal, 16)
-                .padding(.bottom, 24)
+                .padding(.top, 8)
+                .padding(.bottom, 28)
             }
             .canvasBackground()
             .navigationTitle("Insights")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     DrawerMenuToolbarButtons()
@@ -45,53 +112,108 @@ struct InsightsView: View {
             }
             .navigationDestination(for: InsightRoute.self) { route in
                 switch route {
-                case .timeMachine: FinancialTimeMachineView()
+                case .timeMachine:
+                    TimeMachineDashboardView(onNavigate: { path.append($0) })
+                case .wishlist:
+                    WishlistDashboardView(onSimulateBuyNow: { amount, name in
+                        path.append(InsightRoute.buyNow(amount: amount, name: name))
+                    })
+                case .alerts:
+                    InsightsAlertsCenterView(onAction: handleAlertAction)
+                case .buyNow(let amount, let name):
+                    BuyNowSimulationView(initialAmount: amount, initialName: name)
+                case .savingGoal:
+                    SavingGoalSimulationView()
+                case .bills:
+                    BillsView()
                 }
             }
         }
     }
 
-    private func featureCard(title: String, subtitle: String, symbol: String, colors: [Color], available: Bool) -> some View {
-        HStack(spacing: 14) {
-            Image(systemName: symbol)
-                .font(.system(size: 22, weight: .semibold))
-                .foregroundStyle(.white)
-                .frame(width: 54, height: 54)
-                .background(LinearGradient(colors: colors, startPoint: .topLeading, endPoint: .bottomTrailing),
-                            in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                .opacity(available ? 1 : 0.55)
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 6) {
+    private func handleAlertAction(_ action: FinancialAlertAction) {
+        switch action {
+        case .openTimeMachine:
+            path.append(InsightRoute.timeMachine)
+        case .openBuyNow(let amount, let name):
+            path.append(InsightRoute.buyNow(amount: amount, name: name))
+        case .openWishlist:
+            path.append(InsightRoute.wishlist)
+        case .openBills:
+            path.append(InsightRoute.bills)
+        case .openBudgets:
+            appState.tab = .budgets
+        case .openTransactions:
+            appState.tab = .transactions
+        case .openAccounts:
+            appState.tab = .accounts
+        }
+    }
+
+    private func mainCard(
+        title: String,
+        subtitle: String,
+        symbol: String,
+        colors: [Color],
+        badgeText: String,
+        badgeColor: Color
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 14) {
+                Image(systemName: symbol)
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 52, height: 52)
+                    .background(
+                        LinearGradient(colors: colors, startPoint: .topLeading, endPoint: .bottomTrailing),
+                        in: RoundedRectangle(cornerRadius: 15, style: .continuous)
+                    )
+
+                VStack(alignment: .leading, spacing: 4) {
                     Text(title)
                         .font(.headline)
                         .foregroundStyle(Theme.ink)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.85)
-                    if !available {
-                        Text("Coming soon")
-                            .font(.caption2.weight(.bold))
-                            .padding(.horizontal, 7).padding(.vertical, 3)
-                            .background(Theme.track, in: Capsule())
-                            .foregroundStyle(Theme.secondaryInk)
-                            .fixedSize()
-                    }
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(Theme.secondaryInk)
+                        .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                Text(subtitle)
-                    .font(.caption)
-                    .foregroundStyle(Theme.secondaryInk)
-                    .multilineTextAlignment(.leading)
-                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.tertiary)
             }
-            Spacer(minLength: 0)
-            if available {
-                Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(.tertiary)
+
+            HStack {
+                Text(badgeText)
+                    .font(.caption.weight(.semibold).monospacedDigit())
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 4)
+                    .background(badgeColor.opacity(0.14), in: Capsule())
+                    .foregroundStyle(badgeColor)
+                Spacer()
             }
         }
         .card()
-        .opacity(available ? 1 : 0.85)
         .accessibilityElement(children: .combine)
-        .accessibilityHint(available ? "Opens \(title)" : "Coming soon")
     }
 }
 
-enum InsightRoute: Hashable { case timeMachine }
+extension SimulationStatus {
+    var color: Color {
+        switch self {
+        case .safe: return Theme.positive
+        case .caution: return Theme.warning
+        case .risk: return Theme.negative
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .safe: return "checkmark.seal.fill"
+        case .caution: return "exclamationmark.triangle.fill"
+        case .risk: return "xmark.octagon.fill"
+        }
+    }
+}

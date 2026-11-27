@@ -760,6 +760,8 @@ enum Ledger {
         SubscriptionLearningStore.shared.clearAll()
         SharedExpenseAdjustmentStore.shared.clearAll()
         SharedExpenseMemoryStore.shared.clearAll()
+        WishlistStore.shared.clearAll()
+        FinancialAlertStateStore.shared.clearAll()
         CategoryRegistry.shared.reload(context: context)
         Notifier.rescheduleBills([])
         notifyDataChanged()

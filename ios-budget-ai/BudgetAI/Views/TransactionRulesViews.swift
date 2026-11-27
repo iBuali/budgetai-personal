@@ -48,6 +48,10 @@ struct TransactionRuleBuilderSheet: View {
     @State private var originalSMSText: String = ""
     @State private var manualConditionValues: [RuleConditionField: String] = [:]
     @State private var manualAccountConditionID: UUID? = nil
+    @State private var selectedDirectionType: RuleTransactionTypeOption = .transferOut
+    @State private var selectedMonth: Int = Calendar.current.component(.month, from: .now)
+    @State private var selectedDay: Int = Calendar.current.component(.day, from: .now)
+    @State private var selectedWeekday: Int = Calendar.current.component(.weekday, from: .now)
 
     // THEN – Actions
     @State private var enableSetCategory: Bool = false
@@ -93,6 +97,10 @@ struct TransactionRuleBuilderSheet: View {
         let originalSMSText: String
         let manualConditionValues: [RuleConditionField: String]
         let manualAccountConditionID: UUID?
+        let selectedDirectionType: RuleTransactionTypeOption
+        let selectedMonth: Int
+        let selectedDay: Int
+        let selectedWeekday: Int
         let enableSetCategory: Bool
         let selectedCategoryRaw: String
         let fromAccountID: UUID?
@@ -125,6 +133,10 @@ struct TransactionRuleBuilderSheet: View {
             originalSMSText: originalSMSText,
             manualConditionValues: manualConditionValues,
             manualAccountConditionID: manualAccountConditionID,
+            selectedDirectionType: selectedDirectionType,
+            selectedMonth: selectedMonth,
+            selectedDay: selectedDay,
+            selectedWeekday: selectedWeekday,
             enableSetCategory: enableSetCategory,
             selectedCategoryRaw: selectedCategory.rawValue,
             fromAccountID: fromAccountID,
@@ -157,7 +169,9 @@ struct TransactionRuleBuilderSheet: View {
     /// True if this condition should show an inline manual editor when checked (either creating from scratch
     /// or adding a condition that wasn't auto-captured from a source transaction).
     private func needsManualInput(for cond: RuleCondition) -> Bool {
-        if cond.field == .originalSMS { return false }
+        if cond.field == .originalSMS || cond.field == .direction || cond.field == .monthDay || cond.field == .dayOfWeek {
+            return false
+        }
         if isManualCreation { return true }
         return cond.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             || (manualConditionValues[cond.field] != nil)
@@ -171,6 +185,9 @@ struct TransactionRuleBuilderSheet: View {
     private var canSave: Bool {
         guard !selectedConditionsList.isEmpty else { return false }
         return selectedConditionsList.allSatisfy { cond in
+            if cond.field == .direction || cond.field == .monthDay || cond.field == .dayOfWeek {
+                return true
+            }
             if cond.field == .originalSMS {
                 let text = originalSMSText.trimmingCharacters(in: .whitespacesAndNewlines)
                 return !text.isEmpty || !cond.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -359,6 +376,72 @@ struct TransactionRuleBuilderSheet: View {
                 .padding(.top, 2)
             }
 
+            // Inline controls for Transaction Type, Date (Day & Month), and Day of Week
+            if cond.field == .direction && isSelected {
+                VStack(alignment: .leading, spacing: 6) {
+                    Picker("Transaction Type", selection: $selectedDirectionType) {
+                        ForEach(RuleTransactionTypeOption.allCases) { option in
+                            Text(option.title).tag(option)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .font(.caption)
+                }
+                .padding(.leading, 36)
+                .padding(.top, 2)
+            }
+
+            if cond.field == .monthDay && isSelected {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 12) {
+                        Picker("Day", selection: Binding(
+                            get: { min(RuleDateHelper.maxDays(inMonth: selectedMonth), max(1, selectedDay)) },
+                            set: { selectedDay = $0 }
+                        )) {
+                            ForEach(1...RuleDateHelper.maxDays(inMonth: selectedMonth), id: \.self) { day in
+                                Text("\(day)").tag(day)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .font(.caption)
+
+                        Picker("Month", selection: Binding(
+                            get: { selectedMonth },
+                            set: { newMonth in
+                                selectedMonth = newMonth
+                                let cap = RuleDateHelper.maxDays(inMonth: newMonth)
+                                if selectedDay > cap { selectedDay = cap }
+                            }
+                        )) {
+                            ForEach(1...12, id: \.self) { month in
+                                Text(RuleDateHelper.monthAbbreviations[month - 1]).tag(month)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .font(.caption)
+                    }
+                    Text("Matches \(RuleDateHelper.monthDayDisplay(month: selectedMonth, day: selectedDay)) every year (ignores year).")
+                        .font(.caption2)
+                        .foregroundStyle(Theme.secondaryInk)
+                }
+                .padding(.leading, 36)
+                .padding(.top, 2)
+            }
+
+            if cond.field == .dayOfWeek && isSelected {
+                VStack(alignment: .leading, spacing: 6) {
+                    Picker("Day of Week", selection: $selectedWeekday) {
+                        ForEach(1...7, id: \.self) { weekday in
+                            Text(RuleDateHelper.weekdayDisplay(weekday)).tag(weekday)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .font(.caption)
+                }
+                .padding(.leading, 36)
+                .padding(.top, 2)
+            }
+
             // Inline manual inputs when creating from scratch or adding an uncaptured condition while editing
             if needsManualInput(for: cond) && isSelected && cond.field != .originalSMS {
                 Group {
@@ -388,6 +471,15 @@ struct TransactionRuleBuilderSheet: View {
     }
 
     private func displayValue(for cond: RuleCondition) -> String {
+        if cond.field == .direction {
+            return selectedDirectionType.title
+        }
+        if cond.field == .monthDay {
+            return RuleDateHelper.monthDayDisplay(month: selectedMonth, day: selectedDay)
+        }
+        if cond.field == .dayOfWeek {
+            return RuleDateHelper.weekdayDisplay(selectedWeekday)
+        }
         if cond.field == .location && (cond.latitude != nil || actionLatitude != nil) {
             let place = cond.value.isEmpty ? "GPS Location" : cond.value
             return "\(place) (within \(Int(locationRadius))m)"
@@ -619,21 +711,31 @@ struct TransactionRuleBuilderSheet: View {
                 }
             }
             // Ensure all standard condition options are always visible so the user can add/toggle any option while editing
+            let refDate = resolvedTx?.date ?? .now
+            let cal = Calendar.current
+            let refMonth = cal.component(.month, from: refDate)
+            let refDay = cal.component(.day, from: refDate)
+            let refWeekday = cal.component(.weekday, from: refDate)
+            let refType = resolvedTx.map { RuleTransactionTypeOption.from(txType: $0.effectiveTransactionType, isIncome: $0.isIncome) } ?? .transferOut
+
             let standardPlaceholders: [RuleCondition] = [
                 RuleCondition(field: .originalSMS, value: "", displayValue: "Match SMS text", smsMatchMode: .contains),
                 RuleCondition(field: .merchant, value: "", displayValue: "Enter merchant or recipient"),
+                RuleCondition(field: .senderIBAN, value: "", displayValue: "Enter sender IBAN digits"),
                 RuleCondition(field: .recipientIBAN, value: "", displayValue: "Enter recipient IBAN digits"),
                 RuleCondition(field: .accountDigits, value: "", displayValue: "Enter card or account digits"),
                 RuleCondition(field: .smsSender, value: "", displayValue: "Enter bank phone number"),
                 RuleCondition(field: .accountID, value: "", displayValue: "Choose account"),
                 RuleCondition(field: .amount, value: "", displayValue: "Enter exact amount"),
-                RuleCondition(field: .note, value: "", displayValue: "Enter note text")
+                RuleCondition(field: .direction, value: refType.rawValue, displayValue: refType.title),
+                RuleCondition(field: .monthDay, value: RuleDateHelper.monthDayValue(month: refMonth, day: refDay), displayValue: RuleDateHelper.monthDayDisplay(month: refMonth, day: refDay)),
+                RuleCondition(field: .dayOfWeek, value: "\(refWeekday)", displayValue: RuleDateHelper.weekdayDisplay(refWeekday))
             ]
             for placeholder in standardPlaceholders where !merged.contains(where: { $0.field == placeholder.field }) {
                 merged.append(placeholder)
             }
-            // Keep consistent display order (Original SMS first, then standard order)
-            let fieldOrder: [RuleConditionField] = [.originalSMS, .merchant, .recipientIBAN, .accountDigits, .smsSender, .accountID, .location, .amount, .note]
+            // Keep consistent display order (Original SMS first, then standard order; keep legacy .note only if saved on rule)
+            let fieldOrder: [RuleConditionField] = [.originalSMS, .merchant, .senderIBAN, .recipientIBAN, .accountDigits, .smsSender, .accountID, .location, .amount, .direction, .monthDay, .dayOfWeek, .note]
             merged.sort { lhs, rhs in
                 let i0 = fieldOrder.firstIndex(of: lhs.field) ?? 99
                 let i1 = fieldOrder.firstIndex(of: rhs.field) ?? 99
@@ -644,6 +746,26 @@ struct TransactionRuleBuilderSheet: View {
             if let accCond = existingRule.conditions.first(where: { $0.field == .accountID }),
                let accUUID = UUID(uuidString: accCond.value) {
                 manualAccountConditionID = accUUID
+            }
+            if let dirCond = existingRule.conditions.first(where: { $0.field == .direction }),
+               let parsedType = RuleTransactionTypeOption.parse(dirCond.value) {
+                selectedDirectionType = parsedType
+            } else {
+                selectedDirectionType = refType
+            }
+            if let mdCond = existingRule.conditions.first(where: { $0.field == .monthDay }),
+               let parsedMD = RuleDateHelper.parseMonthDay(mdCond.value) {
+                selectedMonth = parsedMD.month
+                selectedDay = parsedMD.day
+            } else {
+                selectedMonth = refMonth
+                selectedDay = refDay
+            }
+            if let dowCond = existingRule.conditions.first(where: { $0.field == .dayOfWeek }),
+               let parsedWD = RuleDateHelper.parseWeekday(dowCond.value) {
+                selectedWeekday = parsedWD
+            } else {
+                selectedWeekday = refWeekday
             }
 
             if let locCond = existingRule.conditions.first(where: { $0.field == .location }) {
@@ -713,9 +835,17 @@ struct TransactionRuleBuilderSheet: View {
                 originalSMSText = smsCond.value
             }
 
+            let cal = Calendar.current
+            selectedDirectionType = RuleTransactionTypeOption.from(txType: tx.effectiveTransactionType, isIncome: tx.isIncome)
+            selectedMonth = cal.component(.month, from: tx.date)
+            selectedDay = cal.component(.day, from: tx.date)
+            selectedWeekday = cal.component(.weekday, from: tx.date)
+
             // Pre-select the primary identifying condition(s) for convenience
             if availableConditions.contains(where: { $0.field == .recipientIBAN }) {
                 selectedFields.insert(.recipientIBAN)
+            } else if availableConditions.contains(where: { $0.field == .senderIBAN }) {
+                selectedFields.insert(.senderIBAN)
             } else if availableConditions.contains(where: { $0.field == .merchant }) {
                 selectedFields.insert(.merchant)
             } else if let first = availableConditions.first {
@@ -730,15 +860,27 @@ struct TransactionRuleBuilderSheet: View {
             populateFallbackActionValues(from: tx)
         } else {
             // Creating a new rule from scratch in Settings -> Transaction Rules
+            let cal = Calendar.current
+            let m = cal.component(.month, from: .now)
+            let d = cal.component(.day, from: .now)
+            let wd = cal.component(.weekday, from: .now)
+            selectedDirectionType = .transferOut
+            selectedMonth = m
+            selectedDay = d
+            selectedWeekday = wd
+
             availableConditions = [
                 RuleCondition(field: .originalSMS, value: "", displayValue: "Match SMS text", smsMatchMode: .contains),
                 RuleCondition(field: .merchant, value: "", displayValue: "Enter merchant or recipient"),
+                RuleCondition(field: .senderIBAN, value: "", displayValue: "Enter sender IBAN digits"),
                 RuleCondition(field: .recipientIBAN, value: "", displayValue: "Enter recipient IBAN digits"),
                 RuleCondition(field: .accountDigits, value: "", displayValue: "Enter card or account digits"),
                 RuleCondition(field: .smsSender, value: "", displayValue: "Enter bank phone number"),
                 RuleCondition(field: .accountID, value: "", displayValue: "Choose account"),
                 RuleCondition(field: .amount, value: "", displayValue: "Enter exact amount"),
-                RuleCondition(field: .note, value: "", displayValue: "Enter note text")
+                RuleCondition(field: .direction, value: RuleTransactionTypeOption.transferOut.rawValue, displayValue: RuleTransactionTypeOption.transferOut.title),
+                RuleCondition(field: .monthDay, value: RuleDateHelper.monthDayValue(month: m, day: d), displayValue: RuleDateHelper.monthDayDisplay(month: m, day: d)),
+                RuleCondition(field: .dayOfWeek, value: "\(wd)", displayValue: RuleDateHelper.weekdayDisplay(wd))
             ]
             selectedFields = [.originalSMS]
             originalSMSMatchMode = .contains
@@ -753,11 +895,11 @@ struct TransactionRuleBuilderSheet: View {
         switch field {
         case .originalSMS:   return "Paste SMS text or keyword"
         case .merchant:      return "e.g. Talabat, Batelco, Lulu"
-        case .recipientIBAN: return "Last digits, e.g. 7878"
+        case .senderIBAN:    return "Last digits, e.g. 0000"
+        case .recipientIBAN: return "Last digits, e.g. 3876"
         case .accountDigits: return "Last digits, e.g. 9001"
         case .smsSender:     return "e.g. 17515151"
         case .amount:        return "e.g. 3.000"
-        case .note:          return "Note text to match"
         default:             return "Enter value"
         }
     }
@@ -801,6 +943,23 @@ struct TransactionRuleBuilderSheet: View {
             }
         }
 
+        // Synchronize Transaction Type, Date (Day & Month), and Day of Week conditions
+        for idx in chosenConditions.indices {
+            switch chosenConditions[idx].field {
+            case .direction:
+                chosenConditions[idx].value = selectedDirectionType.rawValue
+                chosenConditions[idx].displayValue = selectedDirectionType.title
+            case .monthDay:
+                chosenConditions[idx].value = RuleDateHelper.monthDayValue(month: selectedMonth, day: selectedDay)
+                chosenConditions[idx].displayValue = RuleDateHelper.monthDayDisplay(month: selectedMonth, day: selectedDay)
+            case .dayOfWeek:
+                chosenConditions[idx].value = "\(selectedWeekday)"
+                chosenConditions[idx].displayValue = RuleDateHelper.weekdayDisplay(selectedWeekday)
+            default:
+                break
+            }
+        }
+
         // Synchronize manual condition values (for creating from scratch OR newly added manual conditions when editing)
         let cur = UserDefaults.standard.string(forKey: Keys.currency) ?? "BHD"
         for idx in chosenConditions.indices where chosenConditions[idx].field != .originalSMS {
@@ -815,7 +974,7 @@ struct TransactionRuleBuilderSheet: View {
                 if field == .amount, let parsed = Money.parse(raw), parsed > 0 {
                     chosenConditions[idx].value = String(format: "%.3f", parsed)
                     chosenConditions[idx].displayValue = Money.format(parsed, cur)
-                } else if field == .recipientIBAN || field == .accountDigits {
+                } else if field == .senderIBAN || field == .recipientIBAN || field == .accountDigits {
                     let digits = raw.replacingOccurrences(of: "*", with: "")
                     chosenConditions[idx].value = digits
                     chosenConditions[idx].displayValue = digits.isEmpty ? "" : "**\(digits)"

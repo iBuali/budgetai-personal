@@ -216,12 +216,21 @@ enum SharedExpensePrivacy {
     /// Extracts a minimized sender hint from an incoming transfer transaction when safely available.
     static func extractSenderToken(from tx: MoneyTransaction) -> String? {
         let merchant = tx.merchant.trimmingCharacters(in: .whitespacesAndNewlines)
+        let merchantLower = merchant.lowercased()
         let genericIncoming: Set<String> = [
             "incoming transfer", "transfer in", "fawri+ transfer", "fawri transfer",
             "benefitpay · fawri+ transfer", "benefitpay · fawri transfer",
             "bank transfer", "transfer", "incoming credit", "credit"
         ]
-        if !merchant.isEmpty, !genericIncoming.contains(merchant.lowercased()) {
+        if let raw = tx.rawText, !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let parties = SMSParser.extractTransferParties(in: raw)
+            if let senderSuffix = parties.senderSuffix?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !senderSuffix.isEmpty, senderSuffix != "0000",
+               (merchant.isEmpty || genericIncoming.contains(merchantLower) || merchantLower.hasPrefix("iban ending")) {
+                return anonymizedSenderToken(rawSender: "x:" + senderSuffix)
+            }
+        }
+        if !merchant.isEmpty, !genericIncoming.contains(merchantLower) {
             return anonymizedSenderToken(rawSender: "m:" + merchant)
         }
         if let raw = tx.rawText {
@@ -243,7 +252,7 @@ enum SharedExpensePrivacy {
                 }
             }
         }
-        if let suffix = tx.smsRecipientSuffix?.trimmingCharacters(in: .whitespacesAndNewlines), !suffix.isEmpty {
+        if let suffix = tx.smsRecipientSuffix?.trimmingCharacters(in: .whitespacesAndNewlines), !suffix.isEmpty, suffix != "0000" {
             return anonymizedSenderToken(rawSender: "x:" + suffix)
         }
         return nil
@@ -375,13 +384,35 @@ final class SharedExpenseMemoryStore {
 
     private let defaults: UserDefaults
     private let storageKey: String
+    private let trustedSendersKey: String
 
     private(set) var records: [SharedExpenseMemoryRecord] = []
+    private(set) var trustedSenderTokens: Set<String> = []
 
-    init(defaults: UserDefaults = .standard, storageKey: String = "falak.sharedExpense.memory.v1") {
+    init(
+        defaults: UserDefaults = .standard,
+        storageKey: String = "falak.sharedExpense.memory.v1",
+        trustedSendersKey: String = "falak.sharedExpense.trustedSenders.v1"
+    ) {
         self.defaults = defaults
         self.storageKey = storageKey
+        self.trustedSendersKey = trustedSendersKey
         load()
+    }
+
+    func setSenderTrusted(_ token: String?, trusted: Bool) {
+        guard let token = token?.trimmingCharacters(in: .whitespacesAndNewlines), !token.isEmpty else { return }
+        if trusted {
+            trustedSenderTokens.insert(token)
+        } else {
+            trustedSenderTokens.remove(token)
+        }
+        defaults.set(Array(trustedSenderTokens), forKey: trustedSendersKey)
+    }
+
+    func isSenderTrusted(_ token: String?) -> Bool {
+        guard let token = token?.trimmingCharacters(in: .whitespacesAndNewlines), !token.isEmpty else { return false }
+        return trustedSenderTokens.contains(token)
     }
 
     var activeRecords: [SharedExpenseMemoryRecord] {
@@ -421,7 +452,9 @@ final class SharedExpenseMemoryStore {
 
     func clearAll() {
         records = []
+        trustedSenderTokens = []
         defaults.removeObject(forKey: storageKey)
+        defaults.removeObject(forKey: trustedSendersKey)
     }
 
     /// Computes a damped prior from confirmed user feedback and reliable historical records.
@@ -495,6 +528,11 @@ final class SharedExpenseMemoryStore {
     }
 
     private func load() {
+        if let savedTrusted = defaults.stringArray(forKey: trustedSendersKey) {
+            trustedSenderTokens = Set(savedTrusted)
+        } else {
+            trustedSenderTokens = []
+        }
         guard let data = defaults.data(forKey: storageKey),
               let decoded = try? JSONDecoder().decode([SharedExpenseMemoryRecord].self, from: data) else {
             records = []

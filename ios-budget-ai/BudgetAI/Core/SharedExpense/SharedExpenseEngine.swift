@@ -693,13 +693,13 @@ final class SharedExpenseIntelligenceService {
         let incomingHasCue = SharedExpenseClassifier.hasReimbursementCue(incomingTx)
         let incomingHasRule = hasExistingRuleProvider(incomingTx)
 
-        // Gather eligible candidate expenses (focus categories or already having a shared prediction/adjustment)
+        // Gather eligible candidate expenses across ANY real spending category
+        // (supports 100% purchases paid for someone else in any category, plus active/predicted shared expenses).
         let candidates: [MoneyTransaction] = recentExpenses.filter { exp in
             guard exp.source != .bill, exp.billID == nil else { return false }
-            let hasExistingShared = adjustmentStore.activeAdjustment(forExpenseID: exp.id) != nil
-            let hasPrediction = (adjustmentStore.prediction(forTransactionID: exp.id)?.sharedProbability ?? 0) >= 0.35
-            if hasExistingShared || hasPrediction { return true }
-            return SharedExpenseClassifier.isEligibleExpense(exp)
+            guard !exp.isIncome, !exp.isTransfer else { return false }
+            guard exp.smsTransactionType != .refund, exp.smsTransactionType != .fee, exp.smsTransactionType != .internalTransfer else { return false }
+            return true
         }
 
         guard !candidates.isEmpty else {
@@ -826,11 +826,32 @@ final class SharedExpenseIntelligenceService {
                 }
             }
 
-            // 3. Learned repeated reimbursement sender pattern (anonymized token)
-            if prior.knownSenderConfirmationCount > 0 {
+            let isTrustedSender = memoryStore.isSenderTrusted(senderToken)
+            let isExactFullMatch = abs(allocAmount - exp.amount) <= 0.01 && activeAdj == nil
+
+            // 3. Trusted / learned repeated reimbursement sender pattern (anonymized token)
+            if isTrustedSender {
+                score += 0.36
+                corroborations += 2
+                reasons.append("from a trusted reimbursement sender")
+            } else if prior.knownSenderConfirmationCount > 0 {
                 score += min(0.28, 0.18 + Double(prior.knownSenderConfirmationCount - 1) * 0.05)
                 corroborations += 1
                 reasons.append("from a previously confirmed reimbursement sender")
+            }
+
+            // 3b. Exact 100% reimbursement ("not my purchase, paid for someone else")
+            if isExactFullMatch && daysDelta <= 3.0 {
+                if isTrustedSender || prior.knownSenderConfirmationCount > 0 {
+                    score += 0.34
+                    corroborations += 1
+                    reasons.append("matches 100% of \(exp.merchant)")
+                } else if corroborations == 0 {
+                    // First time seeing an exact 100% transfer back with unknown sender -> never auto-adjust; suggest once for confirmation!
+                    score = max(score, 0.66)
+                    corroborations = max(corroborations, 1)
+                    reasons.append("exact 100% match for your recent \(exp.merchant) purchase")
+                }
             }
 
             // 4. Learned shared merchant pattern
@@ -1056,7 +1077,10 @@ final class SharedExpenseIntelligenceService {
             let catTitle = SpendCategory.resolve(suggestedCatRaw).title
             let reimbAmt = min(exp.amount, (existingAdj?.totalReceivedReimbursementAmount ?? 0) + primary.amount)
             let personalAmt = max(0, roundMoney(exp.amount - reimbAmt, currency: currency))
-            let prompt = "FALAK noticed an incoming transfer of \(Money.format(incomingTx.amount, currency)) that may reimburse your \(exp.merchant) payment (\(Money.format(exp.amount, currency))). Would you like to link it to \(catTitle) and exclude \(Money.format(reimbAmt, currency)) from your personal spending?"
+            let isFullExclusion = abs(reimbAmt - exp.amount) <= 0.01
+            let prompt: String = isFullExclusion
+                ? "You spent \(Money.format(exp.amount, currency)) at \(exp.merchant) and received \(Money.format(incomingTx.amount, currency)). Was this purchase paid for someone else? Confirm to remove it from your \(catTitle) budget."
+                : "FALAK noticed an incoming transfer of \(Money.format(incomingTx.amount, currency)) that may reimburse your \(exp.merchant) payment (\(Money.format(exp.amount, currency))). Would you like to link it to \(catTitle) and exclude \(Money.format(reimbAmt, currency)) from your personal spending?"
             let suggestion = SharedExpenseSuggestion(
                 expenseTransactionID: exp.id,
                 candidateReimbursementIDs: [incomingTx.id],
@@ -1089,6 +1113,7 @@ final class SharedExpenseIntelligenceService {
         chosenCategoryRaw: String? = nil,
         customPersonalAmount: Double? = nil,
         customReimbursableAmount: Double? = nil,
+        trustSender: Bool = false,
         currency: String = AppSettings.currency
     ) -> Result<SharedExpenseAdjustment, FinancialValidationError> {
         guard let expenseTx = allTransactions.first(where: { $0.id == suggestion.expenseTransactionID }) else {
@@ -1199,8 +1224,236 @@ final class SharedExpenseIntelligenceService {
             wasPartialRepayment: adjustment.outstandingReimbursementAmount > SharedExpenseFinancialValidator.epsilon
         ))
 
+        if trustSender {
+            memoryStore.setSenderTrusted(firstSenderToken, trusted: true)
+        }
+
         Ledger.notifyDataChanged()
         return .success(adjustment)
+    }
+
+    // MARK: - 3b. Manual Controls (Paid for Someone Else / Link Incoming Transfer)
+
+    /// Manually marks an expense as shared or 100% paid for someone else (even before reimbursement arrives),
+    /// immediately protecting the category budget via the reversible adjustment layer.
+    @discardableResult
+    func applyManualAdjustment(
+        for expenseTx: MoneyTransaction,
+        personalAmount: Double,
+        reimbursableAmount: Double,
+        effectiveCategoryRaw: String? = nil,
+        linkedReimbursements: [(tx: MoneyTransaction, amount: Double)] = [],
+        trustSender: Bool = false,
+        explanation: String? = nil,
+        currency: String = AppSettings.currency
+    ) -> Result<SharedExpenseAdjustment, FinancialValidationError> {
+        let clampedReimb = min(expenseTx.amount, max(0, roundMoney(reimbursableAmount, currency: currency)))
+        let clampedPersonal = max(0, roundMoney(expenseTx.amount - clampedReimb, currency: currency))
+
+        if case .failure(let err) = SharedExpenseFinancialValidator.validateSplit(
+            originalAmount: expenseTx.amount,
+            personalAmount: clampedPersonal,
+            reimbursableAmount: clampedReimb
+        ) {
+            return .failure(err)
+        }
+
+        let existingAdj = adjustmentStore.activeAdjustment(forExpenseID: expenseTx.id)
+        var newAllocations = existingAdj?.reimbursementAllocations ?? []
+        var workingActive = adjustmentStore.activeAdjustments
+        var firstDelayHours: Double? = nil
+        var firstSenderToken: String? = nil
+
+        for item in linkedReimbursements where item.amount > SharedExpenseFinancialValidator.epsilon {
+            if newAllocations.contains(where: { $0.reimbursementTransactionID == item.tx.id }) { continue }
+            let check = SharedExpenseFinancialValidator.validateAllocation(
+                expenseTxID: expenseTx.id,
+                expenseDate: expenseTx.date,
+                expenseTotalAmount: expenseTx.amount,
+                expenseReimbursableCap: clampedReimb,
+                reimbursementTxID: item.tx.id,
+                reimbursementDate: item.tx.date,
+                reimbursementTotalAmount: item.tx.amount,
+                requestedAmount: item.amount,
+                existingActiveAdjustments: workingActive
+            )
+            if case .failure(let err) = check {
+                return .failure(err)
+            }
+            let sToken = SharedExpensePrivacy.extractSenderToken(from: item.tx)
+            if firstSenderToken == nil { firstSenderToken = sToken }
+            if firstDelayHours == nil {
+                firstDelayHours = max(0, item.tx.date.timeIntervalSince(expenseTx.date) / 3600.0)
+            }
+            let alloc = ReimbursementAllocation(reimbursementTransactionID: item.tx.id, allocatedAmount: item.amount, senderToken: sToken)
+            newAllocations.append(alloc)
+            workingActive.append(SharedExpenseAdjustment(
+                originalTransactionID: expenseTx.id,
+                reimbursementAllocations: [alloc],
+                originalExpenseAmount: expenseTx.amount,
+                personalAmount: clampedPersonal,
+                reimbursableAmount: clampedReimb,
+                effectiveCategoryRaw: effectiveCategoryRaw ?? existingAdj?.effectiveCategoryRaw ?? expenseTx.categoryRaw,
+                aiConfidence: 1.0,
+                explanation: explanation ?? "Manually marked",
+                confirmationSource: .userConfirmed
+            ))
+        }
+
+        let finalCategory = (effectiveCategoryRaw?.isEmpty == false ? effectiveCategoryRaw! : nil)
+            ?? existingAdj?.effectiveCategoryRaw
+            ?? expenseTx.categoryRaw
+        let defaultReason = clampedPersonal <= SharedExpenseFinancialValidator.epsilon
+            ? "Manually marked as 100% paid for someone else."
+            : "Manually split personal and reimbursable portions."
+
+        let adjustment = SharedExpenseAdjustment(
+            id: existingAdj?.id ?? UUID(),
+            originalTransactionID: expenseTx.id,
+            reimbursementAllocations: newAllocations,
+            originalExpenseAmount: expenseTx.amount,
+            personalAmount: clampedPersonal,
+            reimbursableAmount: clampedReimb,
+            effectiveCategoryRaw: finalCategory,
+            aiConfidence: 1.0,
+            explanation: explanation ?? defaultReason,
+            timestamp: Date(),
+            confirmationSource: .userConfirmed
+        )
+        adjustmentStore.upsertAdjustment(adjustment)
+        if let pending = adjustmentStore.pendingSuggestion(forTransactionID: expenseTx.id) {
+            adjustmentStore.markSuggestion(pending.id, status: .confirmed)
+        }
+
+        memoryStore.record(SharedExpenseMemoryRecord(
+            transactionID: expenseTx.id.uuidString,
+            relationshipType: .sharedExpense,
+            confirmedCategory: finalCategory,
+            personalAmount: clampedPersonal,
+            reimbursableAmount: clampedReimb,
+            confirmationSource: .userConfirmed,
+            confidence: 1.0,
+            merchantKey: SharedExpensePrivacy.normalizedMerchantKey(expenseTx.merchant),
+            senderToken: firstSenderToken,
+            reimbursementDelayHours: firstDelayHours,
+            wasPartialRepayment: adjustment.outstandingReimbursementAmount > SharedExpenseFinancialValidator.epsilon
+        ))
+
+        if trustSender {
+            memoryStore.setSenderTrusted(firstSenderToken, trusted: true)
+        }
+
+        Ledger.notifyDataChanged()
+        return .success(adjustment)
+    }
+
+    /// Manually links an incoming transfer transaction to one or more purchases as a reimbursement.
+    @discardableResult
+    func linkReimbursementManually(
+        reimbursementTx: MoneyTransaction,
+        allocations: [(expenseTx: MoneyTransaction, amount: Double)],
+        trustSender: Bool = false,
+        currency: String = AppSettings.currency
+    ) -> Result<[SharedExpenseAdjustment], FinancialValidationError> {
+        guard !allocations.isEmpty else { return .failure(.invalidReimbursementAmount) }
+
+        var workingActive = adjustmentStore.activeAdjustments
+        let senderToken = SharedExpensePrivacy.extractSenderToken(from: reimbursementTx)
+        var prepared: [(expense: MoneyTransaction, amount: Double, targetReimbursable: Double)] = []
+
+        for item in allocations {
+            let existingAdj = workingActive.first { $0.isActive && $0.originalTransactionID == item.expenseTx.id }
+            let alreadyReceived = existingAdj?.totalReceivedReimbursementAmount ?? 0
+            let targetReimb = min(item.expenseTx.amount, max(existingAdj?.reimbursableAmount ?? item.amount, alreadyReceived + item.amount))
+
+            let check = SharedExpenseFinancialValidator.validateAllocation(
+                expenseTxID: item.expenseTx.id,
+                expenseDate: item.expenseTx.date,
+                expenseTotalAmount: item.expenseTx.amount,
+                expenseReimbursableCap: targetReimb,
+                reimbursementTxID: reimbursementTx.id,
+                reimbursementDate: reimbursementTx.date,
+                reimbursementTotalAmount: reimbursementTx.amount,
+                requestedAmount: item.amount,
+                existingActiveAdjustments: workingActive
+            )
+            if case .failure(let err) = check {
+                return .failure(err)
+            }
+            prepared.append((item.expenseTx, item.amount, targetReimb))
+
+            let tempAlloc = ReimbursementAllocation(reimbursementTransactionID: reimbursementTx.id, allocatedAmount: item.amount, senderToken: senderToken)
+            if let idx = workingActive.firstIndex(where: { $0.isActive && $0.originalTransactionID == item.expenseTx.id }) {
+                workingActive[idx].reimbursementAllocations.append(tempAlloc)
+                workingActive[idx].reimbursableAmount = targetReimb
+                workingActive[idx].personalAmount = max(0, item.expenseTx.amount - targetReimb)
+            } else {
+                workingActive.append(SharedExpenseAdjustment(
+                    originalTransactionID: item.expenseTx.id,
+                    reimbursementAllocations: [tempAlloc],
+                    originalExpenseAmount: item.expenseTx.amount,
+                    personalAmount: max(0, item.expenseTx.amount - targetReimb),
+                    reimbursableAmount: targetReimb,
+                    effectiveCategoryRaw: item.expenseTx.categoryRaw,
+                    aiConfidence: 1.0,
+                    explanation: "Manually linked reimbursement",
+                    confirmationSource: .userConfirmed
+                ))
+            }
+        }
+
+        var results: [SharedExpenseAdjustment] = []
+        for item in prepared {
+            let alloc = ReimbursementAllocation(reimbursementTransactionID: reimbursementTx.id, allocatedAmount: item.amount, senderToken: senderToken)
+            let adjustment: SharedExpenseAdjustment
+            if var existing = adjustmentStore.activeAdjustment(forExpenseID: item.expense.id) {
+                existing.reimbursementAllocations.append(alloc)
+                existing.reimbursableAmount = item.targetReimbursable
+                existing.personalAmount = max(0, roundMoney(item.expense.amount - item.targetReimbursable, currency: currency))
+                existing.aiConfidence = 1.0
+                existing.timestamp = Date()
+                adjustment = existing
+            } else {
+                adjustment = SharedExpenseAdjustment(
+                    originalTransactionID: item.expense.id,
+                    reimbursementAllocations: [alloc],
+                    originalExpenseAmount: item.expense.amount,
+                    personalAmount: max(0, roundMoney(item.expense.amount - item.targetReimbursable, currency: currency)),
+                    reimbursableAmount: item.targetReimbursable,
+                    effectiveCategoryRaw: item.expense.categoryRaw,
+                    aiConfidence: 1.0,
+                    explanation: "Manually linked reimbursement of \(Money.format(item.amount, currency)).",
+                    timestamp: Date(),
+                    confirmationSource: .userConfirmed
+                )
+            }
+            adjustmentStore.upsertAdjustment(adjustment)
+            if let pending = adjustmentStore.pendingSuggestion(forTransactionID: item.expense.id) {
+                adjustmentStore.markSuggestion(pending.id, status: .confirmed)
+            }
+            let delayHours = max(0, reimbursementTx.date.timeIntervalSince(item.expense.date) / 3600.0)
+            memoryStore.record(SharedExpenseMemoryRecord(
+                transactionID: item.expense.id.uuidString,
+                relationshipType: .reimbursementPattern,
+                confirmedCategory: adjustment.effectiveCategoryRaw ?? item.expense.categoryRaw,
+                personalAmount: adjustment.personalAmount,
+                reimbursableAmount: adjustment.reimbursableAmount,
+                confirmationSource: .userConfirmed,
+                confidence: 1.0,
+                merchantKey: SharedExpensePrivacy.normalizedMerchantKey(item.expense.merchant),
+                senderToken: senderToken,
+                reimbursementDelayHours: delayHours,
+                wasPartialRepayment: adjustment.outstandingReimbursementAmount > SharedExpenseFinancialValidator.epsilon
+            ))
+            results.append(adjustment)
+        }
+
+        if trustSender {
+            memoryStore.setSenderTrusted(senderToken, trusted: true)
+        }
+
+        Ledger.notifyDataChanged()
+        return .success(results)
     }
 
     /// Rejects a suggestion, keeps original transaction and budget unchanged,

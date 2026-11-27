@@ -221,7 +221,16 @@ struct CategoryEditor: View {
                         )
                     }
                     if !isIncome && !isTransfer {
-                        Toggle("Essential spending", isOn: $isEssential)
+                        Toggle(isOn: $isEssential) {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("Essential spending")
+                                    .foregroundStyle(Theme.ink)
+                                Text("Protects remaining budgeted money for must-have needs (like groceries, rent, utilities, and health) when calculating Safe to Spend.")
+                                    .font(.caption)
+                                    .foregroundStyle(Theme.secondaryInk)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
                     }
                 }
 

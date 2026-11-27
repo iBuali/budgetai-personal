@@ -647,4 +647,116 @@ struct SharedExpenseIntelligenceTests {
         #expect(abs(disabledFinance.expenses(in: disabledFinance.thisMonth) - baselineFinance.expenses(in: baselineFinance.thisMonth)) < 0.0001)
         #expect(abs(disabledFinance.income(in: disabledFinance.thisMonth) - baselineFinance.income(in: baselineFinance.thisMonth)) < 0.0001)
     }
+
+    // MARK: 17. Manual 100% Paid for Someone Else + Auto-Close When Transfer Arrives
+
+    @Test func manualFullPurchaseForSomeoneElseExcludesBudgetImmediatelyAndAutoClosesWhenTransferArrives() async {
+        let (service, adjStore, _, _) = makeIsolatedHarness()
+        let now = Date()
+        let purchaseDate = now.addingTimeInterval(-3600 * 6)
+        let pharmacyBuy = MoneyTransaction(amount: 45.000, isIncome: false, merchant: "Nasser Pharmacy", category: .health, date: purchaseDate, source: .sms)
+
+        // User manually marks 100% paid for someone else (Your Share = 0) before transfer arrives
+        let manualRes = service.applyManualAdjustment(
+            for: pharmacyBuy,
+            personalAmount: 0,
+            reimbursableAmount: 45.000,
+            currency: "BHD"
+        )
+        guard case .success(let manualAdj) = manualRes else {
+            Issue.record("Manual 100% exclusion should succeed")
+            return
+        }
+        #expect(abs(manualAdj.personalAmount - 0.0) < 0.0001)
+        #expect(abs(manualAdj.reimbursableAmount - 45.000) < 0.0001)
+        #expect(abs(manualAdj.outstandingReimbursementAmount - 45.000) < 0.0001)
+
+        let finBeforeTransfer = Finance(transactions: [pharmacyBuy], now: now, sharedExpenseOverlay: adjStore.makeOverlay(isEnabled: true))
+        #expect(abs(finBeforeTransfer.spent(.health, in: finBeforeTransfer.thisMonth) - 0.0) < 0.0001)
+
+        // Later, BD 45.000 Transfer In arrives -> auto-links to waiting item & closes outstanding to 0 without double deducting
+        let transferIn = MoneyTransaction(amount: 45.000, isIncome: true, merchant: "IBAN ending 1234", category: .transferIn, date: now, source: .sms)
+        transferIn.smsTransactionType = .transferIn
+        transferIn.rawText = "Fawri+ payment BHD45.000 received from IBAN 1234 to IBAN 3876 ref. ABC123"
+
+        let outcome = await service.analyzeTransaction(transferIn, allTransactions: [pharmacyBuy, transferIn], currency: "BHD")
+        guard case .automaticallyAdjusted(let adjs) = outcome, let closedAdj = adjs.first else {
+            Issue.record("Expected auto-link to waiting manual adjustment, got \(outcome)")
+            return
+        }
+        #expect(abs(closedAdj.outstandingReimbursementAmount - 0.0) < 0.0001)
+        #expect(abs(closedAdj.personalAmount - 0.0) < 0.0001)
+
+        let finAfterTransfer = Finance(transactions: [pharmacyBuy, transferIn], now: now, sharedExpenseOverlay: adjStore.makeOverlay(isEnabled: true))
+        #expect(abs(finAfterTransfer.spent(.health, in: finAfterTransfer.thisMonth) - 0.0) < 0.0001)
+        #expect(abs(finAfterTransfer.income(in: finAfterTransfer.thisMonth) - 0.0) < 0.0001)
+    }
+
+    // MARK: 18. First-time exact match in any category suggests, then auto-applies for Trusted Sender
+
+    @Test func firstTimeExactMatchInAnyCategorySuggestsThenAutoAppliesForTrustedSender() async {
+        let (service, adjStore, memStore, _) = makeIsolatedHarness()
+        let now = Date()
+        let t1 = MoneyTransaction(amount: 32.500, isIncome: false, merchant: "Nasser Pharmacy", category: .health, date: now.addingTimeInterval(-86_400), source: .sms)
+        let r1 = MoneyTransaction(amount: 32.500, isIncome: true, merchant: "IBAN ending 1234", category: .transferIn, date: now.addingTimeInterval(-82_800), source: .sms)
+        r1.smsTransactionType = .transferIn
+        r1.rawText = "Fawri+ payment BHD32.500 received from IBAN 1234 to IBAN 3876 ref. R1"
+
+        // First time: unknown sender -> must SUGGEST (never silently modify budget)
+        let o1 = await service.analyzeTransaction(r1, allTransactions: [t1, r1], currency: "BHD")
+        guard case .suggested(let sug) = o1 else {
+            Issue.record("Expected 1-tap suggestion for first-time exact reimbursement, got \(o1)")
+            return
+        }
+        #expect(adjStore.activeAdjustments.isEmpty)
+
+        // User confirms and trusts sender 1234
+        let c1 = service.confirmSuggestion(sug, allTransactions: [t1, r1], trustSender: true, currency: "BHD")
+        guard case .success = c1 else {
+            Issue.record("Confirm with trustSender should succeed")
+            return
+        }
+        #expect(memStore.isSenderTrusted(SharedExpensePrivacy.extractSenderToken(from: r1)))
+
+        // Second time: different category (Transport) + exact transfer from trusted sender 1234 -> High Confidence AUTO!
+        let t2 = MoneyTransaction(amount: 18.000, isIncome: false, merchant: "ENOC Fuel", category: .transport, date: now.addingTimeInterval(-3600), source: .sms)
+        let r2 = MoneyTransaction(amount: 18.000, isIncome: true, merchant: "IBAN ending 1234", category: .transferIn, date: now, source: .sms)
+        r2.smsTransactionType = .transferIn
+        r2.rawText = "Fawri+ payment BHD18.000 received from IBAN 1234 to IBAN 3876 ref. R2"
+
+        let o2 = await service.analyzeTransaction(r2, allTransactions: [t1, r1, t2, r2], currency: "BHD")
+        guard case .automaticallyAdjusted(let adjs) = o2, let autoAdj = adjs.first else {
+            Issue.record("Expected automatic high-confidence adjustment for trusted sender exact reimbursement, got \(o2)")
+            return
+        }
+        #expect(autoAdj.originalTransactionID == t2.id)
+        #expect(abs(autoAdj.personalAmount - 0.0) < 0.0001)
+
+        let finance = Finance(transactions: [t2, r2], now: now, sharedExpenseOverlay: adjStore.makeOverlay(isEnabled: true))
+        #expect(abs(finance.spent(.transport, in: finance.thisMonth) - 0.0) < 0.0001)
+    }
+
+    // MARK: 19. Manual linking from Transfer In across multiple purchases
+
+    @Test func manualReimbursementLinkingFromTransferInUpdatesBudgetAndPreventsOverAllocation() {
+        let (service, adjStore, _, _) = makeIsolatedHarness()
+        let now = Date()
+        let p1 = MoneyTransaction(amount: 20.000, isIncome: false, merchant: "Nasser Pharmacy", category: .health, date: now.addingTimeInterval(-7200), source: .sms)
+        let p2 = MoneyTransaction(amount: 10.000, isIncome: false, merchant: "Talabat", category: .dining, date: now.addingTimeInterval(-3600), source: .sms)
+        let r = MoneyTransaction(amount: 30.000, isIncome: true, merchant: "IBAN ending 9876", category: .transferIn, date: now, source: .sms)
+        r.smsTransactionType = .transferIn
+        r.rawText = "Fawri+ payment BHD30.000 received from IBAN 9876 to IBAN 3876"
+
+        let res = service.linkReimbursementManually(reimbursementTx: r, allocations: [(p1, 20.000), (p2, 10.000)], trustSender: true, currency: "BHD")
+        guard case .success(let adjs) = res else {
+            Issue.record("Manual multi-purchase link should succeed")
+            return
+        }
+        #expect(adjs.count == 2)
+        #expect(abs(adjStore.remainingCapacity(forReimbursementID: r.id, totalAmount: 30.000) - 0.0) < 0.0001)
+
+        let finance = Finance(transactions: [p1, p2, r], now: now, sharedExpenseOverlay: adjStore.makeOverlay(isEnabled: true))
+        #expect(abs(finance.spent(.health, in: finance.thisMonth) - 0.0) < 0.0001)
+        #expect(abs(finance.spent(.dining, in: finance.thisMonth) - 0.0) < 0.0001)
+    }
 }

@@ -1413,7 +1413,7 @@ struct BudgetAITests {
         #expect(captured.first?.field == .originalSMS)
         #expect(captured.contains(where: { $0.field == .recipientIBAN && $0.value == "0846" }))
         #expect(captured.contains(where: { $0.field == .smsSender && $0.value == "17515151" }))
-        let removedFields: Set<RuleConditionField> = [.bank, .direction, .reference]
+        let removedFields: Set<RuleConditionField> = [.bank, .note, .reference]
         let hasRemovedFields = captured.contains(where: { removedFields.contains($0.field) })
         #expect(hasRemovedFields == false)
 
@@ -3996,5 +3996,86 @@ struct BudgetAITests {
         #expect(tx.isSpending == true)
         #expect(tx.isTransfer == false)
         #expect(tx.category != .transfers)
+    }
+
+    @Test func senderVsRecipientIBANAndTransactionTypeAndDateRulesWorkAccurately() async throws {
+        TransactionRuleStore.shared.clearAll()
+        defer { TransactionRuleStore.shared.clearAll() }
+
+        // 1. Incoming SMS explicitly mentions "from IBAN 0000 to IBAN 3876"
+        let incomingSMS = "Fawri+ payment BHD200.000 received from IBAN 0000 to IBAN 3876 ref. ALS103KBD00395OD on 2026/11/25 22:35. Balance BHD804.969. Tel 17515151"
+        let inParties = SMSParser.extractTransferParties(in: incomingSMS)
+        #expect(inParties.senderSuffix == "0000")
+        #expect(inParties.recipientSuffix == "3876")
+        #expect(inParties.isIncoming == true)
+
+        // 2. Outgoing SMS explicitly mentions "from IBAN 1101 to IBAN 0000" and "credited to IBAN ending 0846"
+        let outgoingSMS = "Success! Fawri+ transfer of BHD 200.000 from IBAN ****1101 to IBAN ****0000 is completed on 23/11/2026 13:27 Ref ABCO261123075193"
+        let outParties = SMSParser.extractTransferParties(in: outgoingSMS)
+        #expect(outParties.senderSuffix == "1101")
+        #expect(outParties.recipientSuffix == "0000")
+        #expect(outParties.isIncoming == false)
+
+        let outCreditedSMS = "Fawri+ payment BHD 40.000, ref: BIB103KAK999111 was credited to IBAN ending 0846 on 2026/11/01 10:00. Balance BHD 960.000. Tel: 17515151"
+        let outCreditedParties = SMSParser.extractTransferParties(in: outCreditedSMS)
+        #expect(outCreditedParties.recipientSuffix == "0846")
+        #expect(outCreditedParties.isIncoming == false)
+
+        // 3. Rule targeting recipientIBAN = 0000 MUST NOT match incoming SMS "received from IBAN 0000 to IBAN 3876"
+        let cal = Calendar(identifier: .gregorian)
+        let incomingDate = try #require(cal.date(from: DateComponents(year: 2026, month: 11, day: 28, hour: 10, minute: 0))) // Saturday
+        let incomingTx = MoneyTransaction(amount: 200.0, isIncome: true, merchant: "IBAN ending 0000", category: .transferIn, date: incomingDate, source: .sms)
+        incomingTx.smsTransactionType = .transferIn
+        incomingTx.smsRecipientSuffix = "0000"
+        incomingTx.smsAccountSuffix = "3876"
+        incomingTx.rawText = incomingSMS
+
+        let outgoingRecipRule = TransactionRule(
+            name: "Outgoing to 0000",
+            conditions: [RuleCondition(field: .recipientIBAN, value: "0000", displayValue: "**0000")],
+            actions: RuleActions(setCategoryRaw: SpendCategory.groceries.rawValue)
+        )
+        #expect(TransactionRuleStore.shared.matches(rule: outgoingRecipRule, context: RuleEvaluationContext(from: incomingTx)) == false)
+
+        // 4. Captured conditions replace Note with Transaction Type, Date (Day & Month), and Day of Week
+        let captured = TransactionRuleStore.captureAvailableConditions(from: incomingTx, accounts: [])
+        #expect(captured.contains(where: { $0.field == .senderIBAN && $0.value == "0000" }))
+        #expect(captured.contains(where: { $0.field == .recipientIBAN && $0.value == "3876" }))
+        #expect(captured.contains(where: { $0.field == .direction && $0.value == RuleTransactionTypeOption.transferIn.rawValue }))
+        #expect(captured.contains(where: { $0.field == .monthDay && $0.value == "11-28" }))
+        #expect(captured.contains(where: { $0.field == .dayOfWeek && $0.value == "7" }))
+        #expect(!captured.contains(where: { $0.field == .note }))
+
+        // 5. Rule with Sender IBAN + Transaction Type (Transfer In) + Date (28-Nov any year) + Day of Week (Saturday) matches
+        let incomingRule = TransactionRule(
+            name: "Incoming from 0000",
+            conditions: [
+                RuleCondition(field: .senderIBAN, value: "0000", displayValue: "**0000"),
+                RuleCondition(field: .direction, value: RuleTransactionTypeOption.transferIn.rawValue, displayValue: "Transfer In"),
+                RuleCondition(field: .monthDay, value: "11-28", displayValue: "28-Nov"),
+                RuleCondition(field: .dayOfWeek, value: "7", displayValue: "Saturday")
+            ],
+            actions: RuleActions(setCategoryRaw: SpendCategory.income.rawValue)
+        )
+        #expect(TransactionRuleStore.shared.matches(rule: incomingRule, context: RuleEvaluationContext(from: incomingTx)) == true)
+
+        // Month-Day matches across different years (e.g. 2025-11-28) even without year
+        let sameMonthDayDiffYear = try #require(cal.date(from: DateComponents(year: 2025, month: 11, day: 28, hour: 12, minute: 0)))
+        let otherDate = try #require(cal.date(from: DateComponents(year: 2026, month: 11, day: 29, hour: 12, minute: 0))) // Sunday
+        let monthDayRule = TransactionRule(
+            name: "28-Nov Rule",
+            conditions: [RuleCondition(field: .monthDay, value: "11-28", displayValue: "28-Nov")],
+            actions: RuleActions(setCategoryRaw: SpendCategory.dining.rawValue)
+        )
+        #expect(TransactionRuleStore.shared.matches(rule: monthDayRule, context: RuleEvaluationContext(merchant: "Test", amount: 5, isIncome: false, date: sameMonthDayDiffYear)) == true)
+        #expect(TransactionRuleStore.shared.matches(rule: monthDayRule, context: RuleEvaluationContext(merchant: "Test", amount: 5, isIncome: false, date: otherDate)) == false)
+
+        let saturdayRule = TransactionRule(
+            name: "Saturday Rule",
+            conditions: [RuleCondition(field: .dayOfWeek, value: "7", displayValue: "Saturday")],
+            actions: RuleActions(setCategoryRaw: SpendCategory.dining.rawValue)
+        )
+        #expect(TransactionRuleStore.shared.matches(rule: saturdayRule, context: RuleEvaluationContext(merchant: "Test", amount: 5, isIncome: false, date: incomingDate)) == true)
+        #expect(TransactionRuleStore.shared.matches(rule: saturdayRule, context: RuleEvaluationContext(merchant: "Test", amount: 5, isIncome: false, date: otherDate)) == false)
     }
 }

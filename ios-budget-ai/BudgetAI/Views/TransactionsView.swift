@@ -12,7 +12,7 @@ enum TxDateRange: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
-struct TxFilterState: Equatable {
+struct TxFilterState: Equatable, Hashable {
     var kind: TxFilter = .all
     var range: TxDateRange = .thisCycle
     var customStart: Date = Calendar.current.date(byAdding: .day, value: -30, to: .now) ?? .now
@@ -96,6 +96,26 @@ struct TransactionsView: View {
     @State private var calendarMonth = Calendar.current.date(from: Calendar.current.dateComponents([.year, .month], from: .now)) ?? .now
     @State private var selectedDay: Date = Calendar.current.startOfDay(for: .now)
     @State private var approvedTick = 0
+    @State private var cachedSnapshot = TxViewSnapshot()
+    @State private var lastSnapshotKey: Int? = nil
+
+    private var currentSnapshotKey: Int {
+        var hasher = Hasher()
+        hasher.combine(transactions.count)
+        hasher.combine(appState.dataVersion)
+        hasher.combine(filters)
+        hasher.combine(query)
+        hasher.combine(mode.rawValue)
+        hasher.combine(cycleStartDay)
+        return hasher.finalize()
+    }
+
+    private func refreshSnapshotIfNeeded() {
+        let key = currentSnapshotKey
+        guard key != lastSnapshotKey else { return }
+        cachedSnapshot = computeViewSnapshot()
+        lastSnapshotKey = key
+    }
 
     private func matchesSearch(_ tx: MoneyTransaction) -> Bool {
         guard !query.isEmpty else { return true }
@@ -180,7 +200,8 @@ struct TransactionsView: View {
 
     var body: some View {
         let _ = cycleStartDay
-        let snap = computeViewSnapshot()
+        let snapKey = currentSnapshotKey
+        let snap = (lastSnapshotKey == snapKey) ? cachedSnapshot : computeViewSnapshot()
         let currentFiltered = snap.filtered
         let currentPending = snap.pending
         let currentNeedsReview = snap.needsReview
@@ -261,6 +282,7 @@ struct TransactionsView: View {
                                         withAnimation {
                                             for tx in items { tx.isPossibleDuplicate = false }
                                             try? context.save()
+                                            Ledger.notifyDataChanged()
                                         }
                                         approvedTick += 1
                                         appState.show("Kept \(items.count) transaction\(items.count == 1 ? "" : "s")")
@@ -407,14 +429,14 @@ struct TransactionsView: View {
             }
             .onAppear {
                 applyRequestedFilterIfNeeded()
+                refreshSnapshotIfNeeded()
             }
             .onChange(of: appState.requestedTransactionsFilter) { _, _ in
                 applyRequestedFilterIfNeeded()
+                refreshSnapshotIfNeeded()
             }
-            .onChange(of: appState.tab) { _, newTab in
-                if newTab == .transactions {
-                    applyRequestedFilterIfNeeded()
-                }
+            .onChange(of: currentSnapshotKey) { _, _ in
+                refreshSnapshotIfNeeded()
             }
             .sensoryFeedback(.success, trigger: approvedTick)
             .sensoryFeedback(.selection, trigger: mode)
@@ -483,6 +505,7 @@ struct TransactionsView: View {
                 Button {
                     tx.isPossibleDuplicate = false
                     try? context.save()
+                    Ledger.notifyDataChanged()
                 } label: { Label("Keep", systemImage: "checkmark") }
                 .tint(Theme.positive)
             }
@@ -1000,17 +1023,73 @@ struct TransactionDetailView: View {
     private var isSMSTransaction: Bool { tx.source == .sms || tx.smsTransactionType != nil }
 
     private var matchedRecipientAccount: Account? {
-        guard let recip = tx.smsRecipientSuffix, !recip.isEmpty else { return nil }
+        let targetSuffix = resolvedTransferParties.recipientSuffix ?? tx.smsRecipientSuffix
+        guard let recip = targetSuffix, !recip.isEmpty else { return nil }
         return SMSParser.findMatchingAccount(suffix: recip, excludingAccountID: tx.accountID, in: accounts)
     }
 
+    private var resolvedTransferParties: (senderSuffix: String?, recipientSuffix: String?, isIncoming: Bool) {
+        if let raw = tx.rawText?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty {
+            let parts = raw.components(separatedBy: "\n\n---\n\n")
+            if parts.count >= 2, let firstRaw = parts.first {
+                let firstParties = SMSParser.extractTransferParties(in: firstRaw)
+                let lastParties = SMSParser.extractTransferParties(in: parts.last ?? firstRaw)
+                return (
+                    senderSuffix: firstParties.senderSuffix ?? tx.smsAccountSuffix,
+                    recipientSuffix: lastParties.recipientSuffix ?? tx.smsRecipientSuffix ?? firstParties.recipientSuffix,
+                    isIncoming: tx.isIncome || tx.isTransferIn
+                )
+            }
+            return SMSParser.extractTransferParties(in: raw)
+        }
+        let incoming = tx.isIncome || tx.isTransferIn
+        if incoming {
+            return (tx.smsRecipientSuffix, tx.smsAccountSuffix, true)
+        }
+        return (tx.smsAccountSuffix, tx.smsRecipientSuffix, false)
+    }
+
+    private var senderDisplayText: String {
+        let parties = resolvedTransferParties
+        let suffix = parties.senderSuffix
+        if isAccountTransfer, let account {
+            if let suffix, !suffix.isEmpty {
+                return "\(account.name) · ••\(suffix)"
+            }
+            return account.name
+        }
+        if parties.isIncoming {
+            if let suffix, !suffix.isEmpty {
+                return "••\(suffix)"
+            }
+            return "—"
+        }
+        if let account {
+            if let suffix, !suffix.isEmpty {
+                return "\(account.name) · ••\(suffix)"
+            }
+            return account.name
+        }
+        if let suffix, !suffix.isEmpty {
+            return "••\(suffix)"
+        }
+        return "—"
+    }
+
     private var recipientDisplayText: String {
-        let suffix = (tx.smsRecipientSuffix?.isEmpty == false ? tx.smsRecipientSuffix : nil)
-            ?? (tx.smsAccountSuffix?.isEmpty == false ? tx.smsAccountSuffix : nil)
+        let parties = resolvedTransferParties
+        let suffix = parties.recipientSuffix
         let isTwoSMSInternalTransfer = rawSMSMessages.count > 1 && (tx.category == .internalTransfer || tx.effectiveTransactionType == .internalTransfer)
-        let matchedDest = toAccount ?? ((tx.category == .internalTransfer || tx.effectiveTransactionType == .internalTransfer) ? matchedRecipientAccount : nil)
-        if let suffix {
-            if isTwoSMSInternalTransfer {
+        let matchedDest: Account? = {
+            if let toAccount { return toAccount }
+            if parties.isIncoming { return account ?? matchedRecipientAccount }
+            if tx.category == .internalTransfer || tx.effectiveTransactionType == .internalTransfer {
+                return matchedRecipientAccount
+            }
+            return nil
+        }()
+        if let suffix, !suffix.isEmpty {
+            if isTwoSMSInternalTransfer && toAccount == nil {
                 return "••\(suffix)"
             }
             if let matchedDest {
@@ -2035,6 +2114,12 @@ struct TransactionDetailView: View {
             LabeledContent("Reference") {
                 Text((tx.smsReference?.isEmpty == false) ? tx.smsReference! : "—")
                     .font(.subheadline.monospaced())
+                    .foregroundStyle(Theme.ink)
+            }
+
+            LabeledContent("Sender IBAN / Account") {
+                Text(senderDisplayText)
+                    .font(.subheadline.monospacedDigit())
                     .foregroundStyle(Theme.ink)
             }
 

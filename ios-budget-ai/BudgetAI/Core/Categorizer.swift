@@ -2243,6 +2243,65 @@ enum SMSParser {
         return (accountSuffix, recipientSuffix)
     }
 
+    /// Clearly distinguishes who sent the money (`senderSuffix`) from who received the money (`recipientSuffix`)
+    /// across all English and Arabic bank SMS messages.
+    /// - For explicit "from <IBAN/account> ... to <IBAN/account>" messages, `senderSuffix` is ALWAYS the `from` party
+    ///   and `recipientSuffix` is ALWAYS the `to` party.
+    /// - Otherwise falls back cleanly using message direction (`isIncoming`).
+    static func extractTransferParties(in raw: String) -> (senderSuffix: String?, recipientSuffix: String?, isIncoming: Bool) {
+        let text = normalizeText(raw).replacingOccurrences(of: "\n", with: " ")
+        let lower = text.lowercased()
+
+        let isOutgoingCreditedToIBAN = lower.range(of: "\\bpayment\\b.*\\bwas\\s+credited\\s+to\\s+iban\\s+ending\\b", options: .regularExpression) != nil
+        let isIncoming: Bool = {
+            if isOutgoingCreditedToIBAN { return false }
+            let incomingSignals = [
+                "\\breceived\\s+from\\b",
+                "\\breceived\\s+(?:a\\s+)?(?:fawri\\+?|transfer|payment|amount)\\b",
+                "\\breceived\\s+(?:in|into|to)\\b",
+                "\\bfrom\\s+(?!your\\b)(?:iban|a/c|acct|acc|ac|account)\\b.*\\bcredited\\s+to\\b",
+                "\\bcredit\\s+(?:transaction|txn|alert|advice|amount|of)\\b",
+                "\\b(?:has\\s+been|was|is)\\s+credited\\b",
+                "\\bcredited\\s+(?:to\\s+(?:your\\s+)?(?:[a-z]{3}\\s+)?(?:a/c|acct|acc|ac|account|iban)(?!\\s+ending)|with)\\b",
+                "\\b(?:inward|incoming)\\s+(?:fawri\\+?|transfer|remittance|payment)\\b",
+                "حوالة واردة", "تحويل وارد", "حوالة فوري\\+? واردة", "تم إيداع", "تم ايداع", "تم استلام", "وارد لحسابك"
+            ]
+            return incomingSignals.contains(where: { lower.range(of: $0, options: .regularExpression) != nil })
+        }()
+
+        func firstMatch(patterns: [String]) -> String? {
+            for pattern in patterns {
+                if let regex = try? NSRegularExpression(pattern: pattern),
+                   let m = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) {
+                    for groupIdx in 1..<m.numberOfRanges {
+                        if let r = Range(m.range(at: groupIdx), in: text) {
+                            let val = String(text[r]).trimmingCharacters(in: .whitespacesAndNewlines)
+                            if !val.isEmpty { return val }
+                        }
+                    }
+                }
+            }
+            return nil
+        }
+
+        let explicitFromPatterns = [
+            "(?i)(?:received\\s+from|\\bfrom)\\s+(?:your\\s+)?(?:credit\\s+card|debit\\s+card|prepaid\\s+card|visa(?:\\s+card)?|mastercard|card|iban|a/c|acct|acc\\.?|account)\\s*(?:ending(?:\\s+with|\\s+in)?|no\\.?|number|#)?\\s*[:#=.()\\-]*\\s*(?:[A-Z]{2}[0-9A-Z*xX•#\\-]*([0-9]{4})|[0-9]{2,12}[\\s\\-]*[xX*#•]{1,10}[\\s\\-]*([0-9]{3,6})|[xX*#•.]*([0-9]{3,6}))\\b",
+            "(?i)(?:من)\\s*(?:حسابك|حساب|آيبان|ايبان|الأيبان|الايبان|بطاقة)\\s*(?:رقم|ينتهي\\s*بـ?|المنتهية\\s*بـ?)?\\s*[:\\-]?\\s*(?:[A-Z]{2}[0-9A-Z*xX•#\\-]*([0-9]{4})|[xX*#•.]*([0-9]{3,6}))\\b"
+        ]
+        let explicitToPatterns = [
+            "(?i)(?:credited\\s+to|transferred\\s+to|sent\\s+to|\\bto|\\binto)\\s+(?:your\\s+)?(?:iban|a/c|acct|acc\\.?|account|card)\\s*(?:ending(?:\\s+with|\\s+in)?|no\\.?|number|#)?\\s*[:#=.()\\-]*\\s*(?:[A-Z]{2}[0-9A-Z*xX•#\\-]*([0-9]{4})|[0-9]{2,12}[\\s\\-]*[xX*#•]{1,10}[\\s\\-]*([0-9]{3,6})|[xX*#•.]*([0-9]{3,6}))\\b",
+            "(?i)(?:إلى|الى|لصالح)\\s*(?:حسابك|حساب|آيبان|ايبان|الأيبان|الايبان)\\s*(?:رقم|ينتهي\\s*بـ?)?\\s*[:\\-]?\\s*(?:[A-Z]{2}[0-9A-Z*xX•#\\-]*([0-9]{4})|[xX*#•.]*([0-9]{3,6}))\\b"
+        ]
+
+        let explicitFrom = firstMatch(patterns: explicitFromPatterns)
+        let explicitTo = firstMatch(patterns: explicitToPatterns)
+        let suffixes = extractSuffixes(in: raw)
+
+        let senderSuffix = explicitFrom ?? (isIncoming ? suffixes.recipientSuffix : suffixes.accountSuffix)
+        let recipientSuffix = explicitTo ?? (isIncoming ? suffixes.accountSuffix : suffixes.recipientSuffix)
+        return (senderSuffix, recipientSuffix, isIncoming)
+    }
+
     /// Legacy helper returning the user's card/account suffix (or any suffix if non-transfer).
     static func cardDigits(in raw: String) -> String? {
         let s = extractSuffixes(in: raw)

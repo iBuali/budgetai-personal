@@ -198,16 +198,23 @@ struct MainTabs: View {
                 }
             }
             .sensoryFeedback(.selection, trigger: appState.tab)
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 24)
-                    .onEnded { value in
-                        if value.startLocation.x < 40 && value.translation.width > 55 && abs(value.translation.height) < 80 {
-                            withAnimation(.snappy(duration: 0.28)) {
-                                appState.showDrawer = true
+
+            if !appState.showDrawer {
+                Color.clear
+                    .frame(width: 24)
+                    .frame(maxHeight: .infinity)
+                    .contentShape(Rectangle())
+                    .gesture(
+                        DragGesture(minimumDistance: 20)
+                            .onEnded { value in
+                                if value.translation.width > 55 && abs(value.translation.height) < 80 {
+                                    withAnimation(.snappy(duration: 0.28)) {
+                                        appState.showDrawer = true
+                                    }
+                                }
                             }
-                        }
-                    }
-            )
+                    )
+            }
 
             if appState.showDrawer {
                 Color.black.opacity(0.28)

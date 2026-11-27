@@ -60,7 +60,7 @@ struct Finance {
     init(transactions: [MoneyTransaction], accounts: [Account] = [], budgets: [Budget] = [],
          goals: [SavingsGoal] = [], bills: [Bill] = [], now: Date = .now,
          sharedExpenseOverlay: SharedExpenseOverlay? = nil) {
-        let overlay = sharedExpenseOverlay ?? .current
+        let overlay = sharedExpenseOverlay ?? (transactions.isEmpty ? .empty : .current)
         self.sharedExpenseOverlay = overlay
         var approved: [MoneyTransaction] = []
         var spending: [MoneyTransaction] = []

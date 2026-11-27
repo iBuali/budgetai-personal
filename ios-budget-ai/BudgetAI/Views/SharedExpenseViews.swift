@@ -18,6 +18,9 @@ struct SharedExpenseTransactionSection: View {
 
     @State private var showReverseConfirm = false
     @State private var reverseTargetID: UUID?
+    @State private var showManualSheet = false
+    @State private var showLinkSheet = false
+    @State private var trustSenderOnConfirm = false
 
     var body: some View {
         if enabled {
@@ -25,12 +28,26 @@ struct SharedExpenseTransactionSection: View {
             let linkedReimbAdjs = adjustmentStore.activeAdjustments(forReimbursementID: tx.id)
             let pendingSug = adjustmentStore.pendingSuggestion(forTransactionID: tx.id)
 
-            if let adj = activeExpenseAdj {
-                activeAdjustmentSection(adj)
-            } else if !linkedReimbAdjs.isEmpty {
-                reimbursementLinksSection(linkedReimbAdjs)
-            } else if let suggestion = pendingSug {
-                suggestionSection(suggestion)
+            Group {
+                if let adj = activeExpenseAdj {
+                    activeAdjustmentSection(adj)
+                } else if !linkedReimbAdjs.isEmpty {
+                    reimbursementLinksSection(linkedReimbAdjs)
+                } else if let suggestion = pendingSug {
+                    suggestionSection(suggestion)
+                } else if tx.isSpending && !tx.isPending {
+                    manualExpenseActionSection
+                } else if (tx.isTransferIn || (tx.isIncome && !tx.isTransfer))
+                            && !tx.isPending
+                            && !SharedExpenseClassifier.isInternalTransfer(tx) {
+                    manualReimbursementActionSection
+                }
+            }
+            .sheet(isPresented: $showManualSheet) {
+                ManualSharedExpenseSheet(expenseTx: tx)
+            }
+            .sheet(isPresented: $showLinkSheet) {
+                LinkReimbursementSheet(reimbursementTx: tx)
             }
         }
     }
@@ -82,11 +99,21 @@ struct SharedExpenseTransactionSection: View {
                 .background(Theme.track.opacity(0.45), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
 
                 VStack(spacing: 8) {
+                    if !suggestion.candidateReimbursementIDs.isEmpty {
+                        Toggle(isOn: $trustSenderOnConfirm) {
+                            Text("Auto-match exact reimbursements from this sender next time")
+                                .font(.caption)
+                                .foregroundStyle(Theme.ink)
+                        }
+                        .padding(.vertical, 4)
+                    }
+
                     Button {
                         let all = (try? context.fetch(FetchDescriptor<MoneyTransaction>())) ?? []
                         let result = SharedExpenseIntelligenceService.shared.confirmSuggestion(
                             suggestion,
                             allTransactions: all,
+                            trustSender: trustSenderOnConfirm,
                             currency: currency
                         )
                         switch result {
@@ -174,6 +201,20 @@ struct SharedExpenseTransactionSection: View {
                         .foregroundStyle(Theme.secondaryInk)
                 }
 
+                if adj.outstandingReimbursementAmount > 0.0005 {
+                    Button {
+                        showManualSheet = true
+                    } label: {
+                        Label("Link Incoming Transfer (\(Money.format(adj.outstandingReimbursementAmount, currency)) waiting)", systemImage: "link.badge.plus")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(Theme.cobalt)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .background(Theme.cobalt.opacity(0.10), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                }
+
                 Button(role: .destructive) {
                     reverseTargetID = adj.id
                     showReverseConfirm = true
@@ -248,6 +289,92 @@ struct SharedExpenseTransactionSection: View {
                     .padding(8)
                     .background(Theme.track.opacity(0.45), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                 }
+            }
+            .padding(.vertical, 4)
+        } header: {
+            Text("Shared Expense Intelligence")
+        }
+    }
+
+    private var manualExpenseActionSection: some View {
+        Section {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 10) {
+                    IconBadge(symbol: "person.2.wave.2.fill", color: Theme.cobalt, size: 34)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Paid for Someone Else / Shared?")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(Theme.ink)
+                        Text("Exclude what isn't your personal spending without changing your bank record.")
+                            .font(.caption)
+                            .foregroundStyle(Theme.secondaryInk)
+                    }
+                }
+
+                Button {
+                    let result = SharedExpenseIntelligenceService.shared.applyManualAdjustment(
+                        for: tx,
+                        personalAmount: 0,
+                        reimbursableAmount: tx.amount,
+                        currency: currency
+                    )
+                    if case .success = result {
+                        appState.show("Excluded \(Money.format(tx.amount, currency)) from your budget")
+                    }
+                } label: {
+                    Label("100% For Someone Else (Remove from Budget)", systemImage: "person.crop.circle.badge.minus")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 11)
+                        .background(Theme.cobalt, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    showManualSheet = true
+                } label: {
+                    Label("Split or Link Incoming Transfer…", systemImage: "arrow.left.arrow.right")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(Theme.cobalt)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                        .background(Theme.cobalt.opacity(0.10), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.vertical, 4)
+        } header: {
+            Text("Shared Expense Intelligence")
+        }
+    }
+
+    private var manualReimbursementActionSection: some View {
+        Section {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 10) {
+                    IconBadge(symbol: "arrow.uturn.left.circle.fill", color: Theme.positive, size: 34)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Reimbursement for a Purchase?")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(Theme.ink)
+                        Text("Link this incoming transfer to adjust that purchase's category budget.")
+                            .font(.caption)
+                            .foregroundStyle(Theme.secondaryInk)
+                    }
+                }
+
+                Button {
+                    showLinkSheet = true
+                } label: {
+                    Label("Link to a Purchase…", systemImage: "link.badge.plus")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 11)
+                        .background(Theme.positive, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
+                .buttonStyle(.plain)
             }
             .padding(.vertical, 4)
         } header: {
@@ -404,6 +531,13 @@ struct SharedExpenseCenterView: View {
                         Text("\(memoryStore.activeRecords.count)")
                             .foregroundStyle(Theme.secondaryInk)
                     }
+                    HStack {
+                        Text("Trusted Reimbursement Senders")
+                            .foregroundStyle(Theme.ink)
+                        Spacer()
+                        Text("\(memoryStore.trustedSenderTokens.count)")
+                            .foregroundStyle(Theme.secondaryInk)
+                    }
                     if !memoryStore.activeRecords.isEmpty {
                         Button(role: .destructive) {
                             confirmClearMemory = true
@@ -429,6 +563,389 @@ struct SharedExpenseCenterView: View {
             }
         } message: {
             Text("Transaction Rules and your bank transactions will remain untouched.")
+        }
+    }
+}
+
+// MARK: - Manual Shared Expense / Link Transfer Sheet
+
+struct ManualSharedExpenseSheet: View {
+    let expenseTx: MoneyTransaction
+
+    @Environment(\.dismiss) private var dismiss
+    @Environment(AppState.self) private var appState
+    @Query(sort: \MoneyTransaction.date, order: .reverse) private var allTransactions: [MoneyTransaction]
+    @AppStorage(Keys.currency) private var currency = "BHD"
+
+    @State private var personalText = "0"
+    @State private var selectedReimbursementIDs: Set<UUID> = []
+    @State private var trustSender = false
+    @State private var loaded = false
+
+    private var adjustmentStore: SharedExpenseAdjustmentStore { SharedExpenseAdjustmentStore.shared }
+
+    private var parsedPersonal: Double {
+        min(expenseTx.amount, max(0, Money.parse(personalText) ?? 0))
+    }
+
+    private var reimbursableAmount: Double {
+        max(0, expenseTx.amount - parsedPersonal)
+    }
+
+    private var candidateIncomingTransfers: [MoneyTransaction] {
+        let minDate = expenseTx.date.addingTimeInterval(-600)
+        return allTransactions.filter { tx in
+            guard tx.id != expenseTx.id, !tx.isPending else { return false }
+            guard tx.isTransferIn || (tx.isIncome && !tx.isTransfer) else { return false }
+            guard !SharedExpenseClassifier.isInternalTransfer(tx) else { return false }
+            guard tx.date >= minDate else { return false }
+            let remaining = adjustmentStore.remainingCapacity(forReimbursementID: tx.id, totalAmount: tx.amount)
+            let alreadyLinkedToThis = adjustmentStore.activeAdjustment(forExpenseID: expenseTx.id)?
+                .reimbursementAllocations.contains(where: { $0.reimbursementTransactionID == tx.id }) ?? false
+            return remaining > SharedExpenseFinancialValidator.epsilon || alreadyLinkedToThis
+        }
+        .sorted { lhs, rhs in
+            let lExact = abs(lhs.amount - expenseTx.amount) <= 0.01
+            let rExact = abs(rhs.amount - expenseTx.amount) <= 0.01
+            if lExact != rExact { return lExact }
+            return lhs.date > rhs.date
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Quick Share Presets") {
+                    HStack(spacing: 8) {
+                        presetButton("100% Not Mine", personal: 0)
+                        presetButton("50 / 50", personal: expenseTx.amount / 2.0)
+                        presetButton("1/3 Mine", personal: expenseTx.amount / 3.0)
+                        presetButton("1/4 Mine", personal: expenseTx.amount / 4.0)
+                    }
+                    .padding(.vertical, 4)
+
+                    HStack {
+                        Text("Your Personal Share")
+                        Spacer()
+                        TextField("0", text: $personalText)
+                            .keyboardType(.decimalPad)
+                            .multilineTextAlignment(.trailing)
+                            .monospacedDigit()
+                            .frame(width: 110)
+                    }
+
+                    HStack {
+                        Text("Excluded from Budget")
+                            .foregroundStyle(Theme.secondaryInk)
+                        Spacer()
+                        Text(Money.format(reimbursableAmount, currency))
+                            .fontWeight(.semibold)
+                            .monospacedDigit()
+                            .foregroundStyle(Theme.positive)
+                    }
+                }
+
+                Section {
+                    if candidateIncomingTransfers.isEmpty {
+                        Text("No recent incoming transfers yet — saving now immediately protects your budget and waits for reimbursement.")
+                            .font(.caption)
+                            .foregroundStyle(Theme.secondaryInk)
+                    } else {
+                        ForEach(candidateIncomingTransfers.prefix(20)) { reimb in
+                            let isSelected = selectedReimbursementIDs.contains(reimb.id)
+                            let avail = adjustmentStore.remainingCapacity(forReimbursementID: reimb.id, totalAmount: reimb.amount)
+                            let isExact = abs(reimb.amount - expenseTx.amount) <= 0.01
+                            Button {
+                                if isSelected {
+                                    selectedReimbursementIDs.remove(reimb.id)
+                                } else {
+                                    selectedReimbursementIDs.insert(reimb.id)
+                                }
+                            } label: {
+                                HStack(spacing: 10) {
+                                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                                        .foregroundStyle(isSelected ? Theme.cobalt : Theme.secondaryInk)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        HStack(spacing: 6) {
+                                            Text(reimb.merchant)
+                                                .font(.subheadline.weight(.medium))
+                                                .foregroundStyle(Theme.ink)
+                                                .lineLimit(1)
+                                            if isExact {
+                                                Text("Exact")
+                                                    .font(.caption2.weight(.bold))
+                                                    .padding(.horizontal, 6)
+                                                    .padding(.vertical, 1)
+                                                    .background(Theme.positive.opacity(0.15), in: Capsule())
+                                                    .foregroundStyle(Theme.positive)
+                                            }
+                                        }
+                                        Text(reimb.date.formatted(date: .abbreviated, time: .shortened))
+                                            .font(.caption2)
+                                            .foregroundStyle(Theme.secondaryInk)
+                                    }
+                                    Spacer()
+                                    Text(Money.format(avail, currency))
+                                        .font(.subheadline.weight(.semibold).monospacedDigit())
+                                        .foregroundStyle(Theme.positive)
+                                }
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+
+                    if !selectedReimbursementIDs.isEmpty {
+                        Toggle("Auto-match exact reimbursements from this sender next time", isOn: $trustSender)
+                            .font(.caption)
+                    }
+                } header: {
+                    Text("Link Incoming Transfer (Optional)")
+                }
+            }
+            .scrollContentBackground(.hidden)
+            .canvasBackground()
+            .navigationTitle("Adjust Budget Share")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") { saveAdjustment() }
+                        .fontWeight(.semibold)
+                        .disabled(reimbursableAmount <= 0.0005)
+                }
+            }
+            .onAppear {
+                guard !loaded else { return }
+                loaded = true
+                if let existing = adjustmentStore.activeAdjustment(forExpenseID: expenseTx.id) {
+                    personalText = Money.number(existing.personalAmount, decimals: Money.digits(currency)).replacingOccurrences(of: ",", with: "")
+                } else {
+                    personalText = "0"
+                }
+            }
+        }
+    }
+
+    private func presetButton(_ title: String, personal: Double) -> some View {
+        let digits = Money.digits(currency)
+        let selected = abs(parsedPersonal - personal) < 0.01
+        return Button {
+            personalText = Money.number(personal, decimals: digits).replacingOccurrences(of: ",", with: "")
+        } label: {
+            Text(title)
+                .font(.caption2.weight(.semibold))
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 7)
+                .frame(maxWidth: .infinity)
+                .background(selected ? Theme.cobalt : Theme.track.opacity(0.6), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .foregroundStyle(selected ? .white : Theme.ink)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func saveAdjustment() {
+        var remainingNeed = reimbursableAmount
+        if let existing = adjustmentStore.activeAdjustment(forExpenseID: expenseTx.id) {
+            remainingNeed = max(0, reimbursableAmount - existing.totalReceivedReimbursementAmount)
+        }
+        var linked: [(tx: MoneyTransaction, amount: Double)] = []
+        for reimb in candidateIncomingTransfers where selectedReimbursementIDs.contains(reimb.id) && remainingNeed > 0.0005 {
+            let cap = adjustmentStore.remainingCapacity(forReimbursementID: reimb.id, totalAmount: reimb.amount)
+            let alloc = min(remainingNeed, cap)
+            if alloc > SharedExpenseFinancialValidator.epsilon {
+                linked.append((reimb, alloc))
+                remainingNeed = max(0, remainingNeed - alloc)
+            }
+        }
+
+        let res = SharedExpenseIntelligenceService.shared.applyManualAdjustment(
+            for: expenseTx,
+            personalAmount: parsedPersonal,
+            reimbursableAmount: reimbursableAmount,
+            linkedReimbursements: linked,
+            trustSender: trustSender,
+            currency: currency
+        )
+        switch res {
+        case .success(let adj):
+            appState.show("Personal budget adjusted to \(Money.format(adj.personalAmount, currency))")
+            dismiss()
+        case .failure:
+            appState.show("Could not validate reimbursement split", warning: true)
+        }
+    }
+}
+
+// MARK: - Link Incoming Transfer -> Purchases Sheet
+
+struct LinkReimbursementSheet: View {
+    let reimbursementTx: MoneyTransaction
+
+    @Environment(\.dismiss) private var dismiss
+    @Environment(AppState.self) private var appState
+    @Query(sort: \MoneyTransaction.date, order: .reverse) private var allTransactions: [MoneyTransaction]
+    @AppStorage(Keys.currency) private var currency = "BHD"
+
+    @State private var selectedExpenseIDs: Set<UUID> = []
+    @State private var trustSender = true
+
+    private var adjustmentStore: SharedExpenseAdjustmentStore { SharedExpenseAdjustmentStore.shared }
+
+    private var availableCapacity: Double {
+        adjustmentStore.remainingCapacity(forReimbursementID: reimbursementTx.id, totalAmount: reimbursementTx.amount)
+    }
+
+    private var candidateExpenses: [MoneyTransaction] {
+        let minDate = reimbursementTx.date.addingTimeInterval(-30 * 86_400)
+        let maxDate = reimbursementTx.date.addingTimeInterval(600)
+        return allTransactions.filter { tx in
+            guard tx.id != reimbursementTx.id, !tx.isPending, tx.isSpending, !tx.isIncome, !tx.isTransfer else { return false }
+            guard tx.date >= minDate && tx.date <= maxDate else { return false }
+            if let adj = adjustmentStore.activeAdjustment(forExpenseID: tx.id) {
+                return adj.reimbursementAllocations.allSatisfy { $0.reimbursementTransactionID != reimbursementTx.id }
+                    && max(0, tx.amount - adj.totalReceivedReimbursementAmount) > SharedExpenseFinancialValidator.epsilon
+            }
+            return true
+        }
+        .sorted { lhs, rhs in
+            let lOpen = (adjustmentStore.activeAdjustment(forExpenseID: lhs.id)?.outstandingReimbursementAmount ?? 0) > 0.0005
+            let rOpen = (adjustmentStore.activeAdjustment(forExpenseID: rhs.id)?.outstandingReimbursementAmount ?? 0) > 0.0005
+            if lOpen != rOpen { return lOpen }
+            let lExact = abs(lhs.amount - availableCapacity) <= 0.01
+            let rExact = abs(rhs.amount - availableCapacity) <= 0.01
+            if lExact != rExact { return lExact }
+            return lhs.date > rhs.date
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    HStack {
+                        Text("Transfer Amount")
+                            .foregroundStyle(Theme.secondaryInk)
+                        Spacer()
+                        Text(Money.format(availableCapacity, currency))
+                            .fontWeight(.bold)
+                            .monospacedDigit()
+                            .foregroundStyle(Theme.positive)
+                    }
+                    Toggle("Auto-match exact reimbursements from this sender next time", isOn: $trustSender)
+                        .font(.caption)
+                }
+
+                Section("Select Purchase(s) Paid Back") {
+                    if candidateExpenses.isEmpty {
+                        Text("No eligible recent purchases found.")
+                            .font(.subheadline)
+                            .foregroundStyle(Theme.secondaryInk)
+                    } else {
+                        ForEach(candidateExpenses.prefix(30)) { exp in
+                            let isSelected = selectedExpenseIDs.contains(exp.id)
+                            let isExact = abs(exp.amount - availableCapacity) <= 0.01
+                            let isWaiting = (adjustmentStore.activeAdjustment(forExpenseID: exp.id)?.outstandingReimbursementAmount ?? 0) > 0.0005
+                            Button {
+                                if isSelected {
+                                    selectedExpenseIDs.remove(exp.id)
+                                } else {
+                                    selectedExpenseIDs.insert(exp.id)
+                                }
+                            } label: {
+                                HStack(spacing: 10) {
+                                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                                        .foregroundStyle(isSelected ? Theme.positive : Theme.secondaryInk)
+                                    CategoryIcon(category: exp.category, size: 28)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        HStack(spacing: 6) {
+                                            Text(exp.merchant)
+                                                .font(.subheadline.weight(.medium))
+                                                .foregroundStyle(Theme.ink)
+                                                .lineLimit(1)
+                                            if isExact {
+                                                Text("100% Match")
+                                                    .font(.caption2.weight(.bold))
+                                                    .padding(.horizontal, 6)
+                                                    .padding(.vertical, 1)
+                                                    .background(Theme.positive.opacity(0.15), in: Capsule())
+                                                    .foregroundStyle(Theme.positive)
+                                            } else if isWaiting {
+                                                Text("Waiting")
+                                                    .font(.caption2.weight(.bold))
+                                                    .padding(.horizontal, 6)
+                                                    .padding(.vertical, 1)
+                                                    .background(Theme.warning.opacity(0.16), in: Capsule())
+                                                    .foregroundStyle(Theme.warning)
+                                            }
+                                        }
+                                        Text("\(exp.category.title) · \(exp.date.formatted(date: .abbreviated, time: .shortened))")
+                                            .font(.caption2)
+                                            .foregroundStyle(Theme.secondaryInk)
+                                    }
+                                    Spacer()
+                                    Text(Money.format(exp.amount, currency))
+                                        .font(.subheadline.weight(.semibold).monospacedDigit())
+                                        .foregroundStyle(Theme.ink)
+                                }
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+            }
+            .scrollContentBackground(.hidden)
+            .canvasBackground()
+            .navigationTitle("Link to Purchase")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Link") { saveLinks() }
+                        .fontWeight(.semibold)
+                        .disabled(selectedExpenseIDs.isEmpty || availableCapacity <= 0.0005)
+                }
+            }
+        }
+    }
+
+    private func saveLinks() {
+        var remaining = availableCapacity
+        var links: [(expenseTx: MoneyTransaction, amount: Double)] = []
+        for exp in candidateExpenses where selectedExpenseIDs.contains(exp.id) && remaining > SharedExpenseFinancialValidator.epsilon {
+            let maxForExpense: Double = {
+                if let adj = adjustmentStore.activeAdjustment(forExpenseID: exp.id) {
+                    if adj.outstandingReimbursementAmount > SharedExpenseFinancialValidator.epsilon {
+                        return adj.outstandingReimbursementAmount
+                    }
+                    return max(0, exp.amount - adj.totalReceivedReimbursementAmount)
+                }
+                return exp.amount
+            }()
+            let alloc = min(remaining, maxForExpense)
+            if alloc > SharedExpenseFinancialValidator.epsilon {
+                links.append((exp, alloc))
+                remaining = max(0, remaining - alloc)
+            }
+        }
+
+        let res = SharedExpenseIntelligenceService.shared.linkReimbursementManually(
+            reimbursementTx: reimbursementTx,
+            allocations: links,
+            trustSender: trustSender,
+            currency: currency
+        )
+        switch res {
+        case .success(let adjs):
+            appState.show("Linked reimbursement to \(adjs.count) purchase\(adjs.count == 1 ? "" : "s")")
+            dismiss()
+        case .failure:
+            appState.show("Could not link reimbursement safely", warning: true)
         }
     }
 }

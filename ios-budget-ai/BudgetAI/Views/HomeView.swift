@@ -526,6 +526,14 @@ private struct HomeSpendingCard: View {
     @State private var breakdown: [(category: SpendCategory, amount: Double)] = []
     @State private var totalSpent: Double = 0
     @State private var rangeSubtitle: String = ""
+    @State private var lastBreakdownKey: String = ""
+
+    private func recomputeBreakdownIfNeeded() {
+        let key = "\(range.rawValue)|\(cycleStartDay)|\(transactions.count)|\(dataVersion)"
+        guard key != lastBreakdownKey else { return }
+        lastBreakdownKey = key
+        recomputeBreakdown()
+    }
 
     private func recomputeBreakdown() {
         let cal = Calendar.current
@@ -685,10 +693,10 @@ private struct HomeSpendingCard: View {
             }
         }
         .card()
-        .onAppear(perform: recomputeBreakdown)
-        .onChange(of: cycleStartDay) { _, _ in recomputeBreakdown() }
-        .onChange(of: transactions.count) { _, _ in recomputeBreakdown() }
-        .onChange(of: dataVersion) { _, _ in recomputeBreakdown() }
+        .onAppear(perform: recomputeBreakdownIfNeeded)
+        .onChange(of: cycleStartDay) { _, _ in recomputeBreakdownIfNeeded() }
+        .onChange(of: transactions.count) { _, _ in recomputeBreakdownIfNeeded() }
+        .onChange(of: dataVersion) { _, _ in recomputeBreakdownIfNeeded() }
         .sensoryFeedback(.selection, trigger: range)
         .sensoryFeedback(.selection, trigger: chartStyle)
     }

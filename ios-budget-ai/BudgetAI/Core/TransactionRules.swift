@@ -43,6 +43,7 @@ enum RuleSMSMatchMode: String, Codable, CaseIterable, Identifiable, Hashable {
 enum RuleConditionField: String, Codable, CaseIterable, Identifiable {
     case originalSMS     = "originalSMS"
     case merchant        = "merchant"
+    case senderIBAN      = "senderIBAN"
     case recipientIBAN   = "recipientIBAN"
     case accountDigits   = "accountDigits"
     case bank            = "bank"
@@ -51,6 +52,8 @@ enum RuleConditionField: String, Codable, CaseIterable, Identifiable {
     case location        = "location"
     case amount          = "amount"
     case direction       = "direction"
+    case monthDay        = "monthDay"
+    case dayOfWeek       = "dayOfWeek"
     case reference       = "reference"
     case note            = "note"
 
@@ -60,14 +63,17 @@ enum RuleConditionField: String, Codable, CaseIterable, Identifiable {
         switch self {
         case .originalSMS:   return "Original SMS"
         case .merchant:      return "Merchant / Recipient"
-        case .recipientIBAN: return "IBAN / Recipient Digits"
+        case .senderIBAN:    return "Sender IBAN / Digits"
+        case .recipientIBAN: return "Recipient IBAN / Digits"
         case .accountDigits: return "Card / Account Digits"
         case .bank:          return "SMS Bank"
         case .smsSender:     return "Phone Number"
         case .accountID:     return "Account"
         case .location:      return "Location"
         case .amount:        return "Amount"
-        case .direction:     return "Transaction Direction"
+        case .direction:     return "Transaction Type"
+        case .monthDay:      return "Date (Day & Month)"
+        case .dayOfWeek:     return "Day of Week"
         case .reference:     return "Reference Code"
         case .note:          return "Note"
         }
@@ -77,6 +83,7 @@ enum RuleConditionField: String, Codable, CaseIterable, Identifiable {
         switch self {
         case .originalSMS:   return "text.quote"
         case .merchant:      return "storefront.fill"
+        case .senderIBAN:    return "arrow.up.right.square.fill"
         case .recipientIBAN: return "number.square.fill"
         case .accountDigits: return "creditcard.fill"
         case .bank:          return "building.columns.fill"
@@ -85,9 +92,110 @@ enum RuleConditionField: String, Codable, CaseIterable, Identifiable {
         case .location:      return "mappin.and.ellipse"
         case .amount:        return "banknote.fill"
         case .direction:     return "arrow.up.arrow.down.circle.fill"
+        case .monthDay:      return "calendar"
+        case .dayOfWeek:     return "calendar.day.timeline.left"
         case .reference:     return "barcode"
         case .note:          return "note.text"
         }
+    }
+}
+
+enum RuleTransactionTypeOption: String, CaseIterable, Identifiable {
+    case transferOut = "transfer_out"
+    case transferIn = "transfer_in"
+    case expense = "expense"
+    case income = "income"
+    case internalTransfer = "internal_transfer"
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .transferOut:      return "Transfer Out"
+        case .transferIn:       return "Transfer In"
+        case .expense:          return "Expense"
+        case .income:           return "Income"
+        case .internalTransfer: return "Internal Transfer"
+        }
+    }
+
+    static func from(txType: SMSTransactionType?, isIncome: Bool) -> RuleTransactionTypeOption {
+        switch txType {
+        case .transferOut:      return .transferOut
+        case .transferIn:       return .transferIn
+        case .internalTransfer: return .internalTransfer
+        case .expense, .fee:    return .expense
+        case .income, .refund:  return .income
+        case .unknown, .none:   return isIncome ? .income : .expense
+        }
+    }
+
+    static func parse(_ raw: String) -> RuleTransactionTypeOption? {
+        let lower = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if let direct = RuleTransactionTypeOption(rawValue: lower) { return direct }
+        switch lower {
+        case "transfer out", "out", "outward": return .transferOut
+        case "transfer in", "in", "inward", "true": return .transferIn
+        case "internal transfer", "internal": return .internalTransfer
+        case "expense", "false": return .expense
+        case "income": return .income
+        default: return nil
+        }
+    }
+}
+
+enum RuleDateHelper {
+    static let monthAbbreviations = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    static let weekdayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+
+    static func maxDays(inMonth month: Int) -> Int {
+        switch month {
+        case 2: return 29
+        case 4, 6, 9, 11: return 30
+        default: return 31
+        }
+    }
+
+    static func monthDayValue(month: Int, day: Int) -> String {
+        let m = min(12, max(1, month))
+        let d = min(maxDays(inMonth: m), max(1, day))
+        return String(format: "%02d-%02d", m, d)
+    }
+
+    static func monthDayDisplay(month: Int, day: Int) -> String {
+        let m = min(12, max(1, month))
+        let d = min(maxDays(inMonth: m), max(1, day))
+        return "\(d)-\(monthAbbreviations[m - 1])"
+    }
+
+    static func parseMonthDay(_ value: String) -> (month: Int, day: Int)? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let parts = trimmed.split(whereSeparator: { $0 == "-" || $0 == "/" })
+        guard parts.count == 2 else { return nil }
+        if let m = Int(parts[0]), let d = Int(parts[1]), (1...12).contains(m), (1...31).contains(d) {
+            return (m, d)
+        }
+        // Also accept "26-Nov"
+        if let d = Int(parts[0]), let mIdx = monthAbbreviations.firstIndex(where: { $0.caseInsensitiveCompare(String(parts[1])) == .orderedSame }) {
+            return (mIdx + 1, d)
+        }
+        return nil
+    }
+
+    static func weekdayDisplay(_ weekday: Int) -> String {
+        let idx = min(7, max(1, weekday)) - 1
+        return weekdayNames[idx]
+    }
+
+    static func parseWeekday(_ value: String) -> Int? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if let n = Int(trimmed), (1...7).contains(n) {
+            return n
+        }
+        if let idx = weekdayNames.firstIndex(where: { $0.lowercased() == trimmed || $0.lowercased().hasPrefix(trimmed) && trimmed.count >= 3 }) {
+            return idx + 1
+        }
+        return nil
     }
 }
 
@@ -361,6 +469,8 @@ struct TransactionRule: Codable, Hashable, Identifiable {
 struct RuleEvaluationContext {
     var merchant: String
     var recipientIBAN: String?
+    var senderIBAN: String? = nil
+    var trueRecipientIBAN: String? = nil
     var accountDigits: String?
     var bank: String?
     var smsSender: String?
@@ -370,6 +480,8 @@ struct RuleEvaluationContext {
     var longitude: Double?
     var amount: Double
     var isIncome: Bool
+    var transactionType: SMSTransactionType? = nil
+    var date: Date? = nil
     var reference: String?
     var note: String
     var rawText: String?
@@ -377,6 +489,17 @@ struct RuleEvaluationContext {
     init(from tx: MoneyTransaction) {
         self.merchant = tx.merchant
         self.recipientIBAN = tx.smsRecipientSuffix
+        if let raw = tx.rawText?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty {
+            let parties = SMSParser.extractTransferParties(in: raw)
+            self.senderIBAN = parties.senderSuffix
+            self.trueRecipientIBAN = parties.recipientSuffix
+        } else if tx.isIncome || tx.isTransferIn {
+            self.senderIBAN = tx.smsRecipientSuffix
+            self.trueRecipientIBAN = tx.smsAccountSuffix
+        } else {
+            self.senderIBAN = tx.smsAccountSuffix
+            self.trueRecipientIBAN = tx.smsRecipientSuffix
+        }
         self.accountDigits = tx.smsAccountSuffix
         self.bank = tx.smsBank
         self.smsSender = tx.smsSender
@@ -386,6 +509,8 @@ struct RuleEvaluationContext {
         self.longitude = tx.longitude
         self.amount = tx.amount
         self.isIncome = tx.isIncome
+        self.transactionType = tx.effectiveTransactionType
+        self.date = tx.date
         self.reference = tx.smsReference
         self.note = tx.note
         self.rawText = tx.rawText
@@ -394,6 +519,8 @@ struct RuleEvaluationContext {
     init(
         merchant: String,
         recipientIBAN: String? = nil,
+        senderIBAN: String? = nil,
+        trueRecipientIBAN: String? = nil,
         accountDigits: String? = nil,
         bank: String? = nil,
         smsSender: String? = nil,
@@ -403,12 +530,16 @@ struct RuleEvaluationContext {
         longitude: Double? = nil,
         amount: Double,
         isIncome: Bool,
+        transactionType: SMSTransactionType? = nil,
+        date: Date? = nil,
         reference: String? = nil,
         note: String = "",
         rawText: String? = nil
     ) {
         self.merchant = merchant
         self.recipientIBAN = recipientIBAN
+        self.senderIBAN = senderIBAN
+        self.trueRecipientIBAN = trueRecipientIBAN
         self.accountDigits = accountDigits
         self.bank = bank
         self.smsSender = smsSender
@@ -418,6 +549,8 @@ struct RuleEvaluationContext {
         self.longitude = longitude
         self.amount = amount
         self.isIncome = isIncome
+        self.transactionType = transactionType
+        self.date = date
         self.reference = reference
         self.note = note
         self.rawText = rawText
@@ -481,7 +614,32 @@ final class TransactionRuleStore {
             ))
         }
 
-        if let recip = tx.smsRecipientSuffix?.trimmingCharacters(in: .whitespacesAndNewlines), !recip.isEmpty {
+        let partyInfo: (senderSuffix: String?, recipientSuffix: String?, isIncoming: Bool) = {
+            if let raw = tx.rawText?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty {
+                return SMSParser.extractTransferParties(in: raw)
+            }
+            if tx.isIncome || tx.isTransferIn {
+                return (tx.smsRecipientSuffix, tx.smsAccountSuffix, true)
+            }
+            return (tx.smsAccountSuffix, tx.smsRecipientSuffix, false)
+        }()
+
+        if let senderSuf = partyInfo.senderSuffix?.trimmingCharacters(in: .whitespacesAndNewlines), !senderSuf.isEmpty {
+            captured.append(RuleCondition(
+                field: .senderIBAN,
+                value: senderSuf,
+                displayValue: "**\(senderSuf)"
+            ))
+        }
+
+        if let recip = partyInfo.recipientSuffix?.trimmingCharacters(in: .whitespacesAndNewlines), !recip.isEmpty {
+            captured.append(RuleCondition(
+                field: .recipientIBAN,
+                value: recip,
+                displayValue: "**\(recip)"
+            ))
+        } else if partyInfo.senderSuffix == nil,
+                  let recip = tx.smsRecipientSuffix?.trimmingCharacters(in: .whitespacesAndNewlines), !recip.isEmpty {
             captured.append(RuleCondition(
                 field: .recipientIBAN,
                 value: recip,
@@ -544,14 +702,28 @@ final class TransactionRuleStore {
             ))
         }
 
-        let cleanNote = tx.note.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !cleanNote.isEmpty {
-            captured.append(RuleCondition(
-                field: .note,
-                value: cleanNote,
-                displayValue: cleanNote
-            ))
-        }
+        let txTypeOption = RuleTransactionTypeOption.from(txType: tx.effectiveTransactionType, isIncome: tx.isIncome)
+        captured.append(RuleCondition(
+            field: .direction,
+            value: txTypeOption.rawValue,
+            displayValue: txTypeOption.title
+        ))
+
+        let cal = Calendar.current
+        let month = cal.component(.month, from: tx.date)
+        let day = cal.component(.day, from: tx.date)
+        captured.append(RuleCondition(
+            field: .monthDay,
+            value: RuleDateHelper.monthDayValue(month: month, day: day),
+            displayValue: RuleDateHelper.monthDayDisplay(month: month, day: day)
+        ))
+
+        let weekday = cal.component(.weekday, from: tx.date)
+        captured.append(RuleCondition(
+            field: .dayOfWeek,
+            value: "\(weekday)",
+            displayValue: RuleDateHelper.weekdayDisplay(weekday)
+        ))
 
         return captured
     }
@@ -683,22 +855,28 @@ final class TransactionRuleStore {
                 return condition.radiusMeters <= 25 ? 60 : 55
             }
             return 35
+        case .senderIBAN:
+            return 45
         case .recipientIBAN:
             return 45
         case .accountDigits:
             return 40
         case .merchant:
             return 35
+        case .monthDay:
+            return 35
         case .accountID:
             return 30
         case .note:
             return 30
+        case .dayOfWeek:
+            return 25
         case .smsSender:
             return 20
         case .bank:
             return 15
         case .direction:
-            return 10
+            return 15
         }
     }
 
@@ -845,15 +1023,33 @@ final class TransactionRuleStore {
             }
             return !rawLower.isEmpty && rawLower.contains(targetLower)
 
+        case .senderIBAN:
+            let cleanTarget = targetLower.replacingOccurrences(of: "*", with: "")
+            guard !cleanTarget.isEmpty else { return false }
+            if let senderDigits = context.senderIBAN?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !senderDigits.isEmpty {
+                let cleanSender = senderDigits.replacingOccurrences(of: "*", with: "")
+                return cleanSender == cleanTarget || cleanSender.hasSuffix(cleanTarget) || cleanTarget.hasSuffix(cleanSender)
+            }
+            return false
+
         case .recipientIBAN:
             let cleanTarget = targetLower.replacingOccurrences(of: "*", with: "")
+            guard !cleanTarget.isEmpty else { return false }
+            if let trueRecip = context.trueRecipientIBAN?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !trueRecip.isEmpty {
+                let cleanRecip = trueRecip.replacingOccurrences(of: "*", with: "")
+                return cleanRecip == cleanTarget || cleanRecip.hasSuffix(cleanTarget) || cleanTarget.hasSuffix(cleanRecip)
+            }
+            // If senderIBAN was extracted and trueRecipientIBAN is nil (incoming SMS with sender only), do not match sender as recipient.
+            if let senderDigits = context.senderIBAN, !senderDigits.isEmpty {
+                return false
+            }
             if let recip = context.recipientIBAN?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !recip.isEmpty {
                 let cleanRecip = recip.replacingOccurrences(of: "*", with: "")
                 if cleanRecip == cleanTarget || cleanRecip.hasSuffix(cleanTarget) || cleanTarget.hasSuffix(cleanRecip) {
                     return true
                 }
             }
-            return !rawLower.isEmpty && !cleanTarget.isEmpty && rawLower.contains(cleanTarget)
+            return !rawLower.isEmpty && rawLower.contains(cleanTarget)
 
         case .accountDigits:
             let cleanTarget = targetLower.replacingOccurrences(of: "*", with: "")
@@ -906,8 +1102,36 @@ final class TransactionRuleStore {
             return abs(context.amount - expected) < 0.001
 
         case .direction:
-            let expectedIncome = (targetLower == "in" || targetLower == "income" || targetLower == "true")
-            return context.isIncome == expectedIncome
+            guard let expectedType = RuleTransactionTypeOption.parse(target) else {
+                let expectedIncome = (targetLower == "in" || targetLower == "income" || targetLower == "true")
+                return context.isIncome == expectedIncome
+            }
+            switch expectedType {
+            case .transferIn:
+                if let t = context.transactionType { return t == .transferIn }
+                return context.isIncome
+            case .transferOut:
+                if let t = context.transactionType { return t == .transferOut }
+                return !context.isIncome
+            case .internalTransfer:
+                return context.transactionType == .internalTransfer
+            case .expense:
+                if let t = context.transactionType { return t == .expense || t == .fee }
+                return !context.isIncome
+            case .income:
+                if let t = context.transactionType { return t == .income || t == .refund }
+                return context.isIncome
+            }
+
+        case .monthDay:
+            guard let date = context.date, let expected = RuleDateHelper.parseMonthDay(target) else { return false }
+            let cal = Calendar.current
+            return cal.component(.month, from: date) == expected.month
+                && cal.component(.day, from: date) == expected.day
+
+        case .dayOfWeek:
+            guard let date = context.date, let expectedWeekday = RuleDateHelper.parseWeekday(target) else { return false }
+            return Calendar.current.component(.weekday, from: date) == expectedWeekday
 
         case .reference:
             if let ref = context.reference?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !ref.isEmpty {
