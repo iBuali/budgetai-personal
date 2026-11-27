@@ -102,6 +102,9 @@ final class WishlistStore {
     func update(_ item: WishlistItem) {
         guard let idx = items.firstIndex(where: { $0.id == item.id }) else { return }
         var copy = item
+        if copy.priceHistory.count < items[idx].priceHistory.count {
+            copy.priceHistory = items[idx].priceHistory
+        }
         copy.updatedAt = Date()
         if abs(items[idx].currentPrice - copy.currentPrice) >= 0.005 && copy.currentPrice > 0 {
             copy.priceHistory.append(WishlistPricePoint(price: copy.currentPrice, date: Date()))

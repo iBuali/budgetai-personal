@@ -951,8 +951,9 @@ final class SharedExpenseIntelligenceService {
             return .waitingForMoreContext(prediction: nil)
         }
 
-        // Respect existing TransactionRule: downgrade to suggestion if any participating tx is governed by a rule.
-        let effectiveConfidence = plan.anyRuleConflict ? min(plan.confidence, 0.75) : plan.confidence
+        // Respect existing TransactionRule and single-corroboration safety:
+        // downgrade to suggestion confidence if any participating tx is governed by a rule or has < 2 corroborations.
+        let effectiveConfidence = (plan.anyRuleConflict || plan.corroborationCount < 2) ? min(plan.confidence, 0.75) : plan.confidence
         let level = SharedExpenseConfidenceLevel.from(score: effectiveConfidence)
 
         // HIGH CONFIDENCE + multi-signal corroboration (>= 2) + deterministic validation -> Auto-link & record adjustment
@@ -1066,8 +1067,8 @@ final class SharedExpenseIntelligenceService {
             return .automaticallyAdjusted(applied)
         }
 
-        // MEDIUM / LOW CONFIDENCE -> Create contextual suggestion without touching budget
-        if level == .medium || level == .low {
+        // MEDIUM / LOW CONFIDENCE (or single-corroboration match) -> Create contextual suggestion without touching budget
+        if level != .insufficient {
             guard let primary = plan.links.first else { return .waitingForMoreContext(prediction: nil) }
             let exp = primary.expense
             let existingAdj = adjustmentStore.activeAdjustment(forExpenseID: exp.id)

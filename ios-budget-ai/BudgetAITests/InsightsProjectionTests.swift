@@ -127,7 +127,7 @@ struct InsightsProjectionTests {
         defaults.removePersistentDomain(forName: suite)
         let store = WishlistStore(defaults: defaults, storageKey: "wl")
 
-        var item = WishlistItem(name: "AirPods", currentPrice: 80.0, originalPrice: 100.0, targetPrice: 85.0, priority: .high)
+        var item = WishlistItem(name: "AirPods", currentPrice: 50.0, originalPrice: 62.5, targetPrice: 55.0, priority: .high)
         store.add(item)
         #expect(store.items.count == 1)
         #expect(abs(item.priceReductionPercent - 20.0) < 0.01)
@@ -139,7 +139,7 @@ struct InsightsProjectionTests {
         #expect(eval.suitability == .goodTimeToBuy)
 
         // Update price higher -> priceHistory records change
-        item.currentPrice = 95.0
+        item.currentPrice = 60.0
         store.update(item)
         #expect(store.items.first?.priceHistory.count == 2)
     }
