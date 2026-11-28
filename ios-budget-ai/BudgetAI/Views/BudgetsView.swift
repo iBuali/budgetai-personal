@@ -2,6 +2,7 @@ import SwiftUI
 import SwiftData
 
 struct BudgetsView: View {
+    @Environment(AppState.self) private var appState
     @Environment(\.modelContext) private var context
     @Query(sort: \MoneyTransaction.date, order: .reverse) private var transactions: [MoneyTransaction]
     @Query private var accounts: [Account]
@@ -9,6 +10,7 @@ struct BudgetsView: View {
     @Query(sort: \SavingsGoal.createdAt) private var goals: [SavingsGoal]
     @Query private var bills: [Bill]
     @AppStorage(Keys.currency) private var currency = "BHD"
+    @AppStorage(Keys.cycleStartDay) private var cycleStartDay = 1
     @State private var monthOffset = 0
     @State private var editingBudget: Budget?
     @State private var showNewBudget = false
@@ -16,9 +18,46 @@ struct BudgetsView: View {
     @State private var showNewGoal = false
     @State private var expandedBudgets: Set<UUID> = []
     @State private var showMonthStrip = false
+    @State private var cachedInterval: DateInterval = Cycle.interval(containing: .now)
+    @State private var cachedSpentByCategory: [String: Double] = [:]
+    @State private var cachedGoalCycleTotals: [UUID: Double] = [:]
+    @State private var cachedGoalAllTimeTotals: [UUID: Double] = [:]
+    @State private var cachedTotalBudget: Double = 0
+    @State private var cachedDaysLeft: Int = 0
+    @State private var lastSnapshotKey: Int? = nil
 
-    private var finance: Finance {
-        Finance(transactions: transactions, accounts: accounts, budgets: budgets, goals: goals, bills: bills)
+    private var snapshotKey: Int {
+        var hasher = Hasher()
+        hasher.combine(transactions.count)
+        hasher.combine(budgets.count)
+        hasher.combine(goals.count)
+        hasher.combine(monthOffset)
+        hasher.combine(cycleStartDay)
+        hasher.combine(appState.dataVersion)
+        return hasher.finalize()
+    }
+
+    private func recomputeSnapshotIfNeeded() {
+        let key = snapshotKey
+        guard key != lastSnapshotKey else { return }
+        let f = Finance(transactions: transactions, accounts: accounts, budgets: budgets, goals: goals, bills: bills)
+        let interval = f.monthInterval(selectedMonth)
+        cachedInterval = interval
+        cachedSpentByCategory = f.spendingTotalsByCategory(in: interval)
+        var cycleTotals: [UUID: Double] = [:]
+        var allTimeTotals: [UUID: Double] = [:]
+        for tx in transactions where !tx.isPending {
+            guard let gid = tx.goalID, tx.amount > 0 else { continue }
+            allTimeTotals[gid, default: 0] += tx.amount
+            if interval.contains(tx.date) {
+                cycleTotals[gid, default: 0] += tx.amount
+            }
+        }
+        cachedGoalCycleTotals = cycleTotals
+        cachedGoalAllTimeTotals = allTimeTotals
+        cachedTotalBudget = f.totalBudget
+        cachedDaysLeft = f.daysLeftInMonth
+        lastSnapshotKey = key
     }
 
     private var monthStrip: some View {
@@ -72,9 +111,6 @@ struct BudgetsView: View {
     }
 
     var body: some View {
-        let f = finance
-        let interval = f.monthInterval(selectedMonth)
-        let spentByCategory = f.spendingTotalsByCategory(in: interval)
         NavigationStack {
             ScrollView {
                 VStack(spacing: 16) {
@@ -82,8 +118,8 @@ struct BudgetsView: View {
                         monthStrip
                             .transition(.move(edge: .top).combined(with: .opacity))
                     }
-                    overview(f, spentByCategory: spentByCategory, interval: interval)
-                    categorySection(spentByCategory: spentByCategory)
+                    overview(spentByCategory: cachedSpentByCategory, interval: cachedInterval)
+                    categorySection(spentByCategory: cachedSpentByCategory)
                     goalsSection
                 }
                 .padding(.horizontal, 16)
@@ -92,6 +128,8 @@ struct BudgetsView: View {
             .canvasBackground()
             .navigationTitle(showMonthStrip || monthOffset != 0 ? selectedMonth.formatted(.dateTime.month(.abbreviated).year()) : "Budgets")
             .navigationBarTitleDisplayMode(.inline)
+            .onAppear { recomputeSnapshotIfNeeded() }
+            .onChange(of: snapshotKey) { _, _ in recomputeSnapshotIfNeeded() }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     DrawerMenuToolbarButtons()
@@ -118,10 +156,10 @@ struct BudgetsView: View {
         }
     }
 
-    private func overview(_ f: Finance, spentByCategory: [String: Double], interval: DateInterval) -> some View {
+    private func overview(spentByCategory: [String: Double], interval: DateInterval) -> some View {
         let uniqueKeys = Set(budgets.flatMap(\.categories).map(\.rawValue))
         let spent = uniqueKeys.reduce(0) { $0 + (spentByCategory[$1] ?? 0) }
-        let total = f.totalBudget
+        let total = cachedTotalBudget
         let used = total > 0 ? spent / total : 0
         let pct = Int(used * 100)
         return HStack(spacing: 20) {
@@ -148,7 +186,7 @@ struct BudgetsView: View {
                     .font(.title3.monospacedDigit())
                     .foregroundStyle(Theme.secondaryInk)
                     .animatedNumber(total)
-                Text(monthOffset == 0 ? "\(pct)% used · \(f.daysLeftInMonth) days left" : (spent <= total ? "Finished under budget" : "Went over budget"))
+                Text(monthOffset == 0 ? "\(pct)% used · \(cachedDaysLeft) days left" : (spent <= total ? "Finished under budget" : "Went over budget"))
                     .font(.footnote)
                     .foregroundStyle(Theme.secondaryInk)
                     .animatedNumber(Double(pct))
@@ -308,13 +346,19 @@ struct BudgetsView: View {
                     ? goal.smsMatch.trimmingCharacters(in: .whitespaces)
                     : (linkedAcc.flatMap { !$0.smsMatch.trimmingCharacters(in: .whitespaces).isEmpty ? $0.smsMatch.trimmingCharacters(in: .whitespaces) : nil })
                 let hasCommitment = goal.monthlyCommitment > 0
-                let monthlyPaid = goal.contributedThisMonth(now: .now)
-                let monthlyRatio = hasCommitment ? min(monthlyPaid / goal.monthlyCommitment, 1.0) : goal.progress
-                let monthlyPct = hasCommitment ? Int((monthlyPaid / goal.monthlyCommitment) * 100) : Int(goal.progress * 100)
+                let linkedInCycle = cachedGoalCycleTotals[goal.id] ?? 0
+                let effectiveSaved = max(goal.saved, cachedGoalAllTimeTotals[goal.id] ?? 0)
+                let effectiveProgress = goal.target > 0 ? min(effectiveSaved / goal.target, 1) : 0
+                let effectiveComplete = effectiveSaved >= goal.target && goal.target > 0
+                let monthlyPaid = monthOffset == 0
+                    ? max(goal.contributedThisMonth(now: .now), linkedInCycle)
+                    : linkedInCycle
+                let monthlyRatio = hasCommitment ? min(monthlyPaid / goal.monthlyCommitment, 1.0) : effectiveProgress
+                let monthlyPct = hasCommitment ? Int((monthlyPaid / goal.monthlyCommitment) * 100) : Int(effectiveProgress * 100)
 
                 Button { editingGoal = goal } label: {
                     HStack(spacing: 12) {
-                        IconBadge(symbol: goal.symbol, color: (hasCommitment && monthlyPaid >= goal.monthlyCommitment) || goal.isComplete ? Theme.positive : Theme.cobalt)
+                        IconBadge(symbol: goal.symbol, color: (hasCommitment && monthlyPaid >= goal.monthlyCommitment) || effectiveComplete ? Theme.positive : Theme.cobalt)
                         VStack(alignment: .leading, spacing: 6) {
                             HStack(alignment: .top) {
                                 VStack(alignment: .leading, spacing: 2) {
@@ -324,7 +368,7 @@ struct BudgetsView: View {
                                         .lineLimit(1)
                                         .minimumScaleFactor(0.85)
                                     if hasCommitment {
-                                        Text("Total: \(Money.format(goal.saved, currency, decimals: 0)) / \(Money.number(goal.target, decimals: 0))")
+                                        Text("Total: \(Money.format(effectiveSaved, currency, decimals: 0)) / \(Money.number(goal.target, decimals: 0))")
                                             .font(.caption2)
                                             .foregroundStyle(Theme.secondaryInk)
                                     } else {
@@ -347,15 +391,15 @@ struct BudgetsView: View {
                                             .foregroundStyle(monthlyPaid >= goal.monthlyCommitment ? Theme.positive : Theme.secondaryInk)
                                             .animatedNumber(Double(monthlyPct))
                                     } else {
-                                        Text(Money.format(goal.saved, currency, decimals: 0))
+                                        Text(Money.format(effectiveSaved, currency, decimals: 0))
                                             .fontWeight(.semibold)
                                             .foregroundStyle(Theme.ink)
-                                            .animatedNumber(goal.saved)
+                                            .animatedNumber(effectiveSaved)
                                         Text(" / \(Money.number(goal.target, decimals: 0))")
                                             .foregroundStyle(Theme.secondaryInk)
                                             .animatedNumber(goal.target)
                                         Text(" · \(monthlyPct)%")
-                                            .foregroundStyle(goal.isComplete ? Theme.positive : Theme.secondaryInk)
+                                            .foregroundStyle(effectiveComplete ? Theme.positive : Theme.secondaryInk)
                                             .animatedNumber(Double(monthlyPct))
                                     }
                                 }
@@ -366,8 +410,8 @@ struct BudgetsView: View {
                             }
 
                             ProgressBar(
-                                progress: hasCommitment ? monthlyRatio : goal.progress,
-                                color: (hasCommitment && monthlyPaid >= goal.monthlyCommitment) || goal.isComplete ? Theme.positive : Theme.cobalt
+                                progress: hasCommitment ? monthlyRatio : effectiveProgress,
+                                color: (hasCommitment && monthlyPaid >= goal.monthlyCommitment) || effectiveComplete ? Theme.positive : Theme.cobalt
                             )
 
                             let showPaidBadge = hasCommitment && monthlyPaid >= goal.monthlyCommitment

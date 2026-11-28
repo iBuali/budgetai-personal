@@ -97,6 +97,26 @@ struct FinancialProjectionEvent: Identifiable, Hashable {
     let isConfirmed: Bool
 }
 
+struct FinancialEventGroup: Identifiable, Hashable {
+    let id: String
+    let bucketDate: Date
+    let isWeeklyBucket: Bool
+    let categoryKey: String
+    let title: String
+    let symbol: String
+    let primaryKind: ProjectionEventKind
+    let totalAmount: Double
+    let totalSignedImpact: Double
+    let events: [FinancialProjectionEvent]
+
+    var dateLabel: String {
+        if isWeeklyBucket {
+            return "Week of \(bucketDate.formatted(.dateTime.month(.abbreviated).day()))"
+        }
+        return bucketDate.formatted(.dateTime.month(.abbreviated).day())
+    }
+}
+
 struct ProjectionTimelinePoint: Identifiable, Hashable {
     var id: Date { date }
     let date: Date
@@ -320,6 +340,131 @@ struct SavingGoalSimulationResult: Hashable {
 /// - Never invents sample figures when real data is missing.
 enum FinancialProjectionEngine {
     static let daysPerMonth: Double = 30.4375
+
+    // MARK: 0. Single-Account Scoping & Category/Time Event Grouping
+
+    /// Builds a `Finance` snapshot scoped strictly to a single chosen account and its transactions,
+    /// plus any loans/bills/goals tied to that account.
+    static func scopedFinance(
+        for account: Account,
+        transactions: [MoneyTransaction],
+        accounts: [Account],
+        budgets: [Budget],
+        goals: [SavingsGoal],
+        bills: [Bill],
+        now: Date = .now,
+        sharedExpenseOverlay: SharedExpenseOverlay? = nil
+    ) -> Finance {
+        let primaryLiquidID = accounts.first(where: { $0.kind == .bank })?.id
+            ?? accounts.first(where: { $0.kind.isLiquid })?.id
+        let isPrimary = (account.id == primaryLiquidID)
+
+        let scopedTxs = transactions.filter { $0.accountID == account.id || $0.toAccountID == account.id }
+        let linkedLoans = accounts.filter { $0.kind == .loan && $0.loanAutoDeductAccountID == account.id }
+        let scopedAccounts: [Account] = [account] + linkedLoans.filter { $0.id != account.id }
+        let txByID = Dictionary(uniqueKeysWithValues: transactions.map { ($0.id, $0) })
+        let scopedBills = bills.filter { bill in
+            if let lastTxID = bill.lastPaidTxID, let paidAcc = txByID[lastTxID]?.accountID {
+                return paidAcc == account.id
+            }
+            if let linkedTx = transactions.first(where: { $0.billID == bill.id && $0.accountID != nil }) {
+                return linkedTx.accountID == account.id
+            }
+            return isPrimary
+        }
+        let scopedGoals = goals.filter { goal in
+            if let linked = goal.linkedAccountID {
+                return linked == account.id
+            }
+            return isPrimary
+        }
+
+        return Finance(
+            transactions: scopedTxs,
+            accounts: scopedAccounts,
+            budgets: budgets,
+            goals: scopedGoals,
+            bills: scopedBills,
+            now: now,
+            sharedExpenseOverlay: sharedExpenseOverlay
+        )
+    }
+
+    /// Groups upcoming financial events by similar category and time bucket:
+    /// - For `.oneMonth`: daily buckets (`startOfDay`).
+    /// - For `> 1 month` (`.threeMonths`, `.sixMonths`, `.oneYear`): weekly buckets (`weekOfYear` start).
+    static func groupEvents(
+        _ events: [FinancialProjectionEvent],
+        period: ForecastPeriod,
+        calendar cal: Calendar = .current
+    ) -> [FinancialEventGroup] {
+        let isWeekly = (period != .oneMonth)
+
+        struct GroupMeta {
+            let key: String
+            let title: String
+            let symbol: String
+            let kind: ProjectionEventKind
+        }
+
+        func meta(for ev: FinancialProjectionEvent) -> GroupMeta {
+            switch ev.kind {
+            case .expectedIncome:
+                return GroupMeta(key: "income", title: "Expected Income", symbol: "arrow.down.circle.fill", kind: .expectedIncome)
+            case .loanInstallment:
+                return GroupMeta(key: "loans", title: "Loan Installments", symbol: "building.columns.fill", kind: .loanInstallment)
+            case .plannedSavings, .goalDeadline:
+                return GroupMeta(key: "savings", title: "Savings & Goals", symbol: "target", kind: .plannedSavings)
+            case .seasonalRamadan, .seasonalEid:
+                return GroupMeta(key: "seasonal", title: "Seasonal & Holidays", symbol: "moon.stars.fill", kind: .seasonalRamadan)
+            case .upcomingBill, .recurringExpense, .scheduledExpense:
+                if let catName = ev.accountOrCategory?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !catName.isEmpty,
+                   let spendCat = SpendCategory.allCases.first(where: { $0.title.caseInsensitiveCompare(catName) == .orderedSame || $0.rawValue.caseInsensitiveCompare(catName) == .orderedSame }) {
+                    return GroupMeta(key: "cat-\(spendCat.rawValue.lowercased())", title: spendCat.title, symbol: spendCat.symbol, kind: ev.kind)
+                }
+                return GroupMeta(key: "bills", title: "Bills & Recurring", symbol: "doc.text.fill", kind: ev.kind)
+            }
+        }
+
+        var buckets: [String: (date: Date, meta: GroupMeta, events: [FinancialProjectionEvent])] = [:]
+        for ev in events {
+            let bucketDate: Date = isWeekly
+                ? (cal.dateInterval(of: .weekOfYear, for: ev.date)?.start ?? cal.startOfDay(for: ev.date))
+                : cal.startOfDay(for: ev.date)
+            let m = meta(for: ev)
+            let dayStamp = Int(bucketDate.timeIntervalSince1970 / 86_400)
+            let bucketID = "\(dayStamp)-\(m.key)"
+            if var existing = buckets[bucketID] {
+                existing.events.append(ev)
+                buckets[bucketID] = existing
+            } else {
+                buckets[bucketID] = (bucketDate, m, [ev])
+            }
+        }
+
+        return buckets.map { id, entry in
+            let sortedEvents = entry.events.sorted { $0.date < $1.date }
+            let totalImpact = sortedEvents.reduce(0.0) { $0 + $1.signedImpact }
+            let totalAmt = sortedEvents.reduce(0.0) { $0 + $1.amount }
+            return FinancialEventGroup(
+                id: id,
+                bucketDate: entry.date,
+                isWeeklyBucket: isWeekly,
+                categoryKey: entry.meta.key,
+                title: entry.meta.title,
+                symbol: entry.meta.symbol,
+                primaryKind: entry.meta.kind,
+                totalAmount: totalAmt,
+                totalSignedImpact: totalImpact,
+                events: sortedEvents
+            )
+        }
+        .sorted { lhs, rhs in
+            if lhs.bucketDate != rhs.bucketDate { return lhs.bucketDate < rhs.bucketDate }
+            return abs(lhs.totalSignedImpact) > abs(rhs.totalSignedImpact)
+        }
+    }
 
     // MARK: 1. Main Forecast Projection
 
@@ -686,11 +831,12 @@ enum FinancialProjectionEngine {
     static func simulateBuyNow(
         input: BuyNowSimulationInput,
         finance f: Finance,
-        currency: String = AppSettings.currency
+        currency: String = AppSettings.currency,
+        cachedProjection: FinancialProjectionResult? = nil
     ) -> BuyNowSimulationResult {
         let amount = input.amount
         let safe = f.safeToSpend
-        let projection = project(finance: f, period: .threeMonths, currency: currency)
+        let projection = cachedProjection ?? project(finance: f, period: .threeMonths, currency: currency)
 
         // 1. SAFE TO SPEND
         let safeBefore = safe.monthly

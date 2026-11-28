@@ -15,28 +15,55 @@ struct TimeMachineDashboardView: View {
     @AppStorage(Keys.currency) private var currency = "BHD"
 
     @State private var period: ForecastPeriod = .threeMonths
+    @State private var selectedAccountID: UUID? = nil
     @State private var selectedDate: Date? = nil
-    @State private var selectedEvent: FinancialProjectionEvent? = nil
+    @State private var selectedGroup: FinancialEventGroup? = nil
     @State private var aiInsight: PrimaryForecastInsight? = nil
     @State private var loadingAI = false
 
+    private var selectableAccounts: [Account] {
+        let liquid = accounts.filter { $0.kind.isLiquid }
+        return liquid.isEmpty ? accounts : liquid
+    }
+
+    private var activeAccount: Account? {
+        if let id = selectedAccountID, let match = accounts.first(where: { $0.id == id }) {
+            return match
+        }
+        return selectableAccounts.first(where: { $0.kind == .bank }) ?? selectableAccounts.first
+    }
+
     private var finance: Finance {
-        Finance(transactions: transactions, accounts: accounts, budgets: budgets, goals: goals, bills: bills)
+        if let account = activeAccount {
+            return FinancialProjectionEngine.scopedFinance(
+                for: account,
+                transactions: transactions,
+                accounts: accounts,
+                budgets: budgets,
+                goals: goals,
+                bills: bills
+            )
+        }
+        return Finance(transactions: transactions, accounts: accounts, budgets: budgets, goals: goals, bills: bills)
     }
 
     var body: some View {
         let f = finance
         let projection = FinancialProjectionEngine.project(finance: f, period: period, currency: currency)
+        let eventGroups = FinancialProjectionEngine.groupEvents(projection.events, period: period)
         let activeInsight = aiInsight ?? projection.primaryInsight
 
         ScrollView {
             VStack(spacing: 16) {
+                if !selectableAccounts.isEmpty {
+                    accountPicker
+                }
                 periodPicker
                 heroSummaryCard(projection)
-                projectionGraphCard(projection)
+                projectionGraphCard(projection, eventGroups: eventGroups)
                 falakInsightCard(activeInsight, projection: projection)
                 simulationsSection
-                upcomingEventsCard(projection)
+                upcomingEventsCard(projection, eventGroups: eventGroups)
                 if !projection.missingData.isEmpty || !projection.assumptions.isEmpty {
                     assumptionsCard(projection)
                 }
@@ -46,13 +73,18 @@ struct TimeMachineDashboardView: View {
             .padding(.bottom, 28)
         }
         .canvasBackground()
-        .navigationTitle("Time Machine")
+        .navigationTitle("FALAK Time Machine")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.hidden, for: .tabBar)
-        .sheet(item: $selectedEvent) { event in
-            ProjectionEventDetailSheet(event: event, currency: currency)
+        .onAppear {
+            if selectedAccountID == nil {
+                selectedAccountID = activeAccount?.id
+            }
         }
-        .task(id: "\(period.rawValue)-\(transactions.count)-\(bills.count)-\(accounts.count)") {
+        .sheet(item: $selectedGroup) { group in
+            ProjectionEventGroupSheet(group: group, currency: currency)
+        }
+        .task(id: "\(period.rawValue)-\(activeAccount?.id.uuidString ?? "all")-\(transactions.count)-\(bills.count)-\(accounts.count)") {
             aiInsight = nil
             selectedDate = nil
             guard projection.hasSufficientData, GeminiAccount.isConfigured else { return }
@@ -64,6 +96,43 @@ struct TimeMachineDashboardView: View {
             }
         }
         .sensoryFeedback(.selection, trigger: period)
+    }
+
+    // MARK: Account Selector (Single Account at a Time)
+
+    private var accountPicker: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(selectableAccounts) { acc in
+                    let isSelected = activeAccount?.id == acc.id
+                    Button {
+                        withAnimation(.snappy(duration: 0.22)) {
+                            selectedAccountID = acc.id
+                        }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: acc.kind.symbol)
+                                .font(.caption.weight(.semibold))
+                            Text(acc.name)
+                                .font(.caption.weight(.semibold))
+                                .lineLimit(1)
+                            Text(Money.format(acc.balance, currency))
+                                .font(.caption2.monospacedDigit())
+                                .opacity(isSelected ? 0.9 : 0.7)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(isSelected ? Theme.cobalt : Theme.card, in: Capsule())
+                        .foregroundStyle(isSelected ? .white : Theme.ink)
+                        .overlay(
+                            Capsule().stroke(isSelected ? Color.clear : Theme.track, lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 2)
+        }
     }
 
     // MARK: Period Selector
@@ -143,8 +212,8 @@ struct TimeMachineDashboardView: View {
 
     // MARK: Interactive Projection Graph with Actual vs Projected & Event Markers
 
-    private func projectionGraphCard(_ p: FinancialProjectionResult) -> some View {
-        let markerEvents = Array(p.events.prefix(12))
+    private func projectionGraphCard(_ p: FinancialProjectionResult, eventGroups: [FinancialEventGroup]) -> some View {
+        let markerGroups = Array(eventGroups.prefix(14))
         let scrubbedPoint: ProjectionTimelinePoint? = {
             guard let sel = selectedDate else { return nil }
             let all = p.actualPoints + p.projectedPoints
@@ -236,15 +305,24 @@ struct TimeMachineDashboardView: View {
                             .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
                     }
 
-                    // Event markers plotted on the projected curve
-                    ForEach(markerEvents) { ev in
-                        if let nearest = p.projectedPoints.min(by: { abs($0.date.timeIntervalSince(ev.date)) < abs($1.date.timeIntervalSince(ev.date)) }) {
+                    // Grouped event category icons plotted on the projected curve (daily for 1M, weekly for 3M/6M/1Y)
+                    ForEach(markerGroups) { grp in
+                        if let nearest = p.projectedPoints.min(by: { abs($0.date.timeIntervalSince(grp.bucketDate)) < abs($1.date.timeIntervalSince(grp.bucketDate)) }) {
                             PointMark(
-                                x: .value("Date", ev.date),
+                                x: .value("Date", grp.bucketDate),
                                 y: .value("Balance", nearest.balance)
                             )
-                            .symbolSize(52)
-                            .foregroundStyle(eventColor(ev.kind))
+                            .symbol {
+                                ZStack {
+                                    Circle()
+                                        .fill(eventColor(grp.primaryKind))
+                                        .frame(width: 22, height: 22)
+                                        .shadow(color: .black.opacity(0.15), radius: 2, y: 1)
+                                    Image(systemName: grp.symbol)
+                                        .font(.system(size: 10, weight: .bold))
+                                        .foregroundStyle(.white)
+                                }
+                            }
                         }
                     }
 
@@ -282,8 +360,8 @@ struct TimeMachineDashboardView: View {
                         Text("Projected").font(.caption2).foregroundStyle(Theme.secondaryInk)
                     }
                     Spacer()
-                    if !markerEvents.isEmpty {
-                        Text("\(p.events.count) events")
+                    if !markerGroups.isEmpty {
+                        Text("\(eventGroups.count) groups · \(period == .oneMonth ? "Daily" : "Weekly")")
                             .font(.caption2.weight(.medium))
                             .foregroundStyle(Theme.secondaryInk)
                     }
@@ -398,43 +476,58 @@ struct TimeMachineDashboardView: View {
 
     // MARK: Interactive Upcoming Financial Events List
 
-    private func upcomingEventsCard(_ p: FinancialProjectionResult) -> some View {
+    private func upcomingEventsCard(_ p: FinancialProjectionResult, eventGroups: [FinancialEventGroup]) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("Upcoming Financial Events")
-                    .font(.headline)
-                    .foregroundStyle(Theme.ink)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Upcoming Financial Events")
+                        .font(.headline)
+                        .foregroundStyle(Theme.ink)
+                    Text(period == .oneMonth ? "Grouped by category per day" : "Grouped by category per week")
+                        .font(.caption2)
+                        .foregroundStyle(Theme.secondaryInk)
+                }
                 Spacer()
-                Text("\(p.events.count)")
+                Text("\(eventGroups.count)")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(Theme.secondaryInk)
             }
 
-            if p.events.isEmpty {
-                Text("No scheduled bills, installments, or upcoming events found in this period.")
+            if eventGroups.isEmpty {
+                Text("No scheduled bills, installments, or upcoming events found for this account in this period.")
                     .font(.caption)
                     .foregroundStyle(Theme.secondaryInk)
             } else {
-                ForEach(p.events.prefix(15)) { ev in
+                ForEach(eventGroups.prefix(15)) { grp in
                     Button {
-                        selectedEvent = ev
+                        selectedGroup = grp
                     } label: {
                         HStack(spacing: 10) {
-                            IconBadge(symbol: ev.kind.symbol, color: eventColor(ev.kind), size: 32)
+                            IconBadge(symbol: grp.symbol, color: eventColor(grp.primaryKind), size: 32)
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(ev.title)
-                                    .font(.subheadline.weight(.medium))
-                                    .foregroundStyle(Theme.ink)
-                                    .lineLimit(1)
-                                Text("\(ev.date.formatted(.dateTime.month(.abbreviated).day())) · \(ev.kind.title)")
+                                HStack(spacing: 6) {
+                                    Text(grp.title)
+                                        .font(.subheadline.weight(.medium))
+                                        .foregroundStyle(Theme.ink)
+                                        .lineLimit(1)
+                                    if grp.events.count > 1 {
+                                        Text("\(grp.events.count)")
+                                            .font(.caption2.weight(.bold).monospacedDigit())
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 1)
+                                            .background(Theme.track, in: Capsule())
+                                            .foregroundStyle(Theme.secondaryInk)
+                                    }
+                                }
+                                Text(grp.dateLabel)
                                     .font(.caption2)
                                     .foregroundStyle(Theme.secondaryInk)
                             }
                             Spacer()
-                            if ev.amount > 0 {
-                                Text(Money.format(ev.signedImpact != 0 ? ev.signedImpact : ev.amount, currency, signed: ev.signedImpact != 0))
+                            if grp.totalAmount > 0 {
+                                Text(Money.format(grp.totalSignedImpact != 0 ? grp.totalSignedImpact : grp.totalAmount, currency, signed: grp.totalSignedImpact != 0))
                                     .font(.subheadline.weight(.semibold).monospacedDigit())
-                                    .foregroundStyle(ev.signedImpact > 0 ? Theme.positive : Theme.ink)
+                                    .foregroundStyle(grp.totalSignedImpact > 0 ? Theme.positive : Theme.ink)
                             } else {
                                 Text("Plan")
                                     .font(.caption2.weight(.semibold))
@@ -481,6 +574,69 @@ struct TimeMachineDashboardView: View {
         case .recurringExpense: return Theme.warning
         case .seasonalRamadan, .seasonalEid: return Color(hex: 0x8B5CF6)
         }
+    }
+}
+
+// MARK: - Grouped Event Detail Sheet
+
+private struct ProjectionEventGroupSheet: View {
+    let group: FinancialEventGroup
+    let currency: String
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    LabeledContent("Category", value: group.title)
+                    LabeledContent(group.isWeeklyBucket ? "Week" : "Date", value: group.dateLabel)
+                    LabeledContent("Events", value: "\(group.events.count)")
+                    if group.totalAmount > 0 {
+                        LabeledContent("Total Impact") {
+                            Text(Money.format(group.totalSignedImpact != 0 ? group.totalSignedImpact : group.totalAmount, currency, signed: group.totalSignedImpact != 0))
+                                .fontWeight(.semibold)
+                                .foregroundStyle(group.totalSignedImpact > 0 ? Theme.positive : Theme.negative)
+                        }
+                    }
+                }
+                Section("Included Events") {
+                    ForEach(group.events) { ev in
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text(ev.title)
+                                    .font(.subheadline.weight(.semibold))
+                                    .foregroundStyle(Theme.ink)
+                                Spacer()
+                                if ev.amount > 0 {
+                                    Text(Money.format(ev.signedImpact != 0 ? ev.signedImpact : ev.amount, currency, signed: ev.signedImpact != 0))
+                                        .font(.subheadline.weight(.semibold).monospacedDigit())
+                                        .foregroundStyle(ev.signedImpact > 0 ? Theme.positive : Theme.ink)
+                                }
+                            }
+                            Text("\(ev.date.formatted(.dateTime.month(.abbreviated).day().year())) · \(ev.kind.title)")
+                                .font(.caption2)
+                                .foregroundStyle(Theme.secondaryInk)
+                            if !ev.explanation.isEmpty {
+                                Text(ev.explanation)
+                                    .font(.caption)
+                                    .foregroundStyle(Theme.secondaryInk)
+                            }
+                        }
+                        .padding(.vertical, 2)
+                    }
+                }
+            }
+            .scrollContentBackground(.hidden)
+            .canvasBackground()
+            .navigationTitle(group.title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
     }
 }
 

@@ -265,7 +265,6 @@ struct AccountEditor: View {
     @State private var creditLimitText = ""
     @State private var loanTotalAmountText = ""
     @State private var loanMonthlyInstallmentText = ""
-    @State private var loanKeywordsText = ""
     @State private var loanAutoDeduct = false
     @State private var loanAutoDeductAccountID: UUID? = nil
     @State private var emoji = ""
@@ -404,24 +403,14 @@ struct AccountEditor: View {
                         Text(kind == .creditCard ? "Bank SMS messages mentioning this card number or its last digits will be routed to this credit card automatically." : "Bank messages mentioning these IBAN, account, or card digits are filed to this account automatically. Separate multiple numbers with a comma (e.g. 3876, 4821).")
                     }
                 }
-                if kind == .loan {
-                    Section {
-                        TextField("Loan number or SMS keywords, e.g. 400001377387, Murabaha", text: $loanKeywordsText)
-                            .autocorrectionDisabled()
-                    } header: {
-                        Text("Loan keyword / number in SMS")
-                    } footer: {
-                        Text("Incoming bank SMS containing this loan number or keyword will automatically match this loan, reduce its remaining balance, and mark this month's installment as paid.")
-                    }
-                }
                 if kind.isLiability {
                     Section {
                         DatePicker(kind == .loan ? "Installment due date" : "Payment due date", selection: $paymentDueDate, displayedComponents: .date)
                         if kind == .loan {
                             Toggle(isOn: $loanAutoDeduct.animation(.snappy)) {
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Label("Auto-add installment on due date", systemImage: "calendar.badge.checkmark")
-                                    Text("Record monthly installment even without SMS")
+                                    Label("Auto-deduct installment on due date", systemImage: "calendar.badge.checkmark")
+                                    Text("Marks paid and deducts from account without adding a transaction")
                                         .font(.caption2)
                                         .foregroundStyle(Theme.secondaryInk)
                                 }
@@ -507,7 +496,6 @@ struct AccountEditor: View {
                 if account.loanMonthlyInstallment > 0 {
                     loanMonthlyInstallmentText = Money.number(account.loanMonthlyInstallment, decimals: decimals).replacingOccurrences(of: ",", with: "")
                 }
-                loanKeywordsText = account.loanKeywordsRaw
                 loanAutoDeduct = account.loanAutoDeduct
                 loanAutoDeductAccountID = account.loanAutoDeductAccountID
             }
@@ -538,7 +526,7 @@ struct AccountEditor: View {
         target.creditLimit = kind == .creditCard ? parsedCreditLimit : 0
         target.loanTotalAmount = kind == .loan ? max(parsedLoanTotal, balance) : 0
         target.loanMonthlyInstallment = kind == .loan ? parsedInstallment : 0
-        target.loanKeywordsRaw = kind == .loan ? loanKeywordsText.trimmingCharacters(in: .whitespacesAndNewlines) : ""
+        target.loanKeywordsRaw = ""
         target.loanAutoDeduct = kind == .loan && loanAutoDeduct
         target.loanAutoDeductAccountID = (kind == .loan && loanAutoDeduct) ? loanAutoDeductAccountID : nil
         target.paymentDueReminder = kind.isLiability && paymentDueReminder

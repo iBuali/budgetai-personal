@@ -24,12 +24,38 @@ struct InsightsView: View {
     @Query(sort: \Bill.nextDueDate) private var bills: [Bill]
     @AppStorage(Keys.currency) private var currency = "BHD"
 
+    private struct SummaryBadges: Equatable {
+        var timeMachineBadge: String = "Forecast Ready"
+        var timeMachineSeverity: SimulationStatus = .safe
+        var wishlistBadge: String = "Add items"
+        var wishlistHasReady: Bool = false
+        var alertsBadge: String = "All clear"
+        var alertsUnreadCount: Int = 0
+        var alertsHasCritical: Bool = false
+    }
+
     @State private var path = NavigationPath()
+    @State private var badges = SummaryBadges()
 
     private let wishlistStore = WishlistStore.shared
     private let alertStateStore = FinancialAlertStateStore.shared
 
-    var body: some View {
+    private var summaryKey: Int {
+        var hasher = Hasher()
+        hasher.combine(transactions.count)
+        hasher.combine(accounts.count)
+        hasher.combine(budgets.count)
+        hasher.combine(goals.count)
+        hasher.combine(bills.count)
+        hasher.combine(wishlistStore.items.count)
+        hasher.combine(alertStateStore.readIDs.count)
+        hasher.combine(alertStateStore.dismissedIDs.count)
+        hasher.combine(currency)
+        hasher.combine(appState.dataVersion)
+        return hasher.finalize()
+    }
+
+    private func recomputeSummaryBadges() {
         let finance = Finance(transactions: transactions, accounts: accounts, budgets: budgets, goals: goals, bills: bills)
         let previewProjection = FinancialProjectionEngine.project(finance: finance, period: .threeMonths, currency: currency)
         let activeAlerts = FinancialAlertsEngine.generate(
@@ -44,6 +70,24 @@ struct InsightsView: View {
             return eval.suitability == .goodTimeToBuy || item.hasReachedTargetPrice
         }.count
 
+        badges = SummaryBadges(
+            timeMachineBadge: previewProjection.hasSufficientData
+                ? "3M: \(Money.format(previewProjection.projectedEndBalance, currency))"
+                : "Forecast Ready",
+            timeMachineSeverity: previewProjection.primaryInsight.severity,
+            wishlistBadge: wishlistStore.items.isEmpty
+                ? "Add items"
+                : (readyWishlistCount > 0 ? "\(readyWishlistCount) ready to buy" : "\(wishlistStore.items.count) tracked"),
+            wishlistHasReady: readyWishlistCount > 0,
+            alertsBadge: unreadAlertsCount > 0
+                ? "\(unreadAlertsCount) unread"
+                : (activeAlerts.isEmpty ? "All clear" : "\(activeAlerts.count) active"),
+            alertsUnreadCount: unreadAlertsCount,
+            alertsHasCritical: activeAlerts.first?.priority == .critical
+        )
+    }
+
+    var body: some View {
         NavigationStack(path: $path) {
             ScrollView {
                 VStack(spacing: 16) {
@@ -53,17 +97,15 @@ struct InsightsView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, 4)
 
-                    // Card 1 — Time Machine
+                    // Card 1 — FALAK Time Machine
                     NavigationLink(value: InsightRoute.timeMachine) {
                         mainCard(
-                            title: "Time Machine",
+                            title: "FALAK Time Machine",
                             subtitle: "Forecast your balance, explore upcoming events, and simulate Buy Now? or Saving Goals.",
                             symbol: "clock.arrow.2.circlepath",
                             colors: [Color(hex: 0x1E3FAE), Color(hex: 0x6D4AE0)],
-                            badgeText: previewProjection.hasSufficientData
-                                ? "3M: \(Money.format(previewProjection.projectedEndBalance, currency))"
-                                : "Forecast Ready",
-                            badgeColor: previewProjection.primaryInsight.severity.color
+                            badgeText: badges.timeMachineBadge,
+                            badgeColor: badges.timeMachineSeverity.color
                         )
                     }
                     .buttonStyle(PressableStyle())
@@ -75,10 +117,8 @@ struct InsightsView: View {
                             subtitle: "Track desired purchases, target prices, and the best financial time to buy.",
                             symbol: "heart.text.square.fill",
                             colors: [Color(hex: 0x0EA5A4), Color(hex: 0x22A565)],
-                            badgeText: wishlistStore.items.isEmpty
-                                ? "Add items"
-                                : (readyWishlistCount > 0 ? "\(readyWishlistCount) ready to buy" : "\(wishlistStore.items.count) tracked"),
-                            badgeColor: readyWishlistCount > 0 ? Theme.positive : Theme.cobalt
+                            badgeText: badges.wishlistBadge,
+                            badgeColor: badges.wishlistHasReady ? Theme.positive : Theme.cobalt
                         )
                     }
                     .buttonStyle(PressableStyle())
@@ -90,10 +130,8 @@ struct InsightsView: View {
                             subtitle: "Priority financial risks, budget warnings, bill reminders, and opportunities.",
                             symbol: "bell.badge.waveform.fill",
                             colors: [Color(hex: 0xF08A24), Color(hex: 0xEC4899)],
-                            badgeText: unreadAlertsCount > 0
-                                ? "\(unreadAlertsCount) unread"
-                                : (activeAlerts.isEmpty ? "All clear" : "\(activeAlerts.count) active"),
-                            badgeColor: activeAlerts.first?.priority == .critical ? Theme.negative : (unreadAlertsCount > 0 ? Theme.warning : Theme.positive)
+                            badgeText: badges.alertsBadge,
+                            badgeColor: badges.alertsHasCritical ? Theme.negative : (badges.alertsUnreadCount > 0 ? Theme.warning : Theme.positive)
                         )
                     }
                     .buttonStyle(PressableStyle())
@@ -105,6 +143,9 @@ struct InsightsView: View {
             .canvasBackground()
             .navigationTitle("Insights")
             .navigationBarTitleDisplayMode(.inline)
+            .task(id: summaryKey) {
+                recomputeSummaryBadges()
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     DrawerMenuToolbarButtons()

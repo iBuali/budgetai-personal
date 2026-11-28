@@ -171,4 +171,45 @@ struct InsightsProjectionTests {
             #expect(stateStore.isDismissed(first.id) == false)
         }
     }
+
+    @Test func timeMachineScopesToSingleAccountAndGroupsEventsDailyVsWeekly() {
+        let cal = Calendar(identifier: .gregorian)
+        let now = cal.date(from: DateComponents(year: 2026, month: 12, day: 1, hour: 10))!
+        let bisb = Account(name: "BisB", kind: .bank, institution: "BisB", balance: 1000.0)
+        let ila = Account(name: "ila", kind: .bank, institution: "ila", balance: 250.0)
+        let txBisb = MoneyTransaction(amount: 40.0, isIncome: false, merchant: "Lulu", category: .groceries, date: now.addingTimeInterval(-86_400), source: .sms, accountID: bisb.id)
+        let txIla = MoneyTransaction(amount: 15.0, isIncome: false, merchant: "Cafe", category: .dining, date: now.addingTimeInterval(-86_400), source: .sms, accountID: ila.id)
+
+        let scopedIla = FinancialProjectionEngine.scopedFinance(
+            for: ila,
+            transactions: [txBisb, txIla],
+            accounts: [bisb, ila],
+            budgets: [],
+            goals: [],
+            bills: [],
+            now: now,
+            sharedExpenseOverlay: .empty
+        )
+        #expect(abs(scopedIla.liquidBalance - 250.0) < 0.001)
+        #expect(scopedIla.transactions.count == 1)
+        #expect(scopedIla.transactions.first?.id == txIla.id)
+
+        // Two Bills events in the same week (Wed Dec 2 & Thu Dec 3):
+        // - 1 Month -> separate daily groups (2 groups, isWeeklyBucket == false)
+        // - 3 Months -> single weekly group (1 group, isWeeklyBucket == true, 2 events inside)
+        let dec2 = cal.date(from: DateComponents(year: 2026, month: 12, day: 2, hour: 9))!
+        let dec3 = cal.date(from: DateComponents(year: 2026, month: 12, day: 3, hour: 9))!
+        let ev1 = FinancialProjectionEvent(id: "b1", title: "Batelco", date: dec2, amount: 25, signedImpact: -25, kind: .upcomingBill, accountOrCategory: "Bills", explanation: "Bill", isConfirmed: true)
+        let ev2 = FinancialProjectionEvent(id: "b2", title: "Zain", date: dec3, amount: 15, signedImpact: -15, kind: .upcomingBill, accountOrCategory: "Bills", explanation: "Bill", isConfirmed: true)
+
+        let oneMonthGroups = FinancialProjectionEngine.groupEvents([ev1, ev2], period: .oneMonth, calendar: cal)
+        #expect(oneMonthGroups.count == 2)
+        #expect(oneMonthGroups.allSatisfy { !$0.isWeeklyBucket })
+
+        let threeMonthGroups = FinancialProjectionEngine.groupEvents([ev1, ev2], period: .threeMonths, calendar: cal)
+        #expect(threeMonthGroups.count == 1)
+        #expect(threeMonthGroups.first?.isWeeklyBucket == true)
+        #expect(threeMonthGroups.first?.events.count == 2)
+        #expect(abs((threeMonthGroups.first?.totalSignedImpact ?? 0) - (-40.0)) < 0.001)
+    }
 }

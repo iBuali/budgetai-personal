@@ -1,6 +1,7 @@
 import SwiftUI
 import SwiftData
 import LocalAuthentication
+import UIKit
 
 enum AppTab: Hashable { case home, transactions, budgets, insights, accounts }
 
@@ -138,6 +139,7 @@ struct RootView: View {
             Task { @MainActor in
                 await Task.yield()
                 SMSImporter.reconcileExistingTransactions(context: context)
+                Ledger.reconcileSavingsGoals(context: context)
                 _ = Ledger.processScheduledLoanInstallments(context: context)
                 Ledger.recordSnapshot(context: context)
                 Ledger.refreshCardReminders(context: context)
@@ -184,76 +186,82 @@ struct MainTabs: View {
     @Environment(\.modelContext) private var context
     @State private var drawerDestination: DrawerDestination?
     @State private var alertRefreshTask: Task<Void, Never>?
+    @State private var drawerProgress: CGFloat = 0
+    @State private var isDraggingDrawer: Bool = false
+
+    private let drawerWidth: CGFloat = 292
+
+    private func setDrawerOpen(_ open: Bool, animated: Bool = true) {
+        let target: CGFloat = open ? 1 : 0
+        if animated {
+            withAnimation(.interactiveSpring(response: 0.28, dampingFraction: 0.88, blendDuration: 0.1)) {
+                drawerProgress = target
+                appState.showDrawer = open
+            }
+        } else {
+            drawerProgress = target
+            appState.showDrawer = open
+        }
+    }
 
     var body: some View {
         @Bindable var state = appState
+        let clampedProgress = min(1, max(0, drawerProgress))
+        let drawerVisible = clampedProgress > 0.001
+
         ZStack(alignment: .leading) {
-            TabView(selection: $state.tab) {
-                Tab("Home", systemImage: "house.fill", value: AppTab.home) { HomeView() }
-                Tab("Transactions", systemImage: "list.bullet", value: AppTab.transactions) { TransactionsView() }
-                Tab("Budgets", systemImage: "chart.bar.fill", value: AppTab.budgets) { BudgetsView() }
-                Tab("Insights", image: "FalakTabIcon", value: AppTab.insights) { InsightsView() }
-                Tab("Accounts", systemImage: "square.3.layers.3d", value: AppTab.accounts) {
-                    NavigationStack { NetWorthView(isRootTab: true) }
-                }
-            }
-            .sensoryFeedback(.selection, trigger: appState.tab)
+            // Main tabbed interface — isolated in MainTabBarHost so drawer/popover state never re-diffs TabView
+            MainTabBarHost(tab: $state.tab)
+                .offset(x: clampedProgress * drawerWidth)
+                .allowsHitTesting(!drawerVisible)
 
-            if !appState.showDrawer {
-                Color.clear
-                    .frame(width: 24)
-                    .frame(maxHeight: .infinity)
-                    .contentShape(Rectangle())
-                    .gesture(
-                        DragGesture(minimumDistance: 20)
-                            .onEnded { value in
-                                if value.translation.width > 55 && abs(value.translation.height) < 80 {
-                                    withAnimation(.snappy(duration: 0.28)) {
-                                        appState.showDrawer = true
-                                    }
-                                }
-                            }
-                    )
-            }
-
-            if appState.showDrawer {
-                Color.black.opacity(0.28)
+            if drawerVisible {
+                Color.black.opacity(0.28 * clampedProgress)
                     .ignoresSafeArea()
+                    .offset(x: clampedProgress * drawerWidth)
+                    .contentShape(Rectangle())
                     .onTapGesture {
-                        withAnimation(.snappy(duration: 0.25)) {
-                            appState.showDrawer = false
-                        }
+                        setDrawerOpen(false)
                     }
-                    .transition(.opacity)
                     .zIndex(10)
+            }
 
+            // Interactive push-in side drawer (tracks finger 1:1 and can be held mid-drag)
+            if drawerVisible {
                 SideMenuDrawer(
                     onOpenAccounts: {
-                        withAnimation(.snappy(duration: 0.25)) { appState.showDrawer = false }
+                        setDrawerOpen(false)
                         appState.tab = .accounts
                     },
                     onOpenDestination: { dest in
-                        withAnimation(.snappy(duration: 0.25)) { appState.showDrawer = false }
+                        setDrawerOpen(false)
                         drawerDestination = dest
                     },
                     onOpenSettings: {
-                        withAnimation(.snappy(duration: 0.25)) { appState.showDrawer = false }
+                        setDrawerOpen(false)
                         appState.showSettings = true
                     }
                 )
-                .gesture(
-                    DragGesture(minimumDistance: 20)
-                        .onEnded { value in
-                            if value.translation.width < -50 {
-                                withAnimation(.snappy(duration: 0.25)) {
-                                    appState.showDrawer = false
-                                }
-                            }
-                        }
-                )
-                .transition(.move(edge: .leading))
+                .offset(x: (clampedProgress - 1) * drawerWidth)
                 .zIndex(11)
             }
+
+            // Native UIKit pan recognizer: yields completely to NavigationStack swipe-back on pushed pages
+            InteractiveDrawerGestureInstaller(
+                drawerWidth: drawerWidth,
+                isDrawerOpen: appState.showDrawer,
+                isBlocked: appState.showNotifications,
+                onDragChanged: { progress in
+                    isDraggingDrawer = true
+                    drawerProgress = progress
+                },
+                onDragEnded: { shouldOpen in
+                    isDraggingDrawer = false
+                    setDrawerOpen(shouldOpen, animated: true)
+                }
+            )
+            .frame(width: 0, height: 0)
+            .allowsHitTesting(false)
 
             if appState.showNotifications {
                 Color.black.opacity(0.12)
@@ -284,7 +292,16 @@ struct MainTabs: View {
                 .zIndex(13)
             }
         }
-        .animation(.snappy(duration: 0.28), value: appState.showDrawer)
+        .clipped()
+        .onChange(of: appState.showDrawer) { _, open in
+            guard !isDraggingDrawer else { return }
+            let target: CGFloat = open ? 1 : 0
+            if abs(drawerProgress - target) > 0.001 {
+                withAnimation(.interactiveSpring(response: 0.28, dampingFraction: 0.88, blendDuration: 0.1)) {
+                    drawerProgress = target
+                }
+            }
+        }
         .animation(.snappy(duration: 0.22), value: appState.showNotifications)
         .onReceive(NotificationCenter.default.publisher(for: .budgetDataDidChange)) { _ in
             appState.dataVersion += 1
@@ -316,6 +333,222 @@ struct MainTabs: View {
             case .aiAssistant:
                 NavigationStack { AdvisorChatView() }
             }
+        }
+    }
+}
+
+// MARK: - Isolated Tab Bar Host (Prevents Drawer/Popover State from Re-Diffing Tabs)
+
+private struct MainTabBarHost: View {
+    @Binding var tab: AppTab
+
+    var body: some View {
+        TabView(selection: $tab) {
+            Tab("Home", systemImage: "house.fill", value: AppTab.home) { HomeView() }
+            Tab("Transactions", systemImage: "list.bullet", value: AppTab.transactions) { TransactionsView() }
+            Tab("Budgets", systemImage: "chart.bar.fill", value: AppTab.budgets) { BudgetsView() }
+            Tab("Insights", image: "FalakTabIcon", value: AppTab.insights) { InsightsView() }
+            Tab("Accounts", systemImage: "square.3.layers.3d", value: AppTab.accounts) {
+                NavigationStack { NetWorthView(isRootTab: true) }
+            }
+        }
+    }
+}
+
+// MARK: - Interactive UIKit Pan Gesture for Push-Aside Side Drawer
+
+private struct InteractiveDrawerGestureInstaller: UIViewRepresentable {
+    let drawerWidth: CGFloat
+    let isDrawerOpen: Bool
+    let isBlocked: Bool
+    let onDragChanged: (CGFloat) -> Void
+    let onDragEnded: (Bool) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(
+            drawerWidth: drawerWidth,
+            isDrawerOpen: isDrawerOpen,
+            isBlocked: isBlocked,
+            onDragChanged: onDragChanged,
+            onDragEnded: onDragEnded
+        )
+    }
+
+    func makeUIView(context: Context) -> AnchorView {
+        let view = AnchorView()
+        view.backgroundColor = .clear
+        view.isUserInteractionEnabled = false
+        view.coordinator = context.coordinator
+        return view
+    }
+
+    func updateUIView(_ uiView: AnchorView, context: Context) {
+        context.coordinator.drawerWidth = drawerWidth
+        context.coordinator.isDrawerOpen = isDrawerOpen
+        context.coordinator.isBlocked = isBlocked
+        context.coordinator.onDragChanged = onDragChanged
+        context.coordinator.onDragEnded = onDragEnded
+        uiView.coordinator = context.coordinator
+        uiView.attachIfNeeded()
+    }
+
+    final class AnchorView: UIView {
+        weak var coordinator: Coordinator?
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            attachIfNeeded()
+        }
+
+        override func willMove(toWindow newWindow: UIWindow?) {
+            super.willMove(toWindow: newWindow)
+            if newWindow == nil {
+                coordinator?.detach()
+            }
+        }
+
+        func attachIfNeeded() {
+            guard let window else { return }
+            coordinator?.attach(to: window)
+        }
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var drawerWidth: CGFloat
+        var isDrawerOpen: Bool
+        var isBlocked: Bool
+        var onDragChanged: (CGFloat) -> Void
+        var onDragEnded: (Bool) -> Void
+
+        private weak var attachedWindow: UIWindow?
+        private var panGesture: UIPanGestureRecognizer?
+        private var startProgress: CGFloat = 0
+
+        init(
+            drawerWidth: CGFloat,
+            isDrawerOpen: Bool,
+            isBlocked: Bool,
+            onDragChanged: @escaping (CGFloat) -> Void,
+            onDragEnded: @escaping (Bool) -> Void
+        ) {
+            self.drawerWidth = drawerWidth
+            self.isDrawerOpen = isDrawerOpen
+            self.isBlocked = isBlocked
+            self.onDragChanged = onDragChanged
+            self.onDragEnded = onDragEnded
+        }
+
+        func attach(to window: UIWindow) {
+            if attachedWindow === window, panGesture != nil { return }
+            detach()
+            let pan = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
+            pan.delegate = self
+            pan.maximumNumberOfTouches = 1
+            pan.cancelsTouchesInView = true
+            window.addGestureRecognizer(pan)
+            attachedWindow = window
+            panGesture = pan
+        }
+
+        func detach() {
+            if let pan = panGesture, let window = attachedWindow {
+                window.removeGestureRecognizer(pan)
+            }
+            panGesture = nil
+            attachedWindow = nil
+        }
+
+        func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+            guard let pan = gestureRecognizer as? UIPanGestureRecognizer,
+                  let window = attachedWindow else { return false }
+            if isBlocked { return false }
+
+            let velocity = pan.velocity(in: window)
+            guard abs(velocity.x) > abs(velocity.y) * 1.25, abs(velocity.x) > 10 else {
+                return false
+            }
+
+            if !isDrawerOpen {
+                // Only open on left-to-right swipe
+                guard velocity.x > 0 else { return false }
+                // Yield completely to NavigationStack swipe-back on pushed screens & any presented sheet
+                if Self.hasActivePushedScreen(from: window.rootViewController) {
+                    return false
+                }
+                // Yield to sliders and horizontal scroll views that can still scroll left
+                let loc = pan.location(in: window)
+                if let hit = window.hitTest(loc, with: nil) {
+                    if hit is UISlider { return false }
+                    if Self.isInsideScrollableHorizontalScrollView(hitView: hit, swipingRight: true) {
+                        return false
+                    }
+                }
+                return true
+            } else {
+                // When open, only close on right-to-left swipe
+                return velocity.x < 0
+            }
+        }
+
+        @objc private func handlePan(_ pan: UIPanGestureRecognizer) {
+            guard let window = attachedWindow, drawerWidth > 0 else { return }
+            switch pan.state {
+            case .began:
+                startProgress = isDrawerOpen ? 1 : 0
+            case .changed:
+                let delta = pan.translation(in: window).x / drawerWidth
+                let progress = min(1, max(0, startProgress + delta))
+                onDragChanged(progress)
+            case .ended, .cancelled, .failed:
+                let delta = pan.translation(in: window).x / drawerWidth
+                let progress = min(1, max(0, startProgress + delta))
+                let vx = pan.velocity(in: window).x
+                let shouldOpen: Bool
+                if vx > 420 {
+                    shouldOpen = true
+                } else if vx < -420 {
+                    shouldOpen = false
+                } else {
+                    shouldOpen = progress > 0.42
+                }
+                onDragEnded(shouldOpen)
+            default:
+                break
+            }
+        }
+
+        private static func hasActivePushedScreen(from vc: UIViewController?) -> Bool {
+            guard let vc else { return false }
+            if let presented = vc.presentedViewController, !presented.isBeingDismissed {
+                return true
+            }
+            if let nav = vc as? UINavigationController {
+                if nav.viewControllers.count > 1 { return true }
+                return hasActivePushedScreen(from: nav.topViewController)
+            }
+            if let tab = vc as? UITabBarController {
+                return hasActivePushedScreen(from: tab.selectedViewController)
+            }
+            for child in vc.children {
+                if hasActivePushedScreen(from: child) { return true }
+            }
+            return false
+        }
+
+        private static func isInsideScrollableHorizontalScrollView(hitView: UIView?, swipingRight: Bool) -> Bool {
+            var current = hitView
+            while let view = current {
+                if let scroll = view as? UIScrollView, scroll.isScrollEnabled {
+                    let maxOffsetX = scroll.contentSize.width - scroll.bounds.width + scroll.adjustedContentInset.right
+                    if maxOffsetX > 4, swipingRight {
+                        if scroll.contentOffset.x > -scroll.adjustedContentInset.left + 2 {
+                            return true
+                        }
+                    }
+                }
+                current = view.superview
+            }
+            return false
         }
     }
 }

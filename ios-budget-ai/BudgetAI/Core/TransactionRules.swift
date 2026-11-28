@@ -72,7 +72,7 @@ enum RuleConditionField: String, Codable, CaseIterable, Identifiable {
         case .location:      return "Location"
         case .amount:        return "Amount"
         case .direction:     return "Transaction Type"
-        case .monthDay:      return "Date (Day & Month)"
+        case .monthDay:      return "Date (Day / Month)"
         case .dayOfWeek:     return "Day of Week"
         case .reference:     return "Reference Code"
         case .note:          return "Note"
@@ -145,11 +145,14 @@ enum RuleTransactionTypeOption: String, CaseIterable, Identifiable {
 }
 
 enum RuleDateHelper {
+    /// Sentinel month value meaning "every month" (e.g. 28 of every month).
+    static let everyMonth = 0
     static let monthAbbreviations = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
     static let weekdayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
 
     static func maxDays(inMonth month: Int) -> Int {
         switch month {
+        case everyMonth: return 31
         case 2: return 29
         case 4, 6, 9, 11: return 30
         default: return 31
@@ -157,12 +160,20 @@ enum RuleDateHelper {
     }
 
     static func monthDayValue(month: Int, day: Int) -> String {
+        if month == everyMonth {
+            let d = min(31, max(1, day))
+            return String(format: "00-%02d", d)
+        }
         let m = min(12, max(1, month))
         let d = min(maxDays(inMonth: m), max(1, day))
         return String(format: "%02d-%02d", m, d)
     }
 
     static func monthDayDisplay(month: Int, day: Int) -> String {
+        if month == everyMonth {
+            let d = min(31, max(1, day))
+            return "\(d) of every month"
+        }
         let m = min(12, max(1, month))
         let d = min(maxDays(inMonth: m), max(1, day))
         return "\(d)-\(monthAbbreviations[m - 1])"
@@ -172,6 +183,10 @@ enum RuleDateHelper {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         let parts = trimmed.split(whereSeparator: { $0 == "-" || $0 == "/" })
         guard parts.count == 2 else { return nil }
+        if (parts[0] == "00" || parts[0] == "0" || parts[0] == "*"),
+           let d = Int(parts[1]), (1...31).contains(d) {
+            return (everyMonth, d)
+        }
         if let m = Int(parts[0]), let d = Int(parts[1]), (1...12).contains(m), (1...31).contains(d) {
             return (m, d)
         }
@@ -864,6 +879,9 @@ final class TransactionRuleStore {
         case .merchant:
             return 35
         case .monthDay:
+            if let parsed = RuleDateHelper.parseMonthDay(condition.value), parsed.month == RuleDateHelper.everyMonth {
+                return 30
+            }
             return 35
         case .accountID:
             return 30
@@ -1049,17 +1067,18 @@ final class TransactionRuleStore {
                     return true
                 }
             }
-            return !rawLower.isEmpty && rawLower.contains(cleanTarget)
+            return false
 
         case .accountDigits:
             let cleanTarget = targetLower.replacingOccurrences(of: "*", with: "")
+            guard !cleanTarget.isEmpty else { return false }
             if let digits = context.accountDigits?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !digits.isEmpty {
                 let cleanDigits = digits.replacingOccurrences(of: "*", with: "")
                 if cleanDigits == cleanTarget || cleanDigits.hasSuffix(cleanTarget) || cleanTarget.hasSuffix(cleanDigits) {
                     return true
                 }
             }
-            return !rawLower.isEmpty && !cleanTarget.isEmpty && rawLower.contains(cleanTarget)
+            return false
 
         case .bank:
             guard let bank = context.bank?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !bank.isEmpty else {
@@ -1126,6 +1145,9 @@ final class TransactionRuleStore {
         case .monthDay:
             guard let date = context.date, let expected = RuleDateHelper.parseMonthDay(target) else { return false }
             let cal = Calendar.current
+            if expected.month == RuleDateHelper.everyMonth {
+                return cal.component(.day, from: date) == expected.day
+            }
             return cal.component(.month, from: date) == expected.month
                 && cal.component(.day, from: date) == expected.day
 

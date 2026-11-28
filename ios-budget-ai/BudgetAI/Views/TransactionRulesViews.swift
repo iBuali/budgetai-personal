@@ -413,6 +413,7 @@ struct TransactionRuleBuilderSheet: View {
                                 if selectedDay > cap { selectedDay = cap }
                             }
                         )) {
+                            Text("Every Month").tag(RuleDateHelper.everyMonth)
                             ForEach(1...12, id: \.self) { month in
                                 Text(RuleDateHelper.monthAbbreviations[month - 1]).tag(month)
                             }
@@ -420,7 +421,11 @@ struct TransactionRuleBuilderSheet: View {
                         .pickerStyle(.menu)
                         .font(.caption)
                     }
-                    Text("Matches \(RuleDateHelper.monthDayDisplay(month: selectedMonth, day: selectedDay)) every year (ignores year).")
+                    Text(
+                        selectedMonth == RuleDateHelper.everyMonth
+                            ? "Matches day \(min(31, max(1, selectedDay))) of every month."
+                            : "Matches \(RuleDateHelper.monthDayDisplay(month: selectedMonth, day: selectedDay)) every year (ignores year)."
+                    )
                         .font(.caption2)
                         .foregroundStyle(Theme.secondaryInk)
                 }
@@ -505,7 +510,7 @@ struct TransactionRuleBuilderSheet: View {
         Section {
             // 1. Set Category (toggleable, not default)
             Toggle(isOn: $enableSetCategory) {
-                Label("Set Category", systemImage: "tag.fill")
+                actionToggleLabel("Set Category", symbol: "tag.fill")
             }
             if enableSetCategory {
                 Button {
@@ -513,6 +518,7 @@ struct TransactionRuleBuilderSheet: View {
                 } label: {
                     HStack(spacing: 10) {
                         Text("Category")
+                            .font(.subheadline.weight(.medium))
                             .foregroundStyle(Theme.ink)
                         Spacer()
                         HStack(spacing: 6) {
@@ -551,6 +557,7 @@ struct TransactionRuleBuilderSheet: View {
                             Text(acc.name).tag(UUID?.some(acc.id))
                         }
                     }
+                    .font(.subheadline.weight(.medium))
 
                     Picker("To Account", selection: $toAccountID) {
                         Text("Select Destination Account").tag(UUID?.none)
@@ -558,6 +565,7 @@ struct TransactionRuleBuilderSheet: View {
                             Text(acc.name).tag(UUID?.some(acc.id))
                         }
                     }
+                    .font(.subheadline.weight(.medium))
                 } else if selectedCategory == .transfers {
                     Picker("From / To Account", selection: $fromAccountID) {
                         Text("Keep Detected Account").tag(UUID?.none)
@@ -565,17 +573,13 @@ struct TransactionRuleBuilderSheet: View {
                             Text(acc.name).tag(UUID?.some(acc.id))
                         }
                     }
+                    .font(.subheadline.weight(.medium))
                 }
             }
 
             // 2. Override Account (Force-routes to designated account)
             Toggle(isOn: $enableOverrideAccount) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Label("Override Account", systemImage: "wallet.bifold.fill")
-                    Text("Force-routes transaction to a designated account")
-                        .font(.caption2)
-                        .foregroundStyle(Theme.secondaryInk)
-                }
+                actionToggleLabel("Override Account", symbol: "wallet.bifold.fill", subtitle: "Force-routes transaction to a designated account")
             }
             if enableOverrideAccount {
                 Picker("Designated Account", selection: $overrideAccountID) {
@@ -584,30 +588,22 @@ struct TransactionRuleBuilderSheet: View {
                         Text(acc.name).tag(UUID?.some(acc.id))
                     }
                 }
+                .font(.subheadline.weight(.medium))
             }
 
             // 3. Set Merchant Name (Renames or cleans up cryptic SMS text)
             Toggle(isOn: $enableSetMerchant) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Label("Set Merchant Name", systemImage: "storefront.fill")
-                    Text("Renames or cleans up cryptic SMS merchant text")
-                        .font(.caption2)
-                        .foregroundStyle(Theme.secondaryInk)
-                }
+                actionToggleLabel("Set Merchant Name", symbol: "storefront.fill", subtitle: "Renames or cleans up cryptic SMS merchant text")
             }
             if enableSetMerchant {
                 TextField("Clean Merchant Name", text: $actionMerchant)
+                    .font(.subheadline)
                     .textFieldStyle(.roundedBorder)
             }
 
             // 4. Set Location (Transaction Location Editor: Search + Interactive Movable Pin Map)
             Toggle(isOn: $enableSetLocation) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Label("Set Location", systemImage: "mappin.and.ellipse")
-                    Text("Search place or drop & move pin on interactive map")
-                        .font(.caption2)
-                        .foregroundStyle(Theme.secondaryInk)
-                }
+                actionToggleLabel("Set Location", symbol: "mappin.and.ellipse", subtitle: "Search place or drop & move pin on interactive map")
             }
             if enableSetLocation {
                 if !actionLocationName.isEmpty || actionLatitude != nil {
@@ -646,10 +642,11 @@ struct TransactionRuleBuilderSheet: View {
 
             // 6. Set Note (Always enabled, write inside even if empty originally)
             Toggle(isOn: $enableSetNote) {
-                Label("Set Note", systemImage: "note.text")
+                actionToggleLabel("Set Note", symbol: "note.text")
             }
             if enableSetNote {
                 TextField("Write Note", text: $actionNote, axis: .vertical)
+                    .font(.subheadline)
                     .textFieldStyle(.roundedBorder)
                     .lineLimit(2...4)
             }
@@ -657,7 +654,7 @@ struct TransactionRuleBuilderSheet: View {
             // 7. Link Savings Goal
             if !goals.isEmpty {
                 Toggle(isOn: $enableSetGoal) {
-                    Label("Link Savings Goal", systemImage: "target")
+                    actionToggleLabel("Link Savings Goal", symbol: "target")
                 }
                 if enableSetGoal {
                     Picker("Savings Goal", selection: $actionGoalID) {
@@ -666,6 +663,7 @@ struct TransactionRuleBuilderSheet: View {
                             Text(goal.name).tag(UUID?.some(goal.id))
                         }
                     }
+                    .font(.subheadline.weight(.medium))
                 }
             }
         } header: {
@@ -676,6 +674,25 @@ struct TransactionRuleBuilderSheet: View {
     }
 
     @ViewBuilder
+    private func actionToggleLabel(_ title: String, symbol: String, subtitle: String? = nil) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: symbol)
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(Theme.brand)
+                .frame(width: 24)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(Theme.ink)
+                if let subtitle {
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(Theme.secondaryInk)
+                }
+            }
+        }
+    }
+
     private var ruleInfoSection: some View {
         Section("Rule Info") {
             TextField("Rule Name (optional)", text: $ruleName)
@@ -1339,10 +1356,10 @@ struct TransactionDetailRulesSection: View {
         let winningID = resolution.winningRule?.id
         let conflictIDs = Set(resolution.conflictingRules.map(\.id))
         let matchedRules: [TransactionRule] = store.rules
-            .filter { store.matches(rule: $0, context: context, ignoreEnabledState: true) }
+            .filter { $0.isEnabled && store.matches(rule: $0, context: context, ignoreEnabledState: false) }
             .sorted {
-                let s0 = store.evaluateSpecificity(rule: $0, context: context, ignoreEnabledState: true)?.score ?? TransactionRuleStore.staticSpecificityScore(for: $0)
-                let s1 = store.evaluateSpecificity(rule: $1, context: context, ignoreEnabledState: true)?.score ?? TransactionRuleStore.staticSpecificityScore(for: $1)
+                let s0 = store.evaluateSpecificity(rule: $0, context: context, ignoreEnabledState: false)?.score ?? TransactionRuleStore.staticSpecificityScore(for: $0)
+                let s1 = store.evaluateSpecificity(rule: $1, context: context, ignoreEnabledState: false)?.score ?? TransactionRuleStore.staticSpecificityScore(for: $1)
                 return s0 > s1
             }
 

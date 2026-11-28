@@ -904,7 +904,8 @@ final class SavingsGoal {
     var isComplete: Bool { saved >= target && target > 0 }
 
     func contributedThisMonth(now: Date = .now) -> Double {
-        monthKey == DateKeys.month(now) ? monthContributed : 0
+        let cycleKey = DateKeys.month(Cycle.interval(containing: now).start)
+        return (monthKey == cycleKey || monthKey == DateKeys.month(now)) ? monthContributed : 0
     }
 
     func remainingCommitment(now: Date = .now) -> Double {

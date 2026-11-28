@@ -7,6 +7,8 @@ import SwiftData
 /// one-tap reversal inside `TransactionDetailView`. Renders nothing when the feature is disabled.
 struct SharedExpenseTransactionSection: View {
     let tx: MoneyTransaction
+    @Binding var showManualSheet: Bool
+    @Binding var showLinkSheet: Bool
 
     @Environment(\.modelContext) private var context
     @Environment(AppState.self) private var appState
@@ -18,8 +20,6 @@ struct SharedExpenseTransactionSection: View {
 
     @State private var showReverseConfirm = false
     @State private var reverseTargetID: UUID?
-    @State private var showManualSheet = false
-    @State private var showLinkSheet = false
     @State private var trustSenderOnConfirm = false
 
     var body: some View {
@@ -42,12 +42,6 @@ struct SharedExpenseTransactionSection: View {
                             && !SharedExpenseClassifier.isInternalTransfer(tx) {
                     manualReimbursementActionSection
                 }
-            }
-            .sheet(isPresented: $showManualSheet) {
-                ManualSharedExpenseSheet(expenseTx: tx)
-            }
-            .sheet(isPresented: $showLinkSheet) {
-                LinkReimbursementSheet(reimbursementTx: tx)
             }
         }
     }
@@ -213,6 +207,8 @@ struct SharedExpenseTransactionSection: View {
                             .background(Theme.cobalt.opacity(0.10), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                     }
                     .buttonStyle(.plain)
+
+                    reviewMonitorButton(waitingAmount: adj.outstandingReimbursementAmount)
                 }
 
                 Button(role: .destructive) {
@@ -342,11 +338,41 @@ struct SharedExpenseTransactionSection: View {
                         .background(Theme.cobalt.opacity(0.10), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                 }
                 .buttonStyle(.plain)
+
+                reviewMonitorButton(waitingAmount: nil)
             }
             .padding(.vertical, 4)
         } header: {
             Text("Shared Expense Intelligence")
         }
+    }
+
+    @ViewBuilder
+    private func reviewMonitorButton(waitingAmount: Double?) -> some View {
+        let isMonitored = adjustmentStore.isMonitoredForReview(tx.id)
+        Button {
+            adjustmentStore.setMonitoredForReview(tx.id, monitored: !isMonitored)
+            Ledger.notifyDataChanged()
+            appState.show(isMonitored ? "Removed from Review section" : "Added to Review to monitor reimbursement")
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: isMonitored ? "clock.badge.checkmark.fill" : "clock.badge.questionmark")
+                Text(
+                    isMonitored
+                        ? "In Review (Tap to Remove)"
+                        : (waitingAmount != nil ? "Keep in Review Until Received" : "Add to Review (Decide / Monitor Later)")
+                )
+                .font(.subheadline.weight(.medium))
+            }
+            .foregroundStyle(isMonitored ? Theme.warning : Theme.secondaryInk)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 10)
+            .background(
+                (isMonitored ? Theme.warning.opacity(0.14) : Theme.track.opacity(0.65)),
+                in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+            )
+        }
+        .buttonStyle(.plain)
     }
 
     private var manualReimbursementActionSection: some View {

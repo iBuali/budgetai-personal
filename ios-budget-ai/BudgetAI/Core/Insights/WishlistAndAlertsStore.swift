@@ -150,7 +150,8 @@ enum WishlistEvaluator {
         let sim = FinancialProjectionEngine.simulateBuyNow(
             input: BuyNowSimulationInput(amount: item.currentPrice, name: item.name, date: f.now, category: cat),
             finance: f,
-            currency: currency
+            currency: currency,
+            cachedProjection: projection
         )
 
         let suitability: WishlistSuitability

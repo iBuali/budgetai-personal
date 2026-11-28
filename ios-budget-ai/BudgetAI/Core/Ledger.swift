@@ -166,14 +166,14 @@ enum Ledger {
         }
         // Automatically update the linked savings goal when a transaction contributes to it.
         if let goalID = tx.goalID, let targetGoal = goal(goalID, context: context) {
-            let txMonthKey = DateKeys.month(tx.date)
-            let currentMonthKey = DateKeys.month(.now)
-            if targetGoal.monthKey != currentMonthKey {
-                targetGoal.monthKey = currentMonthKey
+            let currentCycle = Cycle.interval(containing: .now)
+            let currentCycleKey = DateKeys.month(currentCycle.start)
+            if targetGoal.monthKey != currentCycleKey {
+                targetGoal.monthKey = currentCycleKey
                 targetGoal.monthContributed = 0
             }
             targetGoal.saved = max(0, targetGoal.saved + tx.amount * sign)
-            if txMonthKey == currentMonthKey {
+            if currentCycle.contains(tx.date) || DateKeys.month(tx.date) == DateKeys.month(.now) {
                 targetGoal.monthContributed = max(0, targetGoal.monthContributed + tx.amount * sign)
             }
         }
@@ -620,14 +620,21 @@ enum Ledger {
 
         // Deduplication: if this cycle was already paid...
         if loan.isLoanInstallmentPaidForCurrentCycle(now: tx.date) {
-            if loan.lastLoanInstallmentWasAuto,
-               let autoTxID = loan.lastLoanInstallmentTxID,
-               autoTxID != tx.id {
-                // Replace the earlier automatic date-based installment with this real SMS/manual transaction
-                // so the installment is NEVER deducted twice!
-                let desc = FetchDescriptor<MoneyTransaction>(predicate: #Predicate { $0.id == autoTxID })
-                if let autoTx = try? context.fetch(desc).first {
-                    delete(autoTx, context: context)
+            if loan.lastLoanInstallmentWasAuto {
+                if let autoTxID = loan.lastLoanInstallmentTxID, autoTxID != tx.id {
+                    // Legacy auto transaction: delete it so the real SMS/manual transaction replaces it cleanly
+                    let desc = FetchDescriptor<MoneyTransaction>(predicate: #Predicate { $0.id == autoTxID })
+                    if let autoTx = try? context.fetch(desc).first {
+                        delete(autoTx, context: context)
+                    }
+                } else if loan.lastLoanInstallmentTxID == nil {
+                    // Silent auto-deduction already reduced loan & source account balances without a transaction;
+                    // restore that earlier auto-deduction so this real SMS/manual transaction never deducts twice.
+                    let prevAuto = loan.loanMonthlyInstallment > 0 ? loan.loanMonthlyInstallment : tx.amount
+                    loan.balance += prevAuto
+                    if let srcID = loan.loanAutoDeductAccountID, let src = account(srcID, context: context) {
+                        src.balance += src.kind.isLiability ? -prevAuto : prevAuto
+                    }
                 }
             } else {
                 // Already paid via SMS or manual payment in this cycle -> do not deduct a second time
@@ -676,24 +683,16 @@ enum Ledger {
             let payment = min(loan.balance, loan.loanMonthlyInstallment)
             guard payment > 0.0005 else { continue }
 
-            let tx = MoneyTransaction(
-                amount: payment,
-                isIncome: false,
-                merchant: "\(loan.name) Installment",
-                category: .bills,
-                date: now,
-                note: "Automatic monthly loan installment",
-                source: .bill,
-                accountID: loan.loanAutoDeductAccountID
-            )
-            // Pre-mark loan state before inserting so no re-entrant matching occurs
+            // Deduct from loan remaining balance and selected source account directly
+            // without creating a visible transaction entry in the Transactions list.
             loan.balance = max(0, loan.balance - payment)
+            if let srcID = loan.loanAutoDeductAccountID, let src = account(srcID, context: context) {
+                src.balance += src.kind.isLiability ? payment : -payment
+            }
             loan.lastLoanInstallmentPaidAt = now
-            loan.lastLoanInstallmentTxID = tx.id
+            loan.lastLoanInstallmentTxID = nil
             loan.lastLoanInstallmentWasAuto = true
             loan.advanceDueDateIfPaid(on: now, paymentAmount: payment)
-
-            add(tx, context: context, checkDuplicates: false)
             processed.append(loan)
         }
 
@@ -716,13 +715,56 @@ enum Ledger {
             }
             add(tx, context: context, checkDuplicates: false)
         } else {
-            let key = DateKeys.month(.now)
+            let key = DateKeys.month(Cycle.interval(containing: .now).start)
             if goal.monthKey != key {
                 goal.monthKey = key
                 goal.monthContributed = 0
             }
             goal.monthContributed += amount
             goal.saved += amount
+            try? context.save()
+            notifyDataChanged()
+        }
+    }
+
+    /// Reconciles every SavingsGoal's `saved` and `monthContributed` totals against approved
+    /// transactions linked via `goalID`, ensuring no linked transfer or transaction is ever missed
+    /// while preserving any manually entered initial saved balance.
+    static func reconcileSavingsGoals(context: ModelContext, now: Date = .now) {
+        let goals = (try? context.fetch(FetchDescriptor<SavingsGoal>())) ?? []
+        guard !goals.isEmpty else { return }
+        let txs = (try? context.fetch(FetchDescriptor<MoneyTransaction>())) ?? []
+        let currentCycle = Cycle.interval(containing: now)
+        let currentCycleKey = DateKeys.month(currentCycle.start)
+
+        var totalByGoal: [UUID: Double] = [:]
+        var cycleByGoal: [UUID: Double] = [:]
+        for tx in txs where !tx.isPending {
+            guard let gid = tx.goalID, tx.amount > 0 else { continue }
+            totalByGoal[gid, default: 0] += tx.amount
+            if currentCycle.contains(tx.date) {
+                cycleByGoal[gid, default: 0] += tx.amount
+            }
+        }
+
+        var changed = false
+        for g in goals {
+            let linkedTotal = totalByGoal[g.id] ?? 0
+            let linkedCycle = cycleByGoal[g.id] ?? 0
+            if linkedTotal > g.saved + 0.0005 {
+                g.saved = linkedTotal
+                changed = true
+            }
+            if g.monthKey != currentCycleKey {
+                g.monthKey = currentCycleKey
+                g.monthContributed = linkedCycle
+                changed = true
+            } else if linkedCycle > g.monthContributed + 0.0005 {
+                g.monthContributed = linkedCycle
+                changed = true
+            }
+        }
+        if changed {
             try? context.save()
             notifyDataChanged()
         }

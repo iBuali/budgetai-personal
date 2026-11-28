@@ -59,7 +59,11 @@ struct TxFilterState: Equatable, Hashable {
     func matches(_ tx: MoneyTransaction, interval activeInterval: DateInterval?, ignoringDates: Bool = false) -> Bool {
         switch kind {
         case .all: break
-        case .review: if !tx.isPending && !tx.isPossibleDuplicate && !tx.needsBillReview && !tx.hasRuleConflict { return false }
+        case .review:
+            if !tx.isPending && !tx.isPossibleDuplicate && !tx.needsBillReview && !tx.hasRuleConflict
+                && !SharedExpenseAdjustmentStore.shared.isMonitoredForReview(tx.id) {
+                return false
+            }
         case .income: if !tx.isOrdinaryIncome && !(!tx.isTransfer && tx.isIncome) { return false }
         case .expenses: if !tx.isSpending { return false }
         case .transfers: if !tx.isTransfer { return false }
@@ -107,6 +111,7 @@ struct TransactionsView: View {
         hasher.combine(query)
         hasher.combine(mode.rawValue)
         hasher.combine(cycleStartDay)
+        hasher.combine(SharedExpenseAdjustmentStore.shared.monitoredReviewTransactionIDs.count)
         return hasher.finalize()
     }
 
@@ -145,10 +150,11 @@ struct TransactionsView: View {
         var dayKeys: [Date] = []
 
         for tx in transactions {
+            let isMonitoredShared = SharedExpenseAdjustmentStore.shared.isMonitoredForReview(tx.id)
             if tx.isPending {
                 snap.pending.append(tx)
                 snap.needsReview.append(tx)
-            } else if tx.isPossibleDuplicate {
+            } else if tx.isPossibleDuplicate || isMonitoredShared {
                 snap.needsReview.append(tx)
             }
 
@@ -158,7 +164,7 @@ struct TransactionsView: View {
 
             let passesKindScope: Bool = {
                 switch filters.kind {
-                case .review: return tx.isPending || tx.isPossibleDuplicate || tx.needsBillReview || tx.hasRuleConflict
+                case .review: return tx.isPending || tx.isPossibleDuplicate || tx.needsBillReview || tx.hasRuleConflict || isMonitoredShared
                 case .all: return true
                 case .income, .expenses, .transfers: return !tx.isPending
                 }
@@ -246,22 +252,20 @@ struct TransactionsView: View {
                     } else {
                         let pendingFiltered = currentFiltered.filter(\.isPending)
                         let duplicateFiltered = currentFiltered.filter(\.isPossibleDuplicate)
+                        let monitoredSharedFiltered = currentFiltered.filter { SharedExpenseAdjustmentStore.shared.isMonitoredForReview($0.id) }
                         Section {
                             HStack {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text("\(currentFiltered.count) transaction\(currentFiltered.count == 1 ? "" : "s") to review")
                                         .font(.subheadline.weight(.medium))
                                         .foregroundStyle(Theme.ink)
-                                    if !pendingFiltered.isEmpty && !duplicateFiltered.isEmpty {
-                                        Text("\(pendingFiltered.count) pending approval · \(duplicateFiltered.count) duplicate\(duplicateFiltered.count == 1 ? "" : "s")")
-                                            .font(.caption)
-                                            .foregroundStyle(Theme.secondaryInk)
-                                    } else if !duplicateFiltered.isEmpty {
-                                        Text("\(duplicateFiltered.count) possible duplicate\(duplicateFiltered.count == 1 ? "" : "s") (same SMS reference)")
-                                            .font(.caption)
-                                            .foregroundStyle(Theme.secondaryInk)
-                                    } else {
-                                        Text("\(pendingFiltered.count) pending approval")
+                                    let parts: [String] = [
+                                        pendingFiltered.isEmpty ? nil : "\(pendingFiltered.count) pending approval",
+                                        duplicateFiltered.isEmpty ? nil : "\(duplicateFiltered.count) duplicate\(duplicateFiltered.count == 1 ? "" : "s")",
+                                        monitoredSharedFiltered.isEmpty ? nil : "\(monitoredSharedFiltered.count) shared reimbursement\(monitoredSharedFiltered.count == 1 ? "" : "s")"
+                                    ].compactMap { $0 }
+                                    if !parts.isEmpty {
+                                        Text(parts.joined(separator: " · "))
                                             .font(.caption)
                                             .foregroundStyle(Theme.secondaryInk)
                                     }
@@ -507,6 +511,13 @@ struct TransactionsView: View {
                     try? context.save()
                     Ledger.notifyDataChanged()
                 } label: { Label("Keep", systemImage: "checkmark") }
+                .tint(Theme.positive)
+            } else if SharedExpenseAdjustmentStore.shared.isMonitoredForReview(tx.id) {
+                Button {
+                    SharedExpenseAdjustmentStore.shared.setMonitoredForReview(tx.id, monitored: false)
+                    Ledger.notifyDataChanged()
+                    appState.show("Removed from Review")
+                } label: { Label("Done Reviewing", systemImage: "checkmark.circle") }
                 .tint(Theme.positive)
             }
         }
@@ -1007,6 +1018,8 @@ struct TransactionDetailView: View {
     @State private var showAddSenderBankAlert = false
     @State private var newSenderBankName = ""
     @State private var showCreateRuleSheet = false
+    @State private var showSharedManualSheet = false
+    @State private var showSharedLinkSheet = false
     @State private var cachedSMSLegHeaders: [String] = []
     @State private var cachedInferredLocation: TransactionLocationData? = nil
     @State private var isLatestForSourceAccount = false
@@ -1176,7 +1189,11 @@ struct TransactionDetailView: View {
             }
             editableFieldsSection
             locationSection
-            SharedExpenseTransactionSection(tx: tx)
+            SharedExpenseTransactionSection(
+                tx: tx,
+                showManualSheet: $showSharedManualSheet,
+                showLinkSheet: $showSharedLinkSheet
+            )
             rulesSection
             if isSMSTransaction || tx.smsBalance != nil {
                 smsDetailsSection
@@ -1275,6 +1292,12 @@ struct TransactionDetailView: View {
                 try? context.save()
                 appState.show("Location updated to \(loc.name)")
             }
+        }
+        .sheet(isPresented: $showSharedManualSheet) {
+            ManualSharedExpenseSheet(expenseTx: tx)
+        }
+        .sheet(isPresented: $showSharedLinkSheet) {
+            LinkReimbursementSheet(reimbursementTx: tx)
         }
     }
 

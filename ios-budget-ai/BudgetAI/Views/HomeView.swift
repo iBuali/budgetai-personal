@@ -685,11 +685,6 @@ private struct HomeSpendingCard: View {
                         selectedCategory: $selectedCategory
                     )
                 }
-
-                Divider()
-                    .padding(.vertical, 2)
-
-                categoryBreakdownList(breakdown: breakdown, totalSpent: totalSpent)
             }
         }
         .card()
@@ -820,7 +815,8 @@ private struct HomeFinancialItemCard: View {
 
     private var displayedAmount: Double {
         switch account.kind {
-        case .creditCard: account.cardUsedBalance
+        case .creditCard:
+            account.creditLimit > 0 ? max(0, account.creditLimit - account.cardUsedBalance) : account.cardUsedBalance
         case .loan: account.loanRemainingBalance
         default: account.balance
         }
@@ -912,7 +908,8 @@ private struct HomeFinancialItemsCustomizeSheet: View {
 
     private func displayedBalance(for account: Account) -> Double {
         switch account.kind {
-        case .creditCard: account.cardUsedBalance
+        case .creditCard:
+            account.creditLimit > 0 ? max(0, account.creditLimit - account.cardUsedBalance) : account.cardUsedBalance
         case .loan: account.loanRemainingBalance
         default: account.balance
         }

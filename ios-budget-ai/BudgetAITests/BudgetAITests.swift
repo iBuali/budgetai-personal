@@ -3754,11 +3754,13 @@ struct BudgetAITests {
         context.insert(loan1)
         try context.save()
 
-        // Scheduled auto-deduct fires once
+        // Scheduled auto-deduct fires once (updates balances & marks paid WITHOUT creating a transaction)
         let autoProcessed = Ledger.processScheduledLoanInstallments(context: context, now: now)
         #expect(autoProcessed.count == 1)
         #expect(loan1.isLoanInstallmentPaidForCurrentCycle(now: now) == true)
         #expect(loan1.lastLoanInstallmentWasAuto == true)
+        #expect(loan1.lastLoanInstallmentTxID == nil)
+        #expect(((try? context.fetch(FetchDescriptor<MoneyTransaction>())) ?? []).isEmpty)
         #expect(abs(bank1.balance - (1000.000 - 167.985)) < 0.001)
         #expect(abs(loan1.balance - (5000.000 - 167.985)) < 0.001)
 
@@ -4070,6 +4072,20 @@ struct BudgetAITests {
         #expect(TransactionRuleStore.shared.matches(rule: monthDayRule, context: RuleEvaluationContext(merchant: "Test", amount: 5, isIncome: false, date: sameMonthDayDiffYear)) == true)
         #expect(TransactionRuleStore.shared.matches(rule: monthDayRule, context: RuleEvaluationContext(merchant: "Test", amount: 5, isIncome: false, date: otherDate)) == false)
 
+        // Day of every month (e.g. 28 of every month) matches the 28th in any month/year
+        let dec28 = try #require(cal.date(from: DateComponents(year: 2026, month: 12, day: 28, hour: 9, minute: 0)))
+        let jan28 = try #require(cal.date(from: DateComponents(year: 2027, month: 1, day: 28, hour: 9, minute: 0)))
+        let everyMonthDayRule = TransactionRule(
+            name: "28 of every month",
+            conditions: [RuleCondition(field: .monthDay, value: RuleDateHelper.monthDayValue(month: RuleDateHelper.everyMonth, day: 28), displayValue: RuleDateHelper.monthDayDisplay(month: RuleDateHelper.everyMonth, day: 28))],
+            actions: RuleActions(setCategoryRaw: SpendCategory.bills.rawValue)
+        )
+        #expect(RuleDateHelper.monthDayDisplay(month: RuleDateHelper.everyMonth, day: 28) == "28 of every month")
+        #expect(TransactionRuleStore.shared.matches(rule: everyMonthDayRule, context: RuleEvaluationContext(merchant: "Test", amount: 5, isIncome: false, date: incomingDate)) == true)
+        #expect(TransactionRuleStore.shared.matches(rule: everyMonthDayRule, context: RuleEvaluationContext(merchant: "Test", amount: 5, isIncome: false, date: dec28)) == true)
+        #expect(TransactionRuleStore.shared.matches(rule: everyMonthDayRule, context: RuleEvaluationContext(merchant: "Test", amount: 5, isIncome: false, date: jan28)) == true)
+        #expect(TransactionRuleStore.shared.matches(rule: everyMonthDayRule, context: RuleEvaluationContext(merchant: "Test", amount: 5, isIncome: false, date: otherDate)) == false)
+
         let saturdayRule = TransactionRule(
             name: "Saturday Rule",
             conditions: [RuleCondition(field: .dayOfWeek, value: "7", displayValue: "Saturday")],
@@ -4077,5 +4093,18 @@ struct BudgetAITests {
         )
         #expect(TransactionRuleStore.shared.matches(rule: saturdayRule, context: RuleEvaluationContext(merchant: "Test", amount: 5, isIncome: false, date: incomingDate)) == true)
         #expect(TransactionRuleStore.shared.matches(rule: saturdayRule, context: RuleEvaluationContext(merchant: "Test", amount: 5, isIncome: false, date: otherDate)) == false)
+
+        // 6. Recipient IBAN / Account Digits rules MUST NOT falsely match random substrings inside loan/reference numbers (e.g. "0000" inside "Murabaha 400001458594")
+        let murabahaSMS = "Your finance payment of BHD169.745 towards Murabaha 400001458594 was successful. Avail. Bal. BHD808.569"
+        let murabahaTx = MoneyTransaction(amount: 169.745, isIncome: false, merchant: "Murabaha 400001458594 Was Successful", category: .other, date: incomingDate, source: .sms)
+        murabahaTx.rawText = murabahaSMS
+        let murabahaCtx = RuleEvaluationContext(from: murabahaTx)
+        #expect(TransactionRuleStore.shared.matches(rule: outgoingRecipRule, context: murabahaCtx) == false)
+        let cardDigitsRule = TransactionRule(
+            name: "Card 0000",
+            conditions: [RuleCondition(field: .accountDigits, value: "0000", displayValue: "**0000")],
+            actions: RuleActions(setCategoryRaw: SpendCategory.groceries.rawValue)
+        )
+        #expect(TransactionRuleStore.shared.matches(rule: cardDigitsRule, context: murabahaCtx) == false)
     }
 }

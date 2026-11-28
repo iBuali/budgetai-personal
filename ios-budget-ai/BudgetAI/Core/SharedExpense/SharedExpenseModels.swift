@@ -558,22 +558,39 @@ final class SharedExpenseAdjustmentStore {
     private let adjustmentsKey: String
     private let predictionsKey: String
     private let suggestionsKey: String
+    private let monitoredReviewKey: String
 
     private(set) var adjustments: [SharedExpenseAdjustment] = []
     private(set) var predictions: [SharedExpensePrediction] = []
     private(set) var suggestions: [SharedExpenseSuggestion] = []
+    private(set) var monitoredReviewTransactionIDs: Set<UUID> = []
 
     init(
         defaults: UserDefaults = .standard,
         adjustmentsKey: String = "falak.sharedExpense.adjustments.v1",
         predictionsKey: String = "falak.sharedExpense.predictions.v1",
-        suggestionsKey: String = "falak.sharedExpense.suggestions.v1"
+        suggestionsKey: String = "falak.sharedExpense.suggestions.v1",
+        monitoredReviewKey: String = "falak.sharedExpense.monitoredReview.v1"
     ) {
         self.defaults = defaults
         self.adjustmentsKey = adjustmentsKey
         self.predictionsKey = predictionsKey
         self.suggestionsKey = suggestionsKey
+        self.monitoredReviewKey = monitoredReviewKey
         loadAll()
+    }
+
+    func isMonitoredForReview(_ txID: UUID) -> Bool {
+        monitoredReviewTransactionIDs.contains(txID)
+    }
+
+    func setMonitoredForReview(_ txID: UUID, monitored: Bool) {
+        if monitored {
+            monitoredReviewTransactionIDs.insert(txID)
+        } else {
+            monitoredReviewTransactionIDs.remove(txID)
+        }
+        persistMonitoredReview()
     }
 
     var activeAdjustments: [SharedExpenseAdjustment] {
@@ -655,6 +672,11 @@ final class SharedExpenseAdjustmentStore {
         } else {
             adjustments.insert(adjustment, at: 0)
         }
+        if adjustment.isActive && adjustment.outstandingReimbursementAmount <= SharedExpenseFinancialValidator.epsilon {
+            if monitoredReviewTransactionIDs.remove(adjustment.originalTransactionID) != nil {
+                persistMonitoredReview()
+            }
+        }
         persistAdjustments()
     }
 
@@ -714,15 +736,21 @@ final class SharedExpenseAdjustmentStore {
         let oldSugCount = suggestions.count
         suggestions.removeAll { $0.expenseTransactionID == txID || $0.candidateReimbursementIDs.contains(txID) }
         if suggestions.count != oldSugCount { persistSuggestions() }
+
+        if monitoredReviewTransactionIDs.remove(txID) != nil {
+            persistMonitoredReview()
+        }
     }
 
     func clearAll() {
         adjustments = []
         predictions = []
         suggestions = []
+        monitoredReviewTransactionIDs = []
         defaults.removeObject(forKey: adjustmentsKey)
         defaults.removeObject(forKey: predictionsKey)
         defaults.removeObject(forKey: suggestionsKey)
+        defaults.removeObject(forKey: monitoredReviewKey)
     }
 
     func makeOverlay(isEnabled: Bool = AppSettings.sharedExpenseIntelligenceEnabled) -> SharedExpenseOverlay {
@@ -731,6 +759,11 @@ final class SharedExpenseAdjustmentStore {
     }
 
     private func loadAll() {
+        if let savedMonitored = defaults.stringArray(forKey: monitoredReviewKey) {
+            monitoredReviewTransactionIDs = Set(savedMonitored.compactMap(UUID.init(uuidString:)))
+        } else {
+            monitoredReviewTransactionIDs = []
+        }
         if let data = defaults.data(forKey: adjustmentsKey),
            let decoded = try? JSONDecoder().decode([SharedExpenseAdjustment].self, from: data) {
             adjustments = decoded
@@ -761,6 +794,10 @@ final class SharedExpenseAdjustmentStore {
         if let data = try? JSONEncoder().encode(suggestions) {
             defaults.set(data, forKey: suggestionsKey)
         }
+    }
+
+    private func persistMonitoredReview() {
+        defaults.set(monitoredReviewTransactionIDs.map(\.uuidString).sorted(), forKey: monitoredReviewKey)
     }
 }
 
